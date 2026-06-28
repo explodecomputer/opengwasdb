@@ -281,6 +281,14 @@ The Reference Completion Method MUST record:
 
 The initial intended method family is LD-eigenvector based imputation of Z and SE. The store format is not locked to one algorithm: different methods are valid if they record provenance, satisfy the `z + se` output contract, and pass validation.
 
+The initial Reference Completion implementation should use the existing `pleiodb` imputation work as prior art:
+
+- method source: `https://github.com/explodecomputer/pleiodb/blob/main/src/pleiodb/impute.py`;
+- benchmark and reference-file location notes: `https://github.com/explodecomputer/pleiodb/blob/main/scratch/imputation_benchmark.qmd`;
+- benchmarked LD panel root recorded there: `/local-scratch/projects/genotype-phenotype-map/data/ld_reference_panel_hg38/EUR`.
+
+That prior art uses LD block TSV files, `.unphased.vcor1.gz` LD matrices, optional precomputed `.ldeig.rds` eigenfactor files, and cached `.npz` extracts. These file types are implementation inputs to the Reference Completion Method and MUST be captured through LD Reference Panel and Reference Completion Method provenance when used.
+
 ## 15. Association Status encoding
 
 Reference-Completed Stores encode Association Status using statistic NaNs plus an imputed mask.
@@ -405,4 +413,3 @@ Validators MUST check at least:
 Readers MUST reject Store Releases with unsupported major format versions. Readers MAY support older minor versions when validation can establish compatibility.
 
 Future format versions may add fields, arrays, or indexes, but MUST preserve explicit manifest-based feature discovery.
-

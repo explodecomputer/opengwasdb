@@ -130,6 +130,9 @@ Use the following as implementation references, not as direct architecture templ
 - Dense top-hit index prototype using flat hit arrays plus offsets: `/Users/gh13047/repo/besdq/scripts/dense_11_build_sig_index.py`.
 - Dense Zarr vs TileDB and chunking benchmark material: `/Users/gh13047/repo/besdq/docs/zarr-vs-tiledb-benchmark.qmd`, `/Users/gh13047/repo/besdq/docs/chunk-benchmark.qmd`, and `/Users/gh13047/repo/besdq/docs/sig-index-benchmark.qmd`.
 - Existing tests for parser, allele flipping, significance filtering, stage build, and query behaviour: `/Users/gh13047/repo/besdq/tests/test_gwas_ssf_import.py`, `/Users/gh13047/repo/besdq/tests/test_gwas_ssf_fast_reader.py`, `/Users/gh13047/repo/besdq/tests/test_queries.py`, `/Users/gh13047/repo/besdq/tests/test_stage1.py`, and `/Users/gh13047/repo/besdq/tests/test_stage2.py`.
+- Existing test/source data: `/Users/gh13047/repo/besdq/data/ebi_input/` contains small GWAS-SSF-style inputs, tabix indexes, metadata YAML, and `traits.tsv`; `/Users/gh13047/repo/besdq/data/38714679/` contains Stage 1 intermediate TSV/YAML pairs; `/Users/gh13047/repo/besdq/data/ldref/` contains LD reference test material for later Reference Completion/Ragged work.
+- Existing Reference Completion method prior art: `https://github.com/explodecomputer/pleiodb/blob/main/src/pleiodb/impute.py` implements LD-based elastic-net imputation using LD eigenvectors.
+- Existing imputation benchmark and reference-file location notes: `https://github.com/explodecomputer/pleiodb/blob/main/scratch/imputation_benchmark.qmd` records the benchmarked LD panel root `/local-scratch/projects/genotype-phenotype-map/data/ld_reference_panel_hg38/EUR` and the expected LD block files.
 
 Important differences from `besdq`:
 
@@ -158,8 +161,10 @@ Test modules:
 Prior art for tests:
 
 - `besdq` parser and allele-flip tests demonstrate useful fixture style.
+- `besdq/data/ebi_input/` and `besdq/data/38714679/` should be used to design realistic fixtures and integration tests.
 - `besdq` significance-filter tests are useful later for Ragged Cis-and-Signals but should not drive v0.1 Dense Observed-Only scope.
 - OpenGWASDB should use pytest-style tests consistently rather than mixing unittest patterns unless there is a strong reason.
+- OpenGWASDB CI tests should not depend on a sibling `besdq` checkout. Any required tiny fixtures should be copied, reduced, or generated inside the OpenGWASDB repository with provenance comments pointing back to the `besdq` source data.
 
 ## Out of Scope
 
@@ -175,6 +180,7 @@ Prior art for tests:
 - Full OpenGWAS API service.
 - Legacy BESD file compatibility.
 - Migration of existing `besdq` SQLite stores.
+- Reference Completion implementation, even though the PRD records the `pleiodb` method and LD eigenfactor file prior art for future work.
 - Performance optimisation beyond basic chunk/compression choices needed for a usable first slice.
 
 ## Further Notes

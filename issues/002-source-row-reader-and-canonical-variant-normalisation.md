@@ -6,6 +6,8 @@
 
 Implement the first source-row model and canonical variant normalisation path. The slice should read tiny fixture summary-stat rows, construct canonical ALIDs, orient signed statistics to canonical A1, and expose normalised records for builders. Reference the `besdq` GWAS-SSF reader and fast reader as prior art, but keep OpenGWASDB terminology and interfaces.
 
+Use `/Users/gh13047/repo/besdq/data/ebi_input/` as realistic source-data prior art when designing fixtures, but keep OpenGWASDB tests self-contained by copying, reducing, or generating tiny fixture files inside this repository.
+
 ## Acceptance criteria
 
 - [ ] A tiny fixture source file can be streamed into normalised association records.
@@ -14,6 +16,7 @@ Implement the first source-row model and canonical variant normalisation path. T
 - [ ] SE remains non-negative after normalisation.
 - [ ] Invalid or ambiguous rows are rejected or skipped with test-covered behaviour.
 - [ ] Tests cover no-flip, flip, missing rsid, invalid rows, and canonical ALID output.
+- [ ] Fixture provenance documents whether rows were generated or reduced from `besdq/data/ebi_input/`.
 
 ## Blocked by
 
@@ -28,4 +31,3 @@ None - can start immediately.
 - User story 38
 - User story 39
 - User story 40
-
