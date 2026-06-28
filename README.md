@@ -18,6 +18,7 @@ The first implementation slice is intentionally narrow: **Dense Observed-Only** 
 This repository is newly scaffolded. The design baseline lives in:
 
 - [CONTEXT.md](./CONTEXT.md)
+- [docs/spec/store-format.md](./docs/spec/store-format.md)
 - [docs/adr/](./docs/adr/)
 
 ## Development
@@ -26,4 +27,3 @@ This repository is newly scaffolded. The design baseline lives in:
 pip install -e ".[dev]"
 pytest
 ```
-
