@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from opengwasdb.stats import beta_from_z_se, p_value_from_z
 
@@ -33,7 +35,7 @@ class AssociationResult:
     @classmethod
     def from_rows(
         cls,
-        variant: sqlite3.Row,
+        variant: Mapping[str, Any],
         analysis: sqlite3.Row,
         z: float,
         se: float,

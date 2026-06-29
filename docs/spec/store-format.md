@@ -19,9 +19,18 @@ A Store Release is a self-contained directory.
 manifest.json
 index.sqlite
 data.zarr/
+variants.tsv.gz
+variants.tsv.gz.tbi
+variant_offsets.npy
 ```
 
-`manifest.json` identifies the release and declares how to interpret it. `index.sqlite` stores relational metadata and lookup indexes. `data.zarr/` stores compressed numerical association arrays and layout-specific numerical indexes.
+`manifest.json` identifies the release and declares how to interpret it.
+`index.sqlite` stores compact relational metadata such as analyses, key/value
+metadata, and small alias maps. `data.zarr/` stores compressed numerical
+association arrays and layout-specific numerical indexes. Dense Observed-Only
+releases store their high-cardinality variant axis in `variants.tsv.gz`, indexed
+by `variants.tsv.gz.tbi`, with `variant_offsets.npy` mapping Store-local Variant
+Indices to BGZF row offsets.
 
 Build and query commands operate on an explicit Store Release path. Directory naming, multi-store catalogues, default release selection, and remote API deployment are outside the store-format contract.
 
@@ -88,6 +97,33 @@ reference_assembly + ALID
 `rsid` is an alias, not primary identity.
 
 Every Store Release assigns compact Store-local Variant Indices. Variant Indices MUST NOT be assumed stable across releases or stores.
+
+Dense Observed-Only releases use a tabix-backed Store Variant Table:
+
+```text
+variants.tsv.gz
+variants.tsv.gz.tbi
+variant_offsets.npy
+```
+
+The `variants.tsv.gz` table MUST contain one row per Store-local Variant Index,
+sorted by chromosome, position, effect allele, other allele, and variant index.
+The v0.1 dense column contract is:
+
+```text
+chromosome
+position
+variant_index
+effect_allele
+other_allele
+alid
+rsid
+```
+
+`variants.tsv.gz.tbi` MUST index chromosome and position for genomic range and
+single-position lookup. `variant_offsets.npy` MUST contain one fixed-width
+integer offset per variant row so row-index materialisation does not require a
+large SQL variant table.
 
 Long alleles MAY use deterministic hashed ALIDs as compact identifiers, but the complete normalised alleles MUST be retained once per variant so exact export and validation do not depend on an irreversible hash.
 

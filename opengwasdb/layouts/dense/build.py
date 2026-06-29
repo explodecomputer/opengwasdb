@@ -22,7 +22,15 @@ from opengwasdb.layouts.dense.constants import (
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
-from opengwasdb.variants import CanonicalVariant, chromosome_sort_key
+from opengwasdb.variants import (
+    VARIANT_AXIS_FORMAT,
+    VARIANT_OFFSETS_FILENAME,
+    VARIANT_TABIX_FILENAME,
+    VARIANT_TABLE_FILENAME,
+    CanonicalVariant,
+    chromosome_sort_key,
+    write_variant_axis,
+)
 
 
 @dataclass(frozen=True)
@@ -63,37 +71,48 @@ def build_dense_observed_store(
     if out.exists():
         if not overwrite:
             raise FileExistsError(f"output path already exists: {out}")
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    work = out.with_name(f".{out.name}.tmp")
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
 
-    variants = _collect_variants(records)
-    analyses = _collect_analyses(records)
-    variant_index = {variant.alid: i for i, variant in enumerate(variants)}
-    analysis_index = {analysis.analysis_id: i for i, analysis in enumerate(analyses)}
+    try:
+        variants = _collect_variants(records)
+        analyses = _collect_analyses(records)
+        variant_index = {variant.alid: i for i, variant in enumerate(variants)}
+        analysis_index = {analysis.analysis_id: i for i, analysis in enumerate(analyses)}
 
-    z = np.full((len(variants), len(analyses)), np.nan, dtype=dtype)
-    se = np.full((len(variants), len(analyses)), np.nan, dtype=dtype)
+        z = np.full((len(variants), len(analyses)), np.nan, dtype=dtype)
+        se = np.full((len(variants), len(analyses)), np.nan, dtype=dtype)
 
-    seen_cells: set[tuple[int, int]] = set()
-    for record in records:
-        row = variant_index[record.variant.alid]
-        col = analysis_index[record.analysis_id]
-        cell = (row, col)
-        if cell in seen_cells:
-            raise ValueError(
-                f"duplicate association for variant {record.variant.alid} "
-                f"and analysis {record.analysis_id}"
-            )
-        seen_cells.add(cell)
-        z[row, col] = record.z
-        se[row, col] = record.se
+        seen_cells: set[tuple[int, int]] = set()
+        for record in records:
+            row = variant_index[record.variant.alid]
+            col = analysis_index[record.analysis_id]
+            cell = (row, col)
+            if cell in seen_cells:
+                raise ValueError(
+                    f"duplicate association for variant {record.variant.alid} "
+                    f"and analysis {record.analysis_id}"
+                )
+            seen_cells.add(cell)
+            z[row, col] = record.z
+            se[row, col] = record.se
 
-    _write_manifest(out, store_id, release_id, reference_assembly, records, chunk_shape, dtype)
-    _write_index(out, variants, analyses, records, chunk_shape, dtype)
-    _write_zarr(out, z, se, chunk_shape, dtype)
-    build_top_hit_indexes(out)
-
-    return DenseBuildResult(output_path=out, n_variants=len(variants), n_analyses=len(analyses))
+        rsid_by_alid = _first_rsids_by_alid(records)
+        _write_manifest(work, store_id, release_id, reference_assembly, records, chunk_shape, dtype)
+        write_variant_axis(work, variants, rsid_by_alid)
+        _write_index(work, variants, analyses, records, chunk_shape, dtype)
+        _write_zarr(work, z, se, chunk_shape, dtype)
+        build_top_hit_indexes(work)
+        if out.exists():
+            shutil.rmtree(out)
+        work.rename(out)
+        return DenseBuildResult(output_path=out, n_variants=len(variants), n_analyses=len(analyses))
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
 
 
 def _collect_variants(records: list[NormalisedAssociation]) -> list[CanonicalVariant]:
@@ -155,6 +174,12 @@ def _write_manifest(
                 "chunk_shape": list(chunk_shape),
                 "compressor": DEFAULT_COMPRESSOR,
                 "top_hit_thresholds": [5e-8, 5e-6, 5e-4],
+                "variant_axis": {
+                    "format": VARIANT_AXIS_FORMAT,
+                    "table": VARIANT_TABLE_FILENAME,
+                    "tabix_index": VARIANT_TABIX_FILENAME,
+                    "row_offsets": VARIANT_OFFSETS_FILENAME,
+                },
             },
         },
     )
@@ -174,7 +199,7 @@ def _write_index(
 ) -> None:
     with connect(output_path / "index.sqlite") as connection:
         initialise_schema(connection)
-        set_metadata(connection, "schema_version", 1)
+        set_metadata(connection, "schema_version", 2)
         set_metadata(connection, "n_variants", len(variants))
         set_metadata(connection, "n_analyses", len(analyses))
         set_metadata(
@@ -184,39 +209,22 @@ def _write_index(
                 "dtype": dtype,
                 "chunk_shape": list(chunk_shape),
                 "compressor": DEFAULT_COMPRESSOR,
+                "variant_axis": {
+                    "format": VARIANT_AXIS_FORMAT,
+                    "table": VARIANT_TABLE_FILENAME,
+                    "tabix_index": VARIANT_TABIX_FILENAME,
+                    "row_offsets": VARIANT_OFFSETS_FILENAME,
+                },
             },
         )
-        rsid_by_alid = _first_rsids_by_alid(records)
-        connection.executemany(
-            """
-            INSERT INTO variants(
-                variant_index, alid, chromosome, position, effect_allele, other_allele, rsid
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    i,
-                    variant.alid,
-                    variant.chromosome,
-                    variant.position,
-                    variant.effect_allele,
-                    variant.other_allele,
-                    rsid_by_alid.get(variant.alid),
-                )
-                for i, variant in enumerate(variants)
-            ],
-        )
-        aliases: dict[str, int] = {}
-        for i, variant in enumerate(variants):
-            aliases[variant.alid] = i
         variant_indices = {variant.alid: i for i, variant in enumerate(variants)}
+        aliases: set[tuple[str, int]] = set()
         for record in records:
             if record.rsid:
-                aliases.setdefault(record.rsid, variant_indices[record.variant.alid])
+                aliases.add((record.rsid, variant_indices[record.variant.alid]))
         connection.executemany(
             "INSERT OR IGNORE INTO variant_aliases(alias, variant_index) VALUES (?, ?)",
-            sorted(aliases.items()),
+            sorted(aliases),
         )
         connection.executemany(
             """

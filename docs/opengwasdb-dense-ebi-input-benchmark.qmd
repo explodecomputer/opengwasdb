@@ -13,8 +13,9 @@ format:
 ## Summary
 
 This benchmark uses `besdq/data/ebi_input`, which contains three full harmonised
-GWAS-SSF files. This is a better local Dense-mode test than the previous
-`38714679` sparse-mode fixture.
+GWAS-SSF files. This is the active local Dense-mode vertical-slice benchmark.
+The older `38714679` fixture is sparse and is no longer used or compared for
+Dense-mode evaluation.
 
 The query workload mirrors the `besdq` dense benchmark: regional, PheWAS,
 top-hits, full-study bulk extraction, and random variant × analysis lookup.
@@ -29,7 +30,7 @@ top-hits, full-study bulk extraction, and random variant × analysis lookup.
 | Dense cells | 23,056,809 |
 | Finite observed cells | 23,056,809 |
 | Observed cell fraction | 100.00% |
-| Build time | 275.383 seconds |
+| Build time | 284.642 seconds |
 
 ## Storage footprint
 
@@ -37,7 +38,19 @@ top-hits, full-study bulk extraction, and random variant × analysis lookup.
 |---|---:|---:|
 | Raw source TSV.gz | 1001.48 MB | 1.00× |
 | Raw source TSV.gz + metadata/TBI | 1006.00 MB | 1.00× raw |
-| OpenGWASDB dense store | 993.92 MB | 0.99× raw |
+| OpenGWASDB dense store | 810.50 MB | 0.81× raw |
+
+## Store component footprint
+
+| Component | Size |
+|---|---:|
+| manifest.json | 0.00 MB |
+| index.sqlite | 368.35 MB |
+| variants.tsv.gz | 108.81 MB |
+| variants.tsv.gz.tbi | 1.48 MB |
+| variant_offsets.npy | 61.48 MB |
+| data.zarr | 270.37 MB |
+| data.zarr/top_hits | 0.10 MB |
 
 ## Query selection
 
@@ -58,20 +71,20 @@ objects.
 
 | Query | Median ms | p95 ms | Result rows/values |
 |---|---:|---:|---:|
-| regional | 69.290 | 70.021 | 26,613 |
-| phewas | 0.784 | 1.291 | 3 |
-| tophits | 1.072 | 1.202 | 177 |
-| bulk_arrays | 5045.381 | 5135.246 | 7,685,603 |
-| random_lookup | 50.244 | 51.946 | 300 |
+| regional | 74.581 | 75.499 | 26,613 |
+| phewas | 0.788 | 0.917 | 3 |
+| tophits | 10.665 | 10.955 | 177 |
+| bulk_arrays | 5166.538 | 5800.412 | 7,685,603 |
+| random_lookup | 55.497 | 57.329 | 300 |
 
 ## Interpretation
 
 - The full GWAS-SSF inputs are almost perfectly dense across the three analyses,
   so this is the right local shape for Dense mode.
-- Storage is larger than gzipped raw source for only three analyses because
-  SQLite variant metadata/index overhead dominates at this small analysis count.
-  Dense should become more favourable as analysis count grows over the same
-  variant axis.
+- The sparse `38714679` fixture is intentionally excluded from Dense-mode
+  benchmark comparisons because it represents a different storage shape.
+- Component sizes identify whether footprint is dominated by dense arrays,
+  compact metadata, the tabix variant table, row offsets, or top-hit indexes.
 - Full-analysis extraction should use array/streaming output. Returning millions
   of Python dataclass rows is not the right API shape for that path.
 

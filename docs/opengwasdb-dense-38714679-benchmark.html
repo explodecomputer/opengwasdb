@@ -8,7 +8,7 @@
 
 <meta name="dcterms.date" content="2026-06-29">
 
-<title>OpenGWASDB Dense Observed-Only Benchmark</title>
+<title>Archived Sparse Fixture Smoke Test</title>
 <style>
 
 code{white-space: pre-wrap;}
@@ -2187,8 +2187,8 @@ vertical-align: -.125em;
 
 <header id="title-block-header" class="quarto-title-block default">
 <div class="quarto-title">
-<h1 class="title">OpenGWASDB Dense Observed-Only Benchmark</h1>
-<p class="subtitle lead">Local 38714679 fixture · 60 analyses</p>
+<h1 class="title">Archived Sparse Fixture Smoke Test</h1>
+<p class="subtitle lead">Local 38714679 fixture · not a Dense vertical-slice benchmark</p>
 </div>
 
 
@@ -2213,8 +2213,8 @@ vertical-align: -.125em;
 
 <section id="summary" class="level2">
 <h2 class="anchored" data-anchor-id="summary">Summary</h2>
-<p>This benchmark uses the local <code>besdq/data/38714679/38714679</code> fixture because the UKB chr1 VCF directory used by the original <code>besdq</code> dense benchmark is not present in this checkout.</p>
-<p>The workload mirrors the <code>besdq</code> dense query benchmark:</p>
+<p>This document is retained only as an archived smoke-test record for the local <code>besdq/data/38714679/38714679</code> fixture. The dataset is sparse and is not used or compared for Dense-mode vertical-slice evaluation.</p>
+<p>The historical workload was:</p>
 <ol type="1">
 <li>regional query;</li>
 <li>PheWAS-style single variant across analyses;</li>
@@ -2297,7 +2297,7 @@ vertical-align: -.125em;
 </tr>
 </tbody>
 </table>
-<p>For this sparse molecular-style fixture, the dense store is expected to be larger than the raw gzipped inputs because most dense cells are missing. This is not the target shape for Dense mode; it is a local performance smoke test using available data.</p>
+<p>For this sparse molecular-style fixture, the dense store was expected to be larger than the raw gzipped inputs because most dense cells are missing. This is not the target shape for Dense mode. The active Dense-mode benchmark now uses the full GWAS-SSF files in <code>besdq/data/ebi_input</code>.</p>
 </section>
 <section id="query-selection" class="level2">
 <h2 class="anchored" data-anchor-id="query-selection">Query selection</h2>
@@ -2381,9 +2381,10 @@ vertical-align: -.125em;
 <section id="interpretation" class="level2">
 <h2 class="anchored" data-anchor-id="interpretation">Interpretation</h2>
 <ul>
+<li>This fixture should not be used as evidence for Dense-mode storage footprint.</li>
 <li>Batched query paths are fast on this small local fixture: PheWAS is sub-ms, random lookup and top hits are tens of milliseconds, and the largest regional query is dominated by materialising tens of thousands of Python result rows.</li>
 <li>Dense storage is a bad footprint match for this particular molecular-style fixture because the observed cell fraction is low. That reinforces the current design split: Dense for many analyses over a shared variant axis; Ragged/Sparse for cis-and-signals molecular datasets.</li>
-<li>The benchmark still validates the v0.1 implementation path: build, validate, top-hit index, layout-independent queries, and rendered documentation.</li>
+<li>The active Dense-mode benchmark and comparison target is <code>docs/opengwasdb-dense-ebi-input-benchmark.qmd</code>.</li>
 </ul>
 </section>
 <section id="artifacts" class="level2">

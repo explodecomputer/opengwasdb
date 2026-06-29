@@ -16,6 +16,12 @@ from opengwasdb.layouts.dense.top_hits import threshold_key
 from opengwasdb.model.enums import StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
+from opengwasdb.variants import (
+    VariantAxis,
+    variant_offsets_path,
+    variant_tabix_path,
+    variant_table_path,
+)
 
 
 @dataclass(frozen=True)
@@ -40,17 +46,30 @@ def validate_store(path: str | Path) -> ValidationResult:
         return ValidationResult(errors=errors)
     index_path = store_path / "index.sqlite"
     data_path = store_path / "data.zarr"
+    variants_path = variant_table_path(store_path)
+    tabix_path = variant_tabix_path(store_path)
+    offsets_path = variant_offsets_path(store_path)
     if not index_path.exists():
         errors.append("missing index.sqlite")
     if not data_path.exists():
         errors.append("missing data.zarr")
+    if not variants_path.exists():
+        errors.append("missing variants.tsv.gz")
+    if not tabix_path.exists():
+        errors.append("missing variants.tsv.gz.tbi")
+    if not offsets_path.exists():
+        errors.append("missing variant_offsets.npy")
     if errors:
         return ValidationResult(errors=errors)
 
     try:
         with connect(index_path) as connection:
-            _validate_sqlite(connection, errors)
-            n_variants = count_rows(connection, "variants")
+            variant_axis = VariantAxis(store_path, connection)
+            try:
+                n_variants = _validate_variant_axis(variant_axis, errors)
+                _validate_sqlite(connection, n_variants, errors)
+            finally:
+                variant_axis.close()
             n_analyses = count_rows(connection, "analyses")
             root = zarr.open_group(str(data_path), mode="r")
             _validate_dense_arrays(root, n_variants, n_analyses, errors)
@@ -75,7 +94,11 @@ def _load_manifest(store_path: Path, errors: list[str]) -> StoreManifest | None:
     return None
 
 
-def _validate_sqlite(connection: sqlite3.Connection, errors: list[str]) -> None:
+def _validate_sqlite(
+    connection: sqlite3.Connection,
+    n_variants: int,
+    errors: list[str],
+) -> None:
     duplicates = connection.execute(
         """
         SELECT alid, COUNT(*) AS n
@@ -86,6 +109,11 @@ def _validate_sqlite(connection: sqlite3.Connection, errors: list[str]) -> None:
     ).fetchall()
     if duplicates:
         errors.append("duplicate canonical variants in variants table")
+    alias_rows = connection.execute("SELECT alias, variant_index FROM variant_aliases").fetchall()
+    for row in alias_rows:
+        variant_index = int(row["variant_index"])
+        if variant_index < 0 or variant_index >= n_variants:
+            errors.append(f"alias {row['alias']!r} points to missing variant {variant_index}")
     rows = connection.execute("SELECT analysis_id, stored_effect_scale FROM analyses").fetchall()
     for row in rows:
         try:
@@ -95,6 +123,52 @@ def _validate_sqlite(connection: sqlite3.Connection, errors: list[str]) -> None:
                 f"analysis {row['analysis_id']} has invalid stored_effect_scale "
                 f"{row['stored_effect_scale']!r}"
             )
+
+
+def _validate_variant_axis(variant_axis: VariantAxis, errors: list[str]) -> int:
+    records = variant_axis.all()
+    if variant_axis.n_variants != len(records):
+        errors.append(
+            f"variant_offsets.npy has {variant_axis.n_variants} rows but "
+            f"variants.tsv.gz has {len(records)} rows"
+        )
+    seen_alids: set[str] = set()
+    for expected_index, record in enumerate(records):
+        if record.variant_index != expected_index:
+            errors.append(
+                f"variant table row {expected_index} has variant_index {record.variant_index}"
+            )
+            break
+        if record.alid in seen_alids:
+            errors.append("duplicate canonical variants in variant table")
+            break
+        seen_alids.add(record.alid)
+    for expected_index in _representative_variant_indices(len(records)):
+        record = records[expected_index]
+        try:
+            offset_record = variant_axis.by_index(expected_index)
+        except ValueError as exc:
+            errors.append(str(exc))
+            break
+        if offset_record != record:
+            errors.append(f"variant offset for row {expected_index} points to a different row")
+            break
+        fetched = variant_axis.range(record.chromosome, record.position, record.position)
+        if record not in fetched:
+            errors.append(f"tabix index cannot fetch variant {record.alid}")
+            break
+    return len(records)
+
+
+def _representative_variant_indices(n_variants: int) -> list[int]:
+    if n_variants <= 0:
+        return []
+    if n_variants <= 1000:
+        return list(range(n_variants))
+    anchors = {0, n_variants // 2, n_variants - 1}
+    step = max(1, n_variants // 997)
+    anchors.update(range(0, n_variants, step))
+    return sorted(index for index in anchors if 0 <= index < n_variants)
 
 
 def _validate_dense_arrays(

@@ -5,16 +5,16 @@ from __future__ import annotations
 import math
 import sqlite3
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import zarr
 
-from opengwasdb.index import analysis_by_id, connect, variant_by_identifier
+from opengwasdb.index import analysis_by_id, connect
 from opengwasdb.layouts.dense.top_hits import threshold_key
 from opengwasdb.model.enums import PrimaryStorageLayout
 from opengwasdb.query.results import AssociationResult
 from opengwasdb.store.open import OpenGWASDBStore, open_store
+from opengwasdb.variants import VariantAxis, VariantRecord
 
 
 class StoreQuery:
@@ -26,24 +26,19 @@ class StoreQuery:
             raise NotImplementedError("only dense layout is implemented in v0.1")
         self._connection = connect(store.index_path)
         self._root = zarr.open_group(str(store.data_path), mode="r")
+        self._variant_axis = VariantAxis(store.path, self._connection)
 
     def close(self) -> None:
+        self._variant_axis.close()
         self._connection.close()
 
     def variant(self, identifier: str) -> list[AssociationResult]:
         """Return all finite associations for a canonical ALID or alias."""
 
-        variant = variant_by_identifier(self._connection, identifier)
+        variant = self._variant_axis.by_identifier(identifier)
         if variant is None:
             return []
-        z_row = self._root["z"][int(variant["variant_index"]), :]
-        se_row = self._root["se"][int(variant["variant_index"]), :]
-        analyses = self._analyses_by_index()
-        return [
-            AssociationResult.from_rows(variant, analyses[col], float(z), float(se))
-            for col, (z, se) in enumerate(zip(z_row, se_row, strict=True))
-            if math.isfinite(float(z)) and math.isfinite(float(se))
-        ]
+        return self._results_for_variant(variant)
 
     def range(
         self,
@@ -55,25 +50,17 @@ class StoreQuery:
     ) -> list[AssociationResult]:
         """Return finite associations in a genomic range."""
 
-        variants = self._connection.execute(
-            """
-            SELECT * FROM variants
-            WHERE chromosome = ? AND position BETWEEN ? AND ?
-            ORDER BY position, variant_index
-            """,
-            (str(chromosome), int(start), int(end)),
-        ).fetchall()
+        variants = self._variant_axis.range(chromosome, start, end)
         if analysis_id is None:
-            return self._results_for_variants(cast(list[sqlite3.Row], variants))
+            return self._results_for_variants(variants)
         analysis = analysis_by_id(self._connection, analysis_id)
         if analysis is None:
             return []
         col = int(analysis["analysis_index"])
         results: list[AssociationResult] = []
         for variant in variants:
-            row = int(variant["variant_index"])
-            z = float(self._root["z"][row, col])
-            se = float(self._root["se"][row, col])
+            z = float(self._root["z"][variant.variant_index, col])
+            se = float(self._root["se"][variant.variant_index, col])
             if math.isfinite(z) and math.isfinite(se):
                 results.append(AssociationResult.from_rows(variant, analysis, z, se))
         return results
@@ -87,11 +74,21 @@ class StoreQuery:
         col = int(analysis["analysis_index"])
         z_col = self._root["z"][:, col]
         se_col = self._root["se"][:, col]
-        variants = self._variants_by_index()
-        return [
-            AssociationResult.from_rows(variants[row], analysis, float(z), float(se))
+        finite_rows = [
+            row
             for row, (z, se) in enumerate(zip(z_col, se_col, strict=True))
             if math.isfinite(float(z)) and math.isfinite(float(se))
+        ]
+        variants = self._variant_axis.by_indices(finite_rows)
+        return [
+            AssociationResult.from_rows(
+                variants[row],
+                analysis,
+                float(z_col[row]),
+                float(se_col[row]),
+            )
+            for row in finite_rows
+            if row in variants
         ]
 
     def analysis_arrays(self, analysis_id: str) -> dict[str, object] | None:
@@ -123,12 +120,12 @@ class StoreQuery:
         identifiers: list[str],
         analysis_ids: list[str],
     ) -> list[AssociationResult]:
-        """Return finite associations for a specific variant × analysis set."""
+        """Return finite associations for a specific variant x analysis set."""
 
         variants = [
             variant
             for identifier in identifiers
-            if (variant := variant_by_identifier(self._connection, identifier)) is not None
+            if (variant := self._variant_axis.by_identifier(identifier)) is not None
         ]
         analyses = [
             analysis
@@ -137,7 +134,7 @@ class StoreQuery:
         ]
         if not variants or not analyses:
             return []
-        row_indices = [int(variant["variant_index"]) for variant in variants]
+        row_indices = [variant.variant_index for variant in variants]
         col_indices = [int(analysis["analysis_index"]) for analysis in analyses]
         z_block = self._root["z"].oindex[row_indices, :][:, col_indices]
         se_block = self._root["se"].oindex[row_indices, :][:, col_indices]
@@ -173,7 +170,7 @@ class StoreQuery:
             z_values = z_values[:limit]
             if se_values is not None:
                 se_values = se_values[:limit]
-        variants = self._variants_for_indices([int(row) for row in variant_indices])
+        variants = self._variant_axis.by_indices([int(row) for row in variant_indices])
         analyses = self._analyses_for_indices([int(col) for col in analysis_indices])
         if se_values is None:
             unique_rows = np.unique(variant_indices).astype("int64")
@@ -200,22 +197,23 @@ class StoreQuery:
                 se_values,
                 strict=True,
             )
+            if int(row) in variants and int(col) in analyses
         ]
 
-    def _results_for_variant(self, variant: sqlite3.Row) -> list[AssociationResult]:
-        z_row = self._root["z"][int(variant["variant_index"]), :]
-        se_row = self._root["se"][int(variant["variant_index"]), :]
+    def _results_for_variant(self, variant: VariantRecord) -> list[AssociationResult]:
+        z_row = self._root["z"][variant.variant_index, :]
+        se_row = self._root["se"][variant.variant_index, :]
         analyses = self._analyses_by_index()
         return [
             AssociationResult.from_rows(variant, analyses[col], float(z), float(se))
             for col, (z, se) in enumerate(zip(z_row, se_row, strict=True))
-            if math.isfinite(float(z)) and math.isfinite(float(se))
+            if col in analyses and math.isfinite(float(z)) and math.isfinite(float(se))
         ]
 
-    def _results_for_variants(self, variants: list[sqlite3.Row]) -> list[AssociationResult]:
+    def _results_for_variants(self, variants: list[VariantRecord]) -> list[AssociationResult]:
         if not variants:
             return []
-        rows = [int(variant["variant_index"]) for variant in variants]
+        rows = [variant.variant_index for variant in variants]
         z_block = self._root["z"].oindex[rows, :]
         se_block = self._root["se"].oindex[rows, :]
         analyses = self._analyses_by_index()
@@ -228,24 +226,9 @@ class StoreQuery:
                     results.append(AssociationResult.from_rows(variant, analysis, z, se))
         return results
 
-    def _variants_by_index(self) -> dict[int, sqlite3.Row]:
-        rows = self._connection.execute("SELECT * FROM variants ORDER BY variant_index").fetchall()
-        return {int(row["variant_index"]): cast(sqlite3.Row, row) for row in rows}
-
     def _analyses_by_index(self) -> dict[int, sqlite3.Row]:
         rows = self._connection.execute("SELECT * FROM analyses ORDER BY analysis_index").fetchall()
-        return {int(row["analysis_index"]): cast(sqlite3.Row, row) for row in rows}
-
-    def _variants_for_indices(self, indices: list[int]) -> dict[int, sqlite3.Row]:
-        unique = sorted(set(indices))
-        if not unique:
-            return {}
-        placeholders = ",".join("?" for _ in unique)
-        rows = self._connection.execute(
-            f"SELECT * FROM variants WHERE variant_index IN ({placeholders})",
-            unique,
-        ).fetchall()
-        return {int(row["variant_index"]): cast(sqlite3.Row, row) for row in rows}
+        return {int(row["analysis_index"]): row for row in rows}
 
     def _analyses_for_indices(self, indices: list[int]) -> dict[int, sqlite3.Row]:
         unique = sorted(set(indices))
@@ -256,7 +239,7 @@ class StoreQuery:
             f"SELECT * FROM analyses WHERE analysis_index IN ({placeholders})",
             unique,
         ).fetchall()
-        return {int(row["analysis_index"]): cast(sqlite3.Row, row) for row in rows}
+        return {int(row["analysis_index"]): row for row in rows}
 
 
 def query_store(path: str | Path) -> StoreQuery:

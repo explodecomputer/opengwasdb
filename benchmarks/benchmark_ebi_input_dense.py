@@ -2,7 +2,8 @@
 """Build and benchmark Dense Observed-Only storage from full GWAS-SSF files.
 
 This uses the three full harmonised files in `besdq/data/ebi_input`, which are
-the better local Dense-mode test than the sparse 38714679 stage-1 fixture.
+the active local Dense-mode vertical-slice benchmark inputs. The sparse
+38714679 stage-1 fixture is intentionally excluded from Dense-mode comparisons.
 
 The script intentionally uses a streaming two-pass builder: first collect the
 union variant axis, then fill dense Z/SE arrays. The fixture-oriented package
@@ -36,7 +37,17 @@ from opengwasdb.model.enums import AssociationCoverage, CompletionState, Primary
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
-from opengwasdb.variants import chromosome_sort_key, orient_to_canonical
+from opengwasdb.variants import (
+    VARIANT_AXIS_FORMAT,
+    VARIANT_OFFSETS_FILENAME,
+    VARIANT_TABIX_FILENAME,
+    VARIANT_TABLE_FILENAME,
+    CanonicalVariant,
+    VariantAxis,
+    chromosome_sort_key,
+    orient_to_canonical,
+    write_variant_axis,
+)
 
 DEFAULT_SOURCE_DIR = Path("/Users/gh13047/repo/besdq/data/ebi_input")
 DEFAULT_OUTPUT_DIR = Path("/Users/gh13047/repo/opengwasdb/docs/benchmark-output")
@@ -140,6 +151,23 @@ def build_streaming_dense_store(
         fill_column(source, col, alid_to_row, z, se)
 
     write_manifest(store_path, source_files, variants, analyses)
+    write_variant_axis(
+        store_path,
+        [
+            CanonicalVariant(
+                chromosome=variant.chromosome,
+                position=variant.position,
+                effect_allele=variant.effect_allele,
+                other_allele=variant.other_allele,
+            )
+            for variant in variants
+        ],
+        {
+            variant.alid: variant.rsid
+            for variant in variants
+            if variant.rsid is not None
+        },
+    )
     write_index(store_path, variants, analyses)
     write_zarr(store_path, z, se)
     build_top_hit_indexes(store_path)
@@ -243,6 +271,12 @@ def write_manifest(
                 "chunk_shape": list(DEFAULT_CHUNK_SHAPE),
                 "compressor": DEFAULT_COMPRESSOR,
                 "top_hit_thresholds": [5e-8, 5e-6, 5e-4],
+                "variant_axis": {
+                    "format": VARIANT_AXIS_FORMAT,
+                    "table": VARIANT_TABLE_FILENAME,
+                    "tabix_index": VARIANT_TABIX_FILENAME,
+                    "row_offsets": VARIANT_OFFSETS_FILENAME,
+                },
             },
         },
     )
@@ -260,7 +294,7 @@ def write_index(store_path: Path, variants: list[VariantRow], analyses: list[Ana
         connection.execute("PRAGMA synchronous = OFF")
         connection.execute("PRAGMA temp_store = MEMORY")
         initialise_schema(connection)
-        set_metadata(connection, "schema_version", 1)
+        set_metadata(connection, "schema_version", 2)
         set_metadata(connection, "n_variants", len(variants))
         set_metadata(connection, "n_analyses", len(analyses))
         set_metadata(
@@ -270,26 +304,26 @@ def write_index(store_path: Path, variants: list[VariantRow], analyses: list[Ana
                 "dtype": "float16",
                 "chunk_shape": list(DEFAULT_CHUNK_SHAPE),
                 "compressor": DEFAULT_COMPRESSOR,
+                "variant_axis": {
+                    "format": VARIANT_AXIS_FORMAT,
+                    "table": VARIANT_TABLE_FILENAME,
+                    "tabix_index": VARIANT_TABIX_FILENAME,
+                    "row_offsets": VARIANT_OFFSETS_FILENAME,
+                },
             },
         )
         connection.executemany(
             """
-            INSERT INTO variants(
-                variant_index, alid, chromosome, position, effect_allele, other_allele, rsid
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO variant_aliases(alias, variant_index)
+            VALUES (?, ?)
             """,
             (
                 (
-                    i,
-                    variant.alid,
-                    variant.chromosome,
-                    variant.position,
-                    variant.effect_allele,
-                    variant.other_allele,
                     variant.rsid,
+                    i,
                 )
                 for i, variant in enumerate(variants)
+                if variant.rsid is not None
             ),
         )
         connection.executemany(
@@ -381,6 +415,7 @@ def run_benchmark(
         path.stat().st_size for path in source_dir.glob("*meta.yaml")
     )
     raw_sidecar_bytes += sum(path.stat().st_size for path in source_dir.glob("*.tbi"))
+    component_sizes = store_component_sizes(store_path)
     return {
         "dataset": {
             "source_dir": str(source_dir),
@@ -398,6 +433,7 @@ def run_benchmark(
             "raw_tsv_gz_bytes": raw_gz_bytes,
             "raw_tsv_gz_plus_sidecars_bytes": raw_sidecar_bytes,
             "opengwasdb_store_bytes": dir_bytes(store_path),
+            "components": component_sizes,
             "raw_tsv_gz_to_store_ratio": raw_gz_bytes / dir_bytes(store_path),
         },
         "selection": selection,
@@ -409,24 +445,22 @@ def choose_queries(store_path: Path) -> dict[str, object]:
     connection = sqlite3.connect(store_path / "index.sqlite")
     connection.row_factory = sqlite3.Row
     try:
-        region = connection.execute(
-            """
-            SELECT chromosome, CAST(position / 1000000 AS INTEGER) AS window, COUNT(*) AS n
-            FROM variants
-            GROUP BY chromosome, window
-            ORDER BY n DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        variants = connection.execute(
-            "SELECT variant_index, alid FROM variants ORDER BY variant_index"
-        ).fetchall()
         analyses = connection.execute(
             "SELECT analysis_index, analysis_id FROM analyses ORDER BY analysis_index"
         ).fetchall()
+        variant_axis = VariantAxis(store_path, connection)
+        try:
+            variants = variant_axis.all()
+        finally:
+            variant_axis.close()
     finally:
         connection.close()
 
+    windows: dict[tuple[str, int], int] = {}
+    for variant in variants:
+        key = (variant.chromosome, variant.position // 1_000_000)
+        windows[key] = windows.get(key, 0) + 1
+    region_chromosome, region_window = max(windows.items(), key=lambda item: item[1])[0]
     root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
     finite = np.isfinite(root["z"][:].astype("float32"))
     row_counts = finite.sum(axis=1)
@@ -435,15 +469,15 @@ def choose_queries(store_path: Path) -> dict[str, object]:
     bulk_col = int(np.argmax(col_counts))
     random_rows = sorted(RNG.choice(len(variants), min(100, len(variants)), replace=False))
     random_cols = sorted(RNG.choice(len(analyses), min(3, len(analyses)), replace=False))
-    start = int(region["window"]) * 1_000_000
+    start = region_window * 1_000_000
     return {
-        "region_chromosome": str(region["chromosome"]),
+        "region_chromosome": region_chromosome,
         "region_start": start,
         "region_end": start + 999_999,
-        "phewas_alid": str(variants[phewas_row]["alid"]),
+        "phewas_alid": variants[phewas_row].alid,
         "bulk_analysis_id": str(analyses[bulk_col]["analysis_id"]),
         "top_hit_threshold": choose_top_hit_threshold(root),
-        "random_alids": [str(variants[row]["alid"]) for row in random_rows],
+        "random_alids": [variants[row].alid for row in random_rows],
         "random_analysis_ids": [str(analyses[col]["analysis_id"]) for col in random_cols],
     }
 
@@ -492,6 +526,22 @@ def dir_bytes(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def file_bytes(path: Path) -> int:
+    return path.stat().st_size if path.exists() else 0
+
+
+def store_component_sizes(store_path: Path) -> dict[str, int]:
+    return {
+        "manifest_json": file_bytes(store_path / "manifest.json"),
+        "index_sqlite": file_bytes(store_path / "index.sqlite"),
+        "variants_tsv_gz": file_bytes(store_path / VARIANT_TABLE_FILENAME),
+        "variants_tbi": file_bytes(store_path / VARIANT_TABIX_FILENAME),
+        "variant_offsets_npy": file_bytes(store_path / VARIANT_OFFSETS_FILENAME),
+        "data_zarr": dir_bytes(store_path / "data.zarr"),
+        "top_hits": dir_bytes(store_path / "data.zarr" / "top_hits"),
+    }
+
+
 def write_qmd(results: dict[str, object], doc_path: Path, results_path: Path) -> None:
     dataset = results["dataset"]
     storage = results["storage"]
@@ -521,6 +571,7 @@ def write_qmd(results: dict[str, object], doc_path: Path, results_path: Path) ->
     )
     raw_sidecar_ratio = storage["raw_tsv_gz_plus_sidecars_bytes"] / storage["raw_tsv_gz_bytes"]
     store_ratio = storage["opengwasdb_store_bytes"] / storage["raw_tsv_gz_bytes"]
+    components = storage["components"]
     storage_table = "\n".join(
         [
             f"| Raw source TSV.gz | {mb(storage['raw_tsv_gz_bytes'])} | 1.00× |",
@@ -533,6 +584,17 @@ def write_qmd(results: dict[str, object], doc_path: Path, results_path: Path) ->
                 "| OpenGWASDB dense store | "
                 f"{mb(storage['opengwasdb_store_bytes'])} | {store_ratio:.2f}× raw |"
             ),
+        ]
+    )
+    component_table = "\n".join(
+        [
+            f"| manifest.json | {mb(components['manifest_json'])} |",
+            f"| index.sqlite | {mb(components['index_sqlite'])} |",
+            f"| variants.tsv.gz | {mb(components['variants_tsv_gz'])} |",
+            f"| variants.tsv.gz.tbi | {mb(components['variants_tbi'])} |",
+            f"| variant_offsets.npy | {mb(components['variant_offsets_npy'])} |",
+            f"| data.zarr | {mb(components['data_zarr'])} |",
+            f"| data.zarr/top_hits | {mb(components['top_hits'])} |",
         ]
     )
     text = f"""---
@@ -550,8 +612,9 @@ format:
 ## Summary
 
 This benchmark uses `besdq/data/ebi_input`, which contains three full harmonised
-GWAS-SSF files. This is a better local Dense-mode test than the previous
-`38714679` sparse-mode fixture.
+GWAS-SSF files. This is the active local Dense-mode vertical-slice benchmark.
+The older `38714679` fixture is sparse and is no longer used or compared for
+Dense-mode evaluation.
 
 The query workload mirrors the `besdq` dense benchmark: regional, PheWAS,
 top-hits, full-study bulk extraction, and random variant × analysis lookup.
@@ -573,6 +636,12 @@ top-hits, full-study bulk extraction, and random variant × analysis lookup.
 | Format | Size | Comparison |
 |---|---:|---:|
 {storage_table}
+
+## Store component footprint
+
+| Component | Size |
+|---|---:|
+{component_table}
 
 ## Query selection
 
@@ -599,10 +668,10 @@ objects.
 
 - The full GWAS-SSF inputs are almost perfectly dense across the three analyses,
   so this is the right local shape for Dense mode.
-- Storage is larger than gzipped raw source for only three analyses because
-  SQLite variant metadata/index overhead dominates at this small analysis count.
-  Dense should become more favourable as analysis count grows over the same
-  variant axis.
+- The sparse `38714679` fixture is intentionally excluded from Dense-mode
+  benchmark comparisons because it represents a different storage shape.
+- Component sizes identify whether footprint is dominated by dense arrays,
+  compact metadata, the tabix variant table, row offsets, or top-hit indexes.
 - Full-analysis extraction should use array/streaming output. Returning millions
   of Python dataclass rows is not the right API shape for that path.
 

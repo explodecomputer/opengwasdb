@@ -2176,6 +2176,7 @@ vertical-align: -.125em;
   <li><a href="#summary" id="toc-summary" class="nav-link active" data-scroll-target="#summary">Summary</a></li>
   <li><a href="#dataset" id="toc-dataset" class="nav-link" data-scroll-target="#dataset">Dataset</a></li>
   <li><a href="#storage-footprint" id="toc-storage-footprint" class="nav-link" data-scroll-target="#storage-footprint">Storage footprint</a></li>
+  <li><a href="#store-component-footprint" id="toc-store-component-footprint" class="nav-link" data-scroll-target="#store-component-footprint">Store component footprint</a></li>
   <li><a href="#query-selection" id="toc-query-selection" class="nav-link" data-scroll-target="#query-selection">Query selection</a></li>
   <li><a href="#query-timings" id="toc-query-timings" class="nav-link" data-scroll-target="#query-timings">Query timings</a></li>
   <li><a href="#interpretation" id="toc-interpretation" class="nav-link" data-scroll-target="#interpretation">Interpretation</a></li>
@@ -2213,7 +2214,7 @@ vertical-align: -.125em;
 
 <section id="summary" class="level2">
 <h2 class="anchored" data-anchor-id="summary">Summary</h2>
-<p>This benchmark uses <code>besdq/data/ebi_input</code>, which contains three full harmonised GWAS-SSF files. This is a better local Dense-mode test than the previous <code>38714679</code> sparse-mode fixture.</p>
+<p>This benchmark uses <code>besdq/data/ebi_input</code>, which contains three full harmonised GWAS-SSF files. This is the active local Dense-mode vertical-slice benchmark. The older <code>38714679</code> fixture is sparse and is no longer used or compared for Dense-mode evaluation.</p>
 <p>The query workload mirrors the <code>besdq</code> dense benchmark: regional, PheWAS, top-hits, full-study bulk extraction, and random variant × analysis lookup.</p>
 </section>
 <section id="dataset" class="level2">
@@ -2252,7 +2253,7 @@ vertical-align: -.125em;
 </tr>
 <tr class="odd">
 <td>Build time</td>
-<td style="text-align: right;">275.383 seconds</td>
+<td style="text-align: right;">284.642 seconds</td>
 </tr>
 </tbody>
 </table>
@@ -2280,8 +2281,49 @@ vertical-align: -.125em;
 </tr>
 <tr class="odd">
 <td>OpenGWASDB dense store</td>
-<td style="text-align: right;">993.92 MB</td>
-<td style="text-align: right;">0.99× raw</td>
+<td style="text-align: right;">810.50 MB</td>
+<td style="text-align: right;">0.81× raw</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="store-component-footprint" class="level2">
+<h2 class="anchored" data-anchor-id="store-component-footprint">Store component footprint</h2>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Component</th>
+<th style="text-align: right;">Size</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>manifest.json</td>
+<td style="text-align: right;">0.00 MB</td>
+</tr>
+<tr class="even">
+<td>index.sqlite</td>
+<td style="text-align: right;">368.35 MB</td>
+</tr>
+<tr class="odd">
+<td>variants.tsv.gz</td>
+<td style="text-align: right;">108.81 MB</td>
+</tr>
+<tr class="even">
+<td>variants.tsv.gz.tbi</td>
+<td style="text-align: right;">1.48 MB</td>
+</tr>
+<tr class="odd">
+<td>variant_offsets.npy</td>
+<td style="text-align: right;">61.48 MB</td>
+</tr>
+<tr class="even">
+<td>data.zarr</td>
+<td style="text-align: right;">270.37 MB</td>
+</tr>
+<tr class="odd">
+<td>data.zarr/top_hits</td>
+<td style="text-align: right;">0.10 MB</td>
 </tr>
 </tbody>
 </table>
@@ -2334,32 +2376,32 @@ vertical-align: -.125em;
 <tbody>
 <tr class="odd">
 <td>regional</td>
-<td style="text-align: right;">69.290</td>
-<td style="text-align: right;">70.021</td>
+<td style="text-align: right;">74.581</td>
+<td style="text-align: right;">75.499</td>
 <td style="text-align: right;">26,613</td>
 </tr>
 <tr class="even">
 <td>phewas</td>
-<td style="text-align: right;">0.784</td>
-<td style="text-align: right;">1.291</td>
+<td style="text-align: right;">0.788</td>
+<td style="text-align: right;">0.917</td>
 <td style="text-align: right;">3</td>
 </tr>
 <tr class="odd">
 <td>tophits</td>
-<td style="text-align: right;">1.072</td>
-<td style="text-align: right;">1.202</td>
+<td style="text-align: right;">10.665</td>
+<td style="text-align: right;">10.955</td>
 <td style="text-align: right;">177</td>
 </tr>
 <tr class="even">
 <td>bulk_arrays</td>
-<td style="text-align: right;">5045.381</td>
-<td style="text-align: right;">5135.246</td>
+<td style="text-align: right;">5166.538</td>
+<td style="text-align: right;">5800.412</td>
 <td style="text-align: right;">7,685,603</td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
-<td style="text-align: right;">50.244</td>
-<td style="text-align: right;">51.946</td>
+<td style="text-align: right;">55.497</td>
+<td style="text-align: right;">57.329</td>
 <td style="text-align: right;">300</td>
 </tr>
 </tbody>
@@ -2369,7 +2411,8 @@ vertical-align: -.125em;
 <h2 class="anchored" data-anchor-id="interpretation">Interpretation</h2>
 <ul>
 <li>The full GWAS-SSF inputs are almost perfectly dense across the three analyses, so this is the right local shape for Dense mode.</li>
-<li>Storage is larger than gzipped raw source for only three analyses because SQLite variant metadata/index overhead dominates at this small analysis count. Dense should become more favourable as analysis count grows over the same variant axis.</li>
+<li>The sparse <code>38714679</code> fixture is intentionally excluded from Dense-mode benchmark comparisons because it represents a different storage shape.</li>
+<li>Component sizes identify whether footprint is dominated by dense arrays, compact metadata, the tabix variant table, row offsets, or top-hit indexes.</li>
 <li>Full-analysis extraction should use array/streaming output. Returning millions of Python dataclass rows is not the right API shape for that path.</li>
 </ul>
 </section>

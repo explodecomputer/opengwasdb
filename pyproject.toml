@@ -16,6 +16,7 @@ dependencies = [
   "numpy>=1.26,<2.5",
   "zarr>=2.18,<3",
   "numcodecs>=0.12",
+  "pysam>=0.22",
   "typer>=0.12",
 ]
 
@@ -44,5 +45,5 @@ python_version = "3.11"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["numcodecs", "zarr"]
+module = ["numcodecs", "pysam", "zarr"]
 ignore_missing_imports = true

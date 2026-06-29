@@ -38,8 +38,9 @@ def initialise_schema(connection: sqlite3.Connection) -> None:
             ON variants(chromosome, position, variant_index);
 
         CREATE TABLE IF NOT EXISTS variant_aliases (
-            alias TEXT PRIMARY KEY,
-            variant_index INTEGER NOT NULL REFERENCES variants(variant_index)
+            alias TEXT NOT NULL,
+            variant_index INTEGER NOT NULL,
+            PRIMARY KEY(alias, variant_index)
         );
 
         CREATE TABLE IF NOT EXISTS analyses (
@@ -75,6 +76,8 @@ def count_rows(connection: sqlite3.Connection, table: str) -> int:
 
 
 def variant_by_identifier(connection: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
+    """Legacy SQLite variant lookup for stores that still populate variants."""
+
     row = connection.execute("SELECT * FROM variants WHERE alid = ?", (identifier,)).fetchone()
     if row is not None:
         return cast(sqlite3.Row, row)

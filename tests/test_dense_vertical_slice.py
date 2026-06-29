@@ -15,6 +15,9 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     assert (dense_store_path / "manifest.json").exists()
     assert (dense_store_path / "index.sqlite").exists()
     assert (dense_store_path / "data.zarr").exists()
+    assert (dense_store_path / "variants.tsv.gz").exists()
+    assert (dense_store_path / "variants.tsv.gz.tbi").exists()
+    assert (dense_store_path / "variant_offsets.npy").exists()
 
     result = validate_store(dense_store_path)
     assert result.ok, result.errors
@@ -37,9 +40,20 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
         assert get_metadata(connection, "n_variants") == 3
         assert get_metadata(connection, "n_analyses") == 2
         dense_meta = get_metadata(connection, "dense")
+        variant_rows = connection.execute("SELECT COUNT(*) AS n FROM variants").fetchone()["n"]
+        aliases = connection.execute(
+            "SELECT alias, variant_index FROM variant_aliases ORDER BY alias, variant_index"
+        ).fetchall()
+    assert variant_rows == 0
+    assert [(row["alias"], row["variant_index"]) for row in aliases] == [
+        ("rs1", 0),
+        ("rs2", 1),
+        ("rs3", 2),
+    ]
     assert dense_meta["chunk_shape"] == [1000, 1000]
     assert dense_meta["compressor"]["cname"] == "zstd"
     assert dense_meta["compressor"]["shuffle"] == "bitshuffle"
+    assert dense_meta["variant_axis"]["format"] == "tabix_tsv_v1"
 
 
 def test_query_facade_supports_variant_range_analysis_phewas_and_top_hits(dense_store_path):
