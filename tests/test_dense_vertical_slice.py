@@ -60,6 +60,9 @@ def test_query_facade_supports_variant_range_analysis_phewas_and_top_hits(dense_
 
     a1 = query.analysis("a1")
     assert [(row.alid, row.z) for row in a1] == [("1:100:A:G", 2.0), ("1:200:C:T", -3.0)]
+    a1_arrays = query.analysis_arrays("a1")
+    assert a1_arrays is not None
+    assert a1_arrays["z"].shape == (3,)
 
     phewas = query.phewas("1:100:A:G")
     assert [row.analysis_id for row in phewas] == ["a1", "a2"]

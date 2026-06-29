@@ -5,9 +5,9 @@ from __future__ import annotations
 import csv
 import gzip
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from opengwasdb.model.enums import StoredEffectScale
 from opengwasdb.variants import CanonicalVariant, VariantNormalisationError, orient_to_canonical
@@ -122,7 +122,8 @@ def _normalise_row(row: dict[str, str], row_number: int) -> NormalisedAssociatio
     try:
         scale = StoredEffectScale(scale_text) if scale_text else StoredEffectScale.SD_UNITS
     except ValueError as exc:
-        raise SourceRowError(f"row {row_number}: invalid stored_effect_scale {scale_text!r}") from exc
+        message = f"row {row_number}: invalid stored_effect_scale {scale_text!r}"
+        raise SourceRowError(message) from exc
 
     return NormalisedAssociation(
         analysis_id=analysis_id,

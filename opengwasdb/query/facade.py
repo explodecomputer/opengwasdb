@@ -94,6 +94,25 @@ class StoreQuery:
             if math.isfinite(float(z)) and math.isfinite(float(se))
         ]
 
+    def analysis_arrays(self, analysis_id: str) -> dict[str, object] | None:
+        """Return dense statistic arrays for one analysis without row materialisation.
+
+        This is the efficient full-study extraction path for dense stores. The
+        row-materialised `analysis()` method is useful for small extracts and
+        tests, but millions of associations should use array/streaming results.
+        """
+
+        analysis = analysis_by_id(self._connection, analysis_id)
+        if analysis is None:
+            return None
+        col = int(analysis["analysis_index"])
+        return {
+            "analysis_id": str(analysis["analysis_id"]),
+            "analysis_index": col,
+            "z": self._root["z"][:, col],
+            "se": self._root["se"][:, col],
+        }
+
     def phewas(self, identifier: str) -> list[AssociationResult]:
         """Return one variant across all analyses."""
 
@@ -147,23 +166,40 @@ class StoreQuery:
         variant_indices = group["variant_index"][:]
         analysis_indices = group["analysis_index"][:]
         z_values = group["z"][:]
+        se_values = group["se"][:] if "se" in group else None
         if limit is not None:
             variant_indices = variant_indices[:limit]
             analysis_indices = analysis_indices[:limit]
             z_values = z_values[:limit]
-        variants = self._variants_by_index()
-        analyses = self._analyses_by_index()
-        unique_rows = np.unique(variant_indices).astype("int64")
-        row_offsets = {int(row): i for i, row in enumerate(unique_rows)}
-        se_block = self._root["se"].oindex[unique_rows, :]
+            if se_values is not None:
+                se_values = se_values[:limit]
+        variants = self._variants_for_indices([int(row) for row in variant_indices])
+        analyses = self._analyses_for_indices([int(col) for col in analysis_indices])
+        if se_values is None:
+            unique_rows = np.unique(variant_indices).astype("int64")
+            row_offsets = {int(row): i for i, row in enumerate(unique_rows)}
+            se_block = self._root["se"].oindex[unique_rows, :]
+            se_values = np.array(
+                [
+                    float(se_block[row_offsets[int(row)], int(col)])
+                    for row, col in zip(variant_indices, analysis_indices, strict=True)
+                ],
+                dtype="float32",
+            )
         return [
             AssociationResult.from_rows(
                 variants[int(row)],
                 analyses[int(col)],
                 float(z),
-                float(se_block[row_offsets[int(row)], int(col)]),
+                float(se),
             )
-            for row, col, z in zip(variant_indices, analysis_indices, z_values, strict=True)
+            for row, col, z, se in zip(
+                variant_indices,
+                analysis_indices,
+                z_values,
+                se_values,
+                strict=True,
+            )
         ]
 
     def _results_for_variant(self, variant: sqlite3.Row) -> list[AssociationResult]:
@@ -198,6 +234,28 @@ class StoreQuery:
 
     def _analyses_by_index(self) -> dict[int, sqlite3.Row]:
         rows = self._connection.execute("SELECT * FROM analyses ORDER BY analysis_index").fetchall()
+        return {int(row["analysis_index"]): cast(sqlite3.Row, row) for row in rows}
+
+    def _variants_for_indices(self, indices: list[int]) -> dict[int, sqlite3.Row]:
+        unique = sorted(set(indices))
+        if not unique:
+            return {}
+        placeholders = ",".join("?" for _ in unique)
+        rows = self._connection.execute(
+            f"SELECT * FROM variants WHERE variant_index IN ({placeholders})",
+            unique,
+        ).fetchall()
+        return {int(row["variant_index"]): cast(sqlite3.Row, row) for row in rows}
+
+    def _analyses_for_indices(self, indices: list[int]) -> dict[int, sqlite3.Row]:
+        unique = sorted(set(indices))
+        if not unique:
+            return {}
+        placeholders = ",".join("?" for _ in unique)
+        rows = self._connection.execute(
+            f"SELECT * FROM analyses WHERE analysis_index IN ({placeholders})",
+            unique,
+        ).fetchall()
         return {int(row["analysis_index"]): cast(sqlite3.Row, row) for row in rows}
 
 

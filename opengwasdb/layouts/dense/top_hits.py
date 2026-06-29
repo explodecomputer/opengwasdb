@@ -30,8 +30,10 @@ def build_top_hit_indexes(
     compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 
     finite = np.isfinite(z)
+    se = root["se"][:].astype("float32")
     rows, cols = np.where(finite)
     values = z[rows, cols]
+    se_values = se[rows, cols]
     p_values = np.array([p_value_from_z(float(value)) for value in values], dtype="float64")
     abs_z = np.abs(values).astype("float32")
 
@@ -45,12 +47,14 @@ def build_top_hit_indexes(
         kept_cols = cols[keep].astype("uint32")
         kept_abs_z = abs_z[keep].astype("float32")
         kept_z = values[keep].astype("float32")
+        kept_se = se_values[keep].astype("float32")
         kept_p = p_values[keep].astype("float64")
         order = np.lexsort((kept_cols, kept_rows, -kept_abs_z))
         kept_rows = kept_rows[order]
         kept_cols = kept_cols[order]
         kept_abs_z = kept_abs_z[order]
         kept_z = kept_z[order]
+        kept_se = kept_se[order]
         kept_p = kept_p[order]
         chunk = max(1, min(len(kept_rows), 100_000))
         group.create_dataset(
@@ -77,6 +81,13 @@ def build_top_hit_indexes(
         group.create_dataset(
             "z",
             data=kept_z,
+            chunks=(chunk,),
+            compressor=compressor,
+            dtype="float32",
+        )
+        group.create_dataset(
+            "se",
+            data=kept_se,
             chunks=(chunk,),
             compressor=compressor,
             dtype="float32",
