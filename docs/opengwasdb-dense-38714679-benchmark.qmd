@@ -1,0 +1,92 @@
+---
+title: "OpenGWASDB Dense Observed-Only Benchmark"
+subtitle: "Local 38714679 fixture · 60 analyses"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    embed-resources: true
+---
+
+## Summary
+
+This benchmark uses the local `besdq/data/38714679/38714679` fixture because the
+UKB chr1 VCF directory used by the original `besdq` dense benchmark is not
+present in this checkout.
+
+The workload mirrors the `besdq` dense query benchmark:
+
+1. regional query;
+2. PheWAS-style single variant across analyses;
+3. top-hit query;
+4. full analysis extraction;
+5. random variant × analysis lookup.
+
+## Dataset
+
+| Field | Value |
+|---|---:|
+| Source files | 60 |
+| Store variants | 59,816 |
+| Analyses | 60 |
+| Dense cells | 3,588,960 |
+| Finite observed cells | 321,833 |
+| Observed cell fraction | 8.97% |
+| Build time | 3.746 seconds |
+
+## Storage footprint
+
+| Format | Size | Comparison |
+|---|---:|---:|
+| Raw source TSV.gz | 10.36 MB | 1.00× |
+| Raw source TSV.gz + YAML | 10.38 MB | 1.00× raw TSV.gz |
+| Combined benchmark source TSV.gz | 8.53 MB | 0.82× raw TSV.gz |
+| OpenGWASDB dense store | 14.59 MB | 1.41× raw TSV.gz |
+
+For this sparse molecular-style fixture, the dense store is expected to be
+larger than the raw gzipped inputs because most dense cells are missing. This is
+not the target shape for Dense mode; it is a local performance smoke test using
+available data.
+
+## Query selection
+
+| Query input | Value |
+|---|---|
+| Regional query | `7:22000000-22999999` |
+| PheWAS variant | `4:38782646:A:G` |
+| Bulk analysis | `GCST90275789` |
+| Top-hit threshold | `5e-08` |
+| Random lookup | 100 variants × 10 analyses |
+
+## Query timings
+
+Timings are from the Python query engine with one store opened once and each
+query repeated 20 times.
+
+| Query | Median ms | p95 ms | Result rows |
+|---|---:|---:|---:|
+| regional | 155.349 | 165.812 | 61,634 |
+| phewas | 0.886 | 1.100 | 23 |
+| tophits | 49.943 | 53.866 | 2,176 |
+| bulk | 91.513 | 93.905 | 8,133 |
+| random_lookup | 26.709 | 27.231 | 83 |
+
+## Interpretation
+
+- Batched query paths are fast on this small local fixture: PheWAS is sub-ms,
+  random lookup and top hits are tens of milliseconds, and the largest regional
+  query is dominated by materialising tens of thousands of Python result rows.
+- Dense storage is a bad footprint match for this particular molecular-style
+  fixture because the observed cell fraction is low. That reinforces the current
+  design split: Dense for many analyses over a shared variant axis; Ragged/Sparse
+  for cis-and-signals molecular datasets.
+- The benchmark still validates the v0.1 implementation path: build, validate,
+  top-hit index, layout-independent queries, and rendered documentation.
+
+## Artifacts
+
+- JSON results: `benchmark-output/opengwasdb_38714679_benchmark.json`
+- Store path: `/Users/gh13047/repo/opengwasdb/docs/benchmark-output/38714679_dense.opengwasdb`
+- Combined source path: `/Users/gh13047/repo/opengwasdb/docs/benchmark-output/38714679_combined_source.tsv.gz`

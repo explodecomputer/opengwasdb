@@ -1,0 +1,2 @@
+"""Reference completion pipeline."""
+

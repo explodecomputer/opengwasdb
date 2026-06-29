@@ -29,7 +29,7 @@ class StoreManifest:
     provenance: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "StoreManifest":
+    def from_dict(cls, data: dict[str, Any]) -> StoreManifest:
         return cls(
             store_id=str(data["store_id"]),
             release_id=str(data["release_id"]),
@@ -43,7 +43,7 @@ class StoreManifest:
         )
 
     @classmethod
-    def load(cls, path: str | Path) -> "StoreManifest":
+    def load(cls, path: str | Path) -> StoreManifest:
         manifest_path = Path(path)
         if manifest_path.is_dir():
             manifest_path = manifest_path / "manifest.json"

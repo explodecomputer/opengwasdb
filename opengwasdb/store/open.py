@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from opengwasdb.model.manifest import StoreManifest
+
+if TYPE_CHECKING:
+    from opengwasdb.query.facade import StoreQuery
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,11 @@ class OpenGWASDBStore:
     def data_path(self) -> Path:
         return self.path / "data.zarr"
 
+    def query(self) -> StoreQuery:
+        from opengwasdb.query.facade import StoreQuery
+
+        return StoreQuery(self)
+
 
 def open_store(path: str | Path) -> OpenGWASDBStore:
     """Open a local Store Release directory.
@@ -34,4 +43,3 @@ def open_store(path: str | Path) -> OpenGWASDBStore:
     store_path = Path(path)
     manifest = StoreManifest.load(store_path)
     return OpenGWASDBStore(path=store_path, manifest=manifest)
-
