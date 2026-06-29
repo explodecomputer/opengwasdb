@@ -13,7 +13,7 @@ import zarr
 from numcodecs import Blosc
 
 from opengwasdb.build.source import NormalisedAssociation
-from opengwasdb.index import connect, initialise_schema, set_metadata
+from opengwasdb.index import connect, create_lookup_indexes, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
@@ -207,9 +207,8 @@ def _write_index(
                 for i, variant in enumerate(variants)
             ],
         )
+        create_lookup_indexes(connection)
         aliases: dict[str, int] = {}
-        for i, variant in enumerate(variants):
-            aliases[variant.alid] = i
         variant_indices = {variant.alid: i for i, variant in enumerate(variants)}
         for record in records:
             if record.rsid:

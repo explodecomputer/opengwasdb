@@ -42,6 +42,15 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     assert dense_meta["compressor"]["shuffle"] == "bitshuffle"
 
 
+def test_dense_index_does_not_duplicate_canonical_alids(dense_store_path):
+    with connect(dense_store_path / "index.sqlite") as connection:
+        indexes = connection.execute("PRAGMA index_list(variants)").fetchall()
+        aliases = connection.execute("SELECT alias FROM variant_aliases ORDER BY alias").fetchall()
+
+    assert all(not bool(index["unique"]) for index in indexes)
+    assert [row["alias"] for row in aliases] == ["rs1", "rs2", "rs3"]
+
+
 def test_query_facade_supports_variant_range_analysis_phewas_and_top_hits(dense_store_path):
     query = query_store(dense_store_path)
 

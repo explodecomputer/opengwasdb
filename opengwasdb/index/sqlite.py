@@ -7,6 +7,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any, cast
 
+from opengwasdb.variants import VariantNormalisationError
+from opengwasdb.variants.normalise import normalise_allele, normalise_chromosome
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
@@ -26,16 +29,13 @@ def initialise_schema(connection: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS variants (
             variant_index INTEGER PRIMARY KEY,
-            alid TEXT NOT NULL UNIQUE,
+            alid TEXT NOT NULL,
             chromosome TEXT NOT NULL,
             position INTEGER NOT NULL,
             effect_allele TEXT NOT NULL,
             other_allele TEXT NOT NULL,
             rsid TEXT
         );
-
-        CREATE INDEX IF NOT EXISTS idx_variants_range
-            ON variants(chromosome, position, variant_index);
 
         CREATE TABLE IF NOT EXISTS variant_aliases (
             alias TEXT PRIMARY KEY,
@@ -50,6 +50,15 @@ def initialise_schema(connection: sqlite3.Connection) -> None:
             analysis_label TEXT,
             stored_effect_scale TEXT NOT NULL
         );
+        """
+    )
+
+
+def create_lookup_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_variants_range
+            ON variants(chromosome, position, variant_index);
         """
     )
 
@@ -75,9 +84,22 @@ def count_rows(connection: sqlite3.Connection, table: str) -> int:
 
 
 def variant_by_identifier(connection: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
-    row = connection.execute("SELECT * FROM variants WHERE alid = ?", (identifier,)).fetchone()
-    if row is not None:
-        return cast(sqlite3.Row, row)
+    parsed = _parse_canonical_alid(identifier)
+    if parsed is not None:
+        chromosome, position, effect_allele, other_allele = parsed
+        row = connection.execute(
+            """
+            SELECT *
+            FROM variants
+            WHERE chromosome = ?
+              AND position = ?
+              AND effect_allele = ?
+              AND other_allele = ?
+            """,
+            (chromosome, position, effect_allele, other_allele),
+        ).fetchone()
+        if row is not None:
+            return cast(sqlite3.Row, row)
     alias = connection.execute(
         """
         SELECT v.*
@@ -88,6 +110,25 @@ def variant_by_identifier(connection: sqlite3.Connection, identifier: str) -> sq
         (identifier,),
     ).fetchone()
     return cast(sqlite3.Row | None, alias)
+
+
+def _parse_canonical_alid(identifier: str) -> tuple[str, int, str, str] | None:
+    parts = identifier.split(":")
+    if len(parts) != 4:
+        return None
+    chromosome, position_text, effect_allele, other_allele = parts
+    try:
+        position = int(position_text)
+        if position <= 0:
+            return None
+        return (
+            normalise_chromosome(chromosome),
+            position,
+            normalise_allele(effect_allele),
+            normalise_allele(other_allele),
+        )
+    except (TypeError, ValueError, VariantNormalisationError):
+        return None
 
 
 def analysis_by_id(connection: sqlite3.Connection, analysis_id: str) -> sqlite3.Row | None:

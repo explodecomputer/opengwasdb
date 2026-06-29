@@ -29,7 +29,7 @@ import numpy as np
 import zarr
 from numcodecs import Blosc
 
-from opengwasdb.index import initialise_schema, set_metadata
+from opengwasdb.index import create_lookup_indexes, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.constants import DEFAULT_CHUNK_SHAPE, DEFAULT_COMPRESSOR
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
@@ -292,6 +292,7 @@ def write_index(store_path: Path, variants: list[VariantRow], analyses: list[Ana
                 for i, variant in enumerate(variants)
             ),
         )
+        create_lookup_indexes(connection)
         connection.executemany(
             """
             INSERT INTO analyses(
