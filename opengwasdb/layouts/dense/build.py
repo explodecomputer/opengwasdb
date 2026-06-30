@@ -265,10 +265,14 @@ def _write_zarr(
     dtype: str,
 ) -> None:
     compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
+    # Clip chunk shape to array dimensions so zarr's declared shape matches what
+    # is physically stored — oversized chunks cause zarr to allocate a large
+    # decompression buffer even when the array is narrower than chunk_shape[1].
+    effective_chunks = (min(chunk_shape[0], z.shape[0]), min(chunk_shape[1], z.shape[1]))
     root = zarr.open_group(str(output_path / "data.zarr"), mode="w")
-    root.create_dataset("z", data=z, chunks=chunk_shape, compressor=compressor, dtype=dtype)
-    root.create_dataset("se", data=se, chunks=chunk_shape, compressor=compressor, dtype=dtype)
+    root.create_dataset("z", data=z, chunks=effective_chunks, compressor=compressor, dtype=dtype)
+    root.create_dataset("se", data=se, chunks=effective_chunks, compressor=compressor, dtype=dtype)
     root.attrs["layout"] = "dense"
     root.attrs["completion_state"] = "observed_only"
     root.attrs["compressor"] = DEFAULT_COMPRESSOR
-    root.attrs["chunk_shape"] = list(chunk_shape)
+    root.attrs["chunk_shape"] = list(effective_chunks)

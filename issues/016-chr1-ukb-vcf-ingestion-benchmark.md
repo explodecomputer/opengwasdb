@@ -28,6 +28,7 @@ This is a benchmark script, not a test. It lives in `benchmarks/` alongside the 
 - [ ] Benchmark results are written to `docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.json`.
 - [ ] The JSON includes build time, store size, n_variants, n_analyses, liftover failure count, and per-query-pattern median/p95 latency.
 - [ ] Results are compared against `besdq/data/ukb-chr1_zarr_benchmark.json`; any pattern where opengwasdb is >2× slower is flagged in a `notes` field in the output JSON.
+- [ ] A Quarto report is written to `docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.qmd` following the `write_qmd()` pattern from `benchmark_38714679_dense.py`.
 
 ## Blocked by
 

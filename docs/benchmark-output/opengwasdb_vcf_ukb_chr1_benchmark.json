@@ -1,6 +1,6 @@
 {
   "build": {
-    "build_seconds": 876.63,
+    "build_seconds": 567.23,
     "liftover_failure_count": 0,
     "store_path": "/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_dense.opengwasdb"
   },
@@ -131,53 +131,50 @@
     "top_hit_threshold": 5e-08
   },
   "storage": {
-    "store_bytes": 254994150,
-    "store_mb": 254.99
+    "store_bytes": 257618745,
+    "store_mb": 257.62
   },
   "timings": [
     {
       "besdq_zstd_median_ms": 4.988,
-      "median_ms": 2800.805,
-      "notes": "WARNING: 561.5\u00d7 slower than besdq zstd_bitshuffle baseline. Consider revisiting cyvcf2 vs bcftools choice (see ADR-0019).",
-      "p95_ms": 3001.128,
+      "median_ms": 77.96,
+      "notes": "WARNING: 15.6\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 84.412,
       "query": "regional",
-      "ratio_vs_besdq": 561.51,
+      "ratio_vs_besdq": 15.63,
       "result_count": 324048
     },
     {
       "besdq_zstd_median_ms": 0.906,
-      "median_ms": 5.556,
-      "notes": "WARNING: 6.1\u00d7 slower than besdq zstd_bitshuffle baseline. Consider revisiting cyvcf2 vs bcftools choice (see ADR-0019).",
-      "p95_ms": 11.979,
+      "median_ms": 1.418,
+      "p95_ms": 6.59,
       "query": "phewas",
-      "ratio_vs_besdq": 6.13,
+      "ratio_vs_besdq": 1.57,
       "result_count": 100
     },
     {
       "besdq_zstd_median_ms": 0.688,
-      "median_ms": 161.364,
-      "notes": "WARNING: 234.5\u00d7 slower than besdq zstd_bitshuffle baseline. Consider revisiting cyvcf2 vs bcftools choice (see ADR-0019).",
-      "p95_ms": 195.584,
+      "median_ms": 1.134,
+      "p95_ms": 1.244,
       "query": "tophits",
-      "ratio_vs_besdq": 234.54,
+      "ratio_vs_besdq": 1.65,
       "result_count": 14557
     },
     {
       "besdq_zstd_median_ms": 490.517,
-      "median_ms": 13671.501,
-      "notes": "WARNING: 27.9\u00d7 slower than besdq zstd_bitshuffle baseline. Consider revisiting cyvcf2 vs bcftools choice (see ADR-0019).",
-      "p95_ms": 15142.654,
+      "median_ms": 823.933,
+      "p95_ms": 1210.698,
       "query": "bulk",
-      "ratio_vs_besdq": 27.87,
+      "ratio_vs_besdq": 1.68,
       "result_count": 762080
     },
     {
       "besdq_zstd_median_ms": 30.424,
-      "median_ms": 375.622,
-      "notes": "WARNING: 12.3\u00d7 slower than besdq zstd_bitshuffle baseline. Consider revisiting cyvcf2 vs bcftools choice (see ADR-0019).",
-      "p95_ms": 418.297,
+      "median_ms": 114.452,
+      "notes": "WARNING: 3.8\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 329.498,
       "query": "random_lookup",
-      "ratio_vs_besdq": 12.35,
+      "ratio_vs_besdq": 3.76,
       "result_count": 598
     }
   ]

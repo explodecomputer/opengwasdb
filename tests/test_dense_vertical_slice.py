@@ -23,7 +23,7 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r")
     assert root["z"].shape == (3, 2)
     assert root["se"].shape == (3, 2)
-    assert root["z"].chunks == (1000, 1000)
+    assert root["z"].chunks == (3, 2)  # clipped to array shape
 
     import math
 
