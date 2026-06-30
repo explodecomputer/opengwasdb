@@ -4,6 +4,8 @@ GWAS-VCF sources (e.g. IEU OpenGWAS UKB files in GRCh37) are ingested via a dedi
 
 The single-pass in-memory path was rejected because loading all associations as Python objects before writing zarr is untenable at full-genome scale (~1B objects for 100 traits). Pre-processing VCFs to hg38 before ingestion was rejected to avoid modifying or duplicating source files. Liftover failures are tolerated up to a threshold rather than silently dropped because a wrong chain file would otherwise produce a valid-looking but nearly empty store.
 
-`stored_effect_scale` is inferred from the `StudyType` field in the `##SAMPLE` VCF meta-line (`CaseControl → LOG_ODDS`, `Continuous → SD_UNITS`) rather than carried in the manifest, consistent with the GWAS-VCF spec. VCF parsing uses cyvcf2; performance against bcftools query is to be benchmarked and this choice may be revisited.
+`stored_effect_scale` is inferred from the `StudyType` field in the `##SAMPLE` VCF meta-line (`CaseControl → LOG_OR`, `Continuous → SD_UNITS`) rather than carried in the manifest, consistent with the GWAS-VCF spec.
 
-The output format is identical to `build_dense_observed_store` — same zarr layout, SQLite schema, and manifest — so all existing queries work unchanged.
+**VCF reader: bcftools (updated from cyvcf2).** The initial implementation used cyvcf2. Benchmarking on the chr1 × 100-analysis UKB dataset showed bcftools is 2.26× faster for building (876.6s → 388.5s). cyvcf2 was replaced by `bcftools query` and `bcftools view -h` subprocesses in `opengwasdb/build/vcf_source.py`. See `docs/benchmark-output/opengwasdb_vcf_ukb_chr1_bcftools_benchmark.json` for the measured build times.
+
+The output format is identical to `build_dense_observed_store` — same zarr layout, SQLite schema, manifest, and tabix variant axis — so all existing queries work unchanged.
