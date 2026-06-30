@@ -35,7 +35,9 @@ from opengwasdb.validation import validate_store
 DEFAULT_MANIFEST = Path("/home/gh13047/repo/besdq/data/vcf-ukb/manifest.tsv")
 DEFAULT_STORE = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_dense.opengwasdb")
 DEFAULT_OUTPUT = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.json")
+DEFAULT_QMD = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.qmd")
 BESDQ_BASELINE = Path("/home/gh13047/repo/besdq/data/ukb-chr1_zarr_benchmark.json")
+ROW_BASELINE = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.json")
 SLOWDOWN_FLAG_THRESHOLD = 2.0  # flag patterns >2× slower than besdq zstd_bitshuffle
 
 RNG = np.random.default_rng(42)
@@ -77,13 +79,19 @@ def main() -> None:
     results = _run_benchmark(args.store, args.reps, build_seconds, liftover_failure_count)
 
     besdq_baseline = _load_besdq_baseline(BESDQ_BASELINE)
+    row_baseline = _load_besdq_baseline(args.row_baseline) if args.row_baseline else None
     if besdq_baseline:
-        _annotate_slowdowns(results["timings"], besdq_baseline)
+        _annotate_slowdowns(results["timings"], besdq_baseline, row_baseline)
 
     args.output.write_text(
         json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     print(f"Results written to {args.output}")
+
+    qmd_path = args.qmd
+    _write_qmd(results, qmd_path, args.output, besdq_baseline, row_baseline, args.reps)
+    print(f"QMD written to {qmd_path}")
+
     _print_summary(results, besdq_baseline)
 
 
@@ -224,21 +232,32 @@ def _load_besdq_baseline(path: Path) -> dict | None:
         return None
 
 
-def _annotate_slowdowns(timings: list[dict], baseline: dict) -> None:
+def _annotate_slowdowns(
+    timings: list[dict],
+    baseline: dict,
+    row_baseline: dict | None = None,
+) -> None:
     zstd = baseline.get("zstd_bitshuffle", {})
+    row_by_query = {}
+    if row_baseline:
+        row_by_query = {t["query"]: t for t in row_baseline.get("timings", [])}
     for row in timings:
         name = row["query"]
         besdq_median = zstd.get(name, {}).get("median_ms")
-        if besdq_median is None or besdq_median <= 0:
-            continue
-        ratio = row["median_ms"] / besdq_median
-        row["besdq_zstd_median_ms"] = besdq_median
-        row["ratio_vs_besdq"] = round(ratio, 2)
-        if ratio > SLOWDOWN_FLAG_THRESHOLD:
-            row["notes"] = (
-                f"WARNING: {ratio:.1f}× slower than besdq zstd_bitshuffle baseline. "
-                f"Consider revisiting cyvcf2 vs bcftools choice (see ADR-0019)."
-            )
+        if besdq_median is not None and besdq_median > 0:
+            ratio = row["median_ms"] / besdq_median
+            row["besdq_zstd_median_ms"] = besdq_median
+            row["ratio_vs_besdq"] = round(ratio, 2)
+            if ratio > SLOWDOWN_FLAG_THRESHOLD:
+                row["notes"] = (
+                    f"WARNING: {ratio:.1f}× slower than besdq zstd_bitshuffle baseline."
+                )
+        if name in row_by_query:
+            old_median = row_by_query[name].get("median_ms")
+            if old_median and old_median > 0:
+                speedup = old_median / row["median_ms"]
+                row["row_api_median_ms"] = old_median
+                row["speedup_vs_row_api"] = round(speedup, 2)
 
 
 def _print_summary(results: dict, baseline: dict | None) -> None:
@@ -257,11 +276,116 @@ def _print_summary(results: dict, baseline: dict | None) -> None:
         print(f"  {row['query']:<15} {row['median_ms']:>10.2f} {row['p95_ms']:>10.2f} {ratio_str:>10}{flag}")
 
 
+def _write_qmd(
+    results: dict,
+    qmd_path: Path,
+    json_path: Path,
+    besdq_baseline: dict | None,
+    row_baseline: dict | None,
+    n_reps: int,
+) -> None:
+    build = results["build"]
+    dataset = results["dataset"]
+    storage = results["storage"]
+    timings = results["timings"]
+
+    build_line = (
+        f"{build['build_seconds']:.1f}s" if build["build_seconds"] is not None
+        else "not rebuilt — existing store reused"
+    )
+    liftover_line = str(build.get("liftover_failure_count", "n/a"))
+
+    timing_rows = []
+    for t in timings:
+        row_str = f"{t.get('row_api_median_ms', 'n/a')}"
+        speedup_str = (
+            f"{t['speedup_vs_row_api']:.1f}×" if "speedup_vs_row_api" in t else "n/a"
+        )
+        besdq_str = f"{t.get('besdq_zstd_median_ms', 'n/a')}"
+        ratio_str = (
+            f"{t['ratio_vs_besdq']:.1f}×" if "ratio_vs_besdq" in t else "n/a"
+        )
+        flag = " ⚠" if "notes" in t else ""
+        timing_rows.append(
+            f"| {t['query']} | {t['median_ms']:.1f} | {t['p95_ms']:.1f}"
+            f" | {t['result_count']:,} | {row_str} | {speedup_str}"
+            f" | {besdq_str} | {ratio_str}{flag} |"
+        )
+    timing_table = "\n".join(timing_rows)
+
+    interp_lines = []
+    for t in timings:
+        if "speedup_vs_row_api" in t:
+            interp_lines.append(
+                f"- **{t['query']}**: {t['speedup_vs_row_api']:.1f}× faster than row API "
+                f"({t['row_api_median_ms']:.1f} ms → {t['median_ms']:.1f} ms)"
+            )
+        if "notes" in t:
+            interp_lines.append(f"- {t['notes']}")
+    interp_block = "\n".join(interp_lines) if interp_lines else "_No baseline comparisons available._"
+
+    text = f"""\
+---
+title: "UKB chr1 Dense Store — Array Query API Benchmark"
+subtitle: "chr1 × 100 UKB analyses · sparse flat array return contract"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+---
+
+## Dataset
+
+| Field | Value |
+|---|---:|
+| Variants (hg38) | {dataset['n_variants']:,} |
+| Analyses | {dataset['n_analyses']} |
+| Store size | {storage['store_mb']:.1f} MB |
+| Build time | {build_line} |
+| Liftover failures | {liftover_line} |
+| Store path | `{build['store_path']}` |
+
+## Query API
+
+All five query methods return `dict[str, np.ndarray]` with four parallel sparse
+flat arrays (`variant_index`, `analysis_index`, `z`, `se`), matching the format
+of the internal top-hit index. `AssociationResult` Python object materialisation
+is completely eliminated.
+
+## Timings
+
+Each pattern ran {n_reps} repetitions after one warm-up call.
+Row API column shows the previous `AssociationResult` baseline for comparison.
+besdq column is the besdq zarr `zstd_bitshuffle` baseline.
+
+| Query | Median ms | p95 ms | Result count | Row API ms | Speedup | besdq ms | vs besdq |
+|---|---:|---:|---:|---:|---:|---:|---:|
+{timing_table}
+
+## Interpretation
+
+{interp_block}
+
+## Provenance
+
+- JSON results: `{json_path.name}`
+- Row-API baseline: `{row_baseline['build']['store_path'] if row_baseline else 'n/a'}`
+- besdq baseline: `ukb-chr1_zarr_benchmark.json`
+"""
+    qmd_path.parent.mkdir(parents=True, exist_ok=True)
+    qmd_path.write_text(text, encoding="utf-8")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--store", type=Path, default=DEFAULT_STORE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--qmd", type=Path, default=DEFAULT_QMD)
+    parser.add_argument("--row-baseline", type=Path, default=None,
+                        help="Path to row-API baseline JSON for speedup comparison")
     parser.add_argument("--rebuild", action="store_true", default=False)
     parser.add_argument("--reps", type=int, default=10, help="Query repetitions (default 10)")
     return parser.parse_args()
