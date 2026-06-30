@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Build and benchmark an OpenGWASDB dense store from local besdq test data.
+"""Build an archived sparse-fixture smoke-test store from local besdq data.
 
-The local `besdq` checkout does not include the UKB chr1 VCFs used by the
-original dense prototype benchmark. This runner uses the closest available
-fixture: `besdq/data/38714679/38714679`, a collection of 60 gzipped per-analysis
-GWAS summary TSVs with overlapping variant sets.
+This runner uses `besdq/data/38714679/38714679`, a collection of 60 gzipped
+per-analysis GWAS summary TSVs with overlapping variant sets. The fixture is
+sparse and is not part of Dense-mode vertical-slice benchmarking or comparison.
 
 Outputs are written under `docs/benchmark-output/` and a static Quarto report is
-written to `docs/opengwasdb-dense-38714679-benchmark.qmd`.
+written to `docs/opengwasdb-dense-38714679-benchmark.qmd` as an archived record.
 """
 
 from __future__ import annotations
@@ -369,8 +368,8 @@ def write_qmd(results: dict[str, object], doc_path: Path, results_path: Path) ->
         f"{len(selection['random_analysis_ids'])} analyses"
     )
     text = f"""---
-title: "OpenGWASDB Dense Observed-Only Benchmark"
-subtitle: "Local 38714679 fixture · 60 analyses"
+title: "Archived Sparse Fixture Smoke Test"
+subtitle: "Local 38714679 fixture · not a Dense vertical-slice benchmark"
 date: today
 format:
   html:
@@ -382,11 +381,11 @@ format:
 
 ## Summary
 
-This benchmark uses the local `besdq/data/38714679/38714679` fixture because the
-UKB chr1 VCF directory used by the original `besdq` dense benchmark is not
-present in this checkout.
+This document is retained only as an archived smoke-test record for the local
+`besdq/data/38714679/38714679` fixture. The dataset is sparse and is not used or
+compared for Dense-mode vertical-slice evaluation.
 
-The workload mirrors the `besdq` dense query benchmark:
+The historical workload was:
 
 1. regional query;
 2. PheWAS-style single variant across analyses;
@@ -412,10 +411,10 @@ The workload mirrors the `besdq` dense query benchmark:
 |---|---:|---:|
 {storage_table}
 
-For this sparse molecular-style fixture, the dense store is expected to be
+For this sparse molecular-style fixture, the dense store was expected to be
 larger than the raw gzipped inputs because most dense cells are missing. This is
-not the target shape for Dense mode; it is a local performance smoke test using
-available data.
+not the target shape for Dense mode. The active Dense-mode benchmark now uses
+the full GWAS-SSF files in `besdq/data/ebi_input`.
 
 ## Query selection
 
@@ -438,6 +437,7 @@ query repeated {N_REPS} times.
 
 ## Interpretation
 
+- This fixture should not be used as evidence for Dense-mode storage footprint.
 - Batched query paths are fast on this small local fixture: PheWAS is sub-ms,
   random lookup and top hits are tens of milliseconds, and the largest regional
   query is dominated by materialising tens of thousands of Python result rows.
@@ -445,8 +445,8 @@ query repeated {N_REPS} times.
   fixture because the observed cell fraction is low. That reinforces the current
   design split: Dense for many analyses over a shared variant axis; Ragged/Sparse
   for cis-and-signals molecular datasets.
-- The benchmark still validates the v0.1 implementation path: build, validate,
-  top-hit index, layout-independent queries, and rendered documentation.
+- The active Dense-mode benchmark and comparison target is
+  `docs/opengwasdb-dense-ebi-input-benchmark.qmd`.
 
 ## Artifacts
 

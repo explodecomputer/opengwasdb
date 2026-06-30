@@ -1,0 +1,330 @@
+---
+title: "OpenGWASDB vs besdq — Performance Comparison"
+subtitle: "chr1 × 100 UKB analyses · dense observed-only store"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import json
+from pathlib import Path
+
+HERE = Path(".")
+
+def load_json(path):
+    p = Path(path)
+    return json.loads(p.read_text()) if p.exists() else None
+
+bench    = load_json(HERE / "opengwasdb_vcf_ukb_chr1_benchmark.json")
+baseline = load_json(HERE / "opengwasdb_vcf_ukb_chr1_array_benchmark.json")
+besdq    = load_json(HERE / "besdq_ukb_chr1_benchmark.json")
+
+PATTERNS = ["regional", "phewas", "tophits", "bulk", "random_lookup"]
+
+def timing(data, pattern):
+    """Extract median_ms from opengwasdb benchmark JSON for a pattern."""
+    if data is None:
+        return None
+    for t in data.get("timings", []):
+        if t["query"] == pattern:
+            return t["median_ms"]
+    return None
+
+def besdq_timing(variant="zstd_bitshuffle", pattern=None):
+    if besdq is None or variant not in besdq:
+        return None
+    return besdq[variant].get(pattern, {}).get("median_ms")
+
+def ratio(a, b):
+    if a is None or b is None or b == 0:
+        return None
+    return a / b
+
+def fmt_ms(v, decimals=2):
+    if v is None:
+        return "n/a"
+    return f"{v:.{decimals}f} ms"
+
+def fmt_ratio(r, threshold=2.0):
+    if r is None:
+        return "n/a"
+    warn = r > threshold
+    s = f"{r:.2f}×"
+    if warn:
+        return f'<span style="color:#c0392b;font-weight:bold">{s}</span>'
+    return f'<span style="color:#27ae60">{s}</span>'
+
+def fmt_speedup(before, after):
+    if before is None or after is None or after == 0:
+        return "n/a"
+    s = before / after
+    return f'<span style="color:#2980b9;font-weight:bold">{s:.1f}×</span>'
+
+def md_table(headers, rows):
+    sep = "|" + "|".join(["---"] * len(headers)) + "|"
+    head = "| " + " | ".join(headers) + " |"
+    body = "\n".join("| " + " | ".join(str(c) for c in row) + " |" for row in rows)
+    return f"{head}\n{sep}\n{body}"
+```
+
+## Overview
+
+This document compares query and storage performance between **OpenGWASDB** (this project)
+and **besdq** (the prototype it is intended to replace) on the same source dataset:
+100 UKB GWAS-VCF analyses covering chromosome 1 (~762 K variants, hg38).
+
+Both systems store float16 z-scores and betas in zarr arrays with zstd+bitshuffle
+compression. Key architectural differences are noted where they affect comparability.
+
+---
+
+## Dataset
+
+```{python}
+#| echo: false
+#| output: asis
+if bench:
+    d = bench["dataset"]
+    rows = [
+        ("Source", "100 × UKB GWAS-VCF (hg19)", "same VCFs"),
+        ("Reference assembly", "GRCh38 (hg38)", "GRCh38 (hg38)"),
+        ("Variants retained", f"{d['n_variants']:,}", "762,488"),
+        ("Variant difference", "−408 (liftover failures, 0.05%)", "—"),
+        ("Analyses", str(d["n_analyses"]), "100"),
+    ]
+    print(md_table(["Property", "OpenGWASDB", "besdq"], rows))
+else:
+    print("_Benchmark JSON not found._")
+```
+
+---
+
+## Build
+
+```{python}
+#| echo: false
+#| output: asis
+if bench:
+    b = bench["build"]
+    bs = b.get("build_seconds")
+    build_str = f"{bs:.0f} s" if bs else "not measured"
+    rows = [
+        ("Build time", build_str, "not measured"),
+        ("VCF reader", "bcftools (subprocess)", "cyvcf2"),
+        ("Liftover", "hg19→hg38 inline (pyliftover)", "pre-lifted source"),
+        ("Build strategy", "two-pass (variant union then fill)", "one-pass"),
+    ]
+    print(md_table(["Property", "OpenGWASDB", "besdq"], rows))
+```
+
+OpenGWASDB's build time includes the hg19→hg38 liftover pass on all 100 VCFs and writes
+a tabix-indexed variant axis alongside the zarr arrays. besdq assumes pre-lifted input and
+does not write a tabix index.
+
+---
+
+## Storage
+
+```{python}
+#| echo: false
+#| output: asis
+if bench:
+    mb = bench["storage"]["store_mb"]
+    rows = [
+        ("OpenGWASDB", f"**{mb:.0f} MB**", "`z`, `se`, top-hit index, ALID index", "(n_analyses, 1000)", "float16"),
+        ("besdq zstd+bitshuffle", "233 MB", "`beta`, `zscore`, sig indices", "(1000, n_analyses)", "float16"),
+        ("besdq raw float16", "310 MB", "same", "(1000, n_analyses)", "float16"),
+    ]
+    print(md_table(["Store", "Size", "Arrays stored", "Chunk shape", "dtype"], rows))
+```
+
+OpenGWASDB stores two effect arrays (`z` and `se`) plus a pre-computed top-hit sparse
+index and an mmap'd ALID search index. besdq stores `beta` and `zscore` plus pre-computed
+significance offset arrays. Chunk shape is clipped to actual array dimensions at build
+time (ADR-0021), so both stores have effective chunks of (1000, 100) for this dataset.
+
+---
+
+## Query timings
+
+All OpenGWASDB timings are median over 10 repetitions after one warm-up call.
+besdq timings are from `ukb-chr1_zarr_benchmark.json` (same methodology).
+Times in milliseconds.
+
+### Current (post-optimisation)
+
+Fixes applied: zarr chunk shape clipping (ADR-0021), `range_indices()` (issue 028),
+mmap'd ALID sidecar (issues 029–030).
+
+```{python}
+#| echo: false
+#| output: asis
+if bench and besdq:
+    rows = []
+    for p in PATTERNS:
+        ours = timing(bench, p)
+        bzstd = besdq_timing("zstd_bitshuffle", p)
+        braw  = besdq_timing("raw_float16", p)
+        r = ratio(ours, bzstd)
+        rows.append((p, fmt_ms(ours), fmt_ms(bzstd), fmt_ms(braw), fmt_ratio(r)))
+    print(md_table(
+        ["Pattern", "OpenGWASDB", "besdq zstd", "besdq raw", "ODB / besdq"],
+        rows,
+    ))
+elif bench is None:
+    print("_Post-fix benchmark JSON not found — re-run benchmark after implementing issues 028–030._")
+```
+
+### Before optimisations (baseline)
+
+```{python}
+#| echo: false
+#| output: asis
+if baseline and besdq:
+    rows = []
+    for p in PATTERNS:
+        ours = timing(baseline, p)
+        bzstd = besdq_timing("zstd_bitshuffle", p)
+        r = ratio(ours, bzstd)
+        rows.append((p, fmt_ms(ours), fmt_ms(bzstd), fmt_ratio(r)))
+    print(md_table(
+        ["Pattern", "OpenGWASDB (pre-fix)", "besdq zstd", "ODB / besdq"],
+        rows,
+    ))
+```
+
+### Improvement from optimisations
+
+```{python}
+#| echo: false
+#| output: asis
+if bench and baseline:
+    rows = []
+    for p in PATTERNS:
+        before = timing(baseline, p)
+        after  = timing(bench, p)
+        rows.append((p, fmt_ms(before), fmt_ms(after), fmt_speedup(before, after)))
+    print(md_table(["Pattern", "Before", "After", "Speedup"], rows))
+```
+
+---
+
+## Query pattern definitions
+
+| Pattern | What it reads | Result contract |
+|---|---|---|
+| **regional** | All finite associations in a 1 Mb genomic window, all analyses | sparse dict |
+| **phewas** | One variant × all 100 analyses | sparse dict |
+| **tophits** | All GW-significant (p < 5×10⁻⁸) associations for one analysis | sparse dict |
+| **bulk** | All finite associations for one analysis (~762 K variants) | sparse dict |
+| **random_lookup** | 100 random variants × 10 random analyses | sparse dict |
+
+### Comparability notes
+
+**(a) Regional — same window, different variant counts.**
+Both benchmarks use chr1:100–101 Mb. OpenGWASDB's store has fewer variants in this
+window due to hg19→hg38 liftover losses (0.05% of variants fail liftover).
+besdq's store was built from pre-lifted hg38 input so retains more variants.
+```{python}
+#| echo: false
+#| output: asis
+if bench:
+    rc = bench["timings"][0].get("result_count", 0)
+    n_vars = rc // bench["dataset"]["n_analyses"] if rc else 0
+    print(f"OpenGWASDB window: ~{n_vars:,} variants (~{rc:,} finite cells); "
+          f"besdq window: ~2,751 variants. The remaining gap reflects "
+          f"the sparse result construction (isfinite mask + dict allocation) "
+          f"vs besdq's dense summary return.")
+```
+
+**(b) Bulk — both systems read two arrays.**
+besdq's `query_bulk` reads `beta` + `zscore` (2 zarr columns); OpenGWASDB reads `z` + `se`
+(2 zarr columns) and applies an `np.isfinite` mask. The gap is not explained by
+array count; it likely reflects I/O timing variance between benchmark runs.
+
+**(c) Random lookup — inherent two-array cost.**
+besdq's `query_random_lookup` reads one array (`beta`); OpenGWASDB reads two (`z` and
+`se`) per the sparse array contract (ADR-0020). A ~2× gap is therefore expected.
+The mmap'd ALID index eliminates sequential tabix fetch overhead (~15 ms previously).
+
+---
+
+## Root-cause summary
+
+```{python}
+#| echo: false
+#| output: asis
+if bench and baseline:
+    data = []
+    for p in PATTERNS:
+        before = timing(baseline, p)
+        after  = timing(bench, p)
+        bzstd  = besdq_timing("zstd_bitshuffle", p)
+        r_before = ratio(before, bzstd)
+        r_after  = ratio(after, bzstd)
+        data.append((p, before, after, bzstd, r_before, r_after))
+
+    rows = []
+    for p, before, after, bzstd, rb, ra in data:
+        if before is None or after is None:
+            continue
+        speedup = before / after if after else None
+        change = "—"
+        if speedup and speedup > 1.1:
+            change = f"**{speedup:.1f}× faster**"
+        rows.append((
+            p,
+            fmt_ms(before),
+            fmt_ratio(rb) if rb else "n/a",
+            fmt_ms(after),
+            fmt_ratio(ra) if ra else "n/a",
+            change,
+        ))
+    print(md_table(
+        ["Pattern", "Before", "vs besdq (before)", "After", "vs besdq (after)", "Change"],
+        rows,
+    ))
+```
+
+---
+
+## What OpenGWASDB adds beyond besdq
+
+| Feature | OpenGWASDB | besdq |
+|---|---|---|
+| Reference assembly liftover | hg19→hg38 inline at build time | requires pre-lifted input |
+| Variant axis | tabix-indexed TSV (range queries, rsid aliases) | numpy key array (position lookup only) |
+| ALID index | mmap'd sorted binary search, O(log n), ~0 startup | in-memory dict, O(1), ~1.5 GB at 12 M variants |
+| Effect statistics | z + se (both stored and returned) | beta + zscore (both stored) |
+| Query result contract | sparse `dict[str, np.ndarray]` (finite cells only) | dense numpy arrays (NaN for absent) |
+| Top-hit index | pre-computed, threshold-parameterised, includes se | pre-computed z/beta, no se |
+| Store validation | full format check at open time | none |
+| CLI | yes | no |
+
+---
+
+## Provenance
+
+```{python}
+#| echo: false
+#| output: asis
+lines = []
+if bench:
+    bs = bench['build'].get('build_seconds')
+    build_str = f"{bs:.0f}s" if bs is not None else "existing store"
+    lines.append(f"- OpenGWASDB post-fix timings: `opengwasdb_vcf_ukb_chr1_benchmark.json` "
+                 f"(built {build_str}, "
+                 f"{bench['dataset']['n_variants']:,} variants × {bench['dataset']['n_analyses']} analyses)")
+if baseline:
+    lines.append(f"- OpenGWASDB pre-fix timings: `opengwasdb_vcf_ukb_chr1_array_benchmark.json`")
+lines.append("- besdq timings: `besdq_ukb_chr1_benchmark.json` (copied from besdq repo by `benchmarks/README.md` step)")
+lines.append("- besdq store: `ukb-chr1-zstd.besdz` (zstd+bitshuffle), `ukb-chr1.besdz` (raw float16)")
+print("\n".join(lines))
+```

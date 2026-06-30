@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 import zarr
@@ -15,6 +13,11 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     assert (dense_store_path / "manifest.json").exists()
     assert (dense_store_path / "index.sqlite").exists()
     assert (dense_store_path / "data.zarr").exists()
+    assert (dense_store_path / "variants.tsv.gz").exists()
+    assert (dense_store_path / "variants.tsv.gz.tbi").exists()
+    assert (dense_store_path / "variant_offsets.npy").exists()
+    assert (dense_store_path / "variant_alid_bytes.npy").exists()
+    assert (dense_store_path / "variant_alid_rows.npy").exists()
 
     result = validate_store(dense_store_path)
     assert result.ok, result.errors
@@ -22,7 +25,9 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r")
     assert root["z"].shape == (3, 2)
     assert root["se"].shape == (3, 2)
-    assert root["z"].chunks == (1000, 1000)
+    assert root["z"].chunks == (3, 2)  # clipped to array shape
+
+    import math
 
     z = root["z"][:].astype("float32")
     se = root["se"][:].astype("float32")
@@ -37,66 +42,104 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
         assert get_metadata(connection, "n_variants") == 3
         assert get_metadata(connection, "n_analyses") == 2
         dense_meta = get_metadata(connection, "dense")
+        variant_rows = connection.execute("SELECT COUNT(*) AS n FROM variants").fetchone()["n"]
+        aliases = connection.execute(
+            "SELECT alias, variant_index FROM variant_aliases ORDER BY alias, variant_index"
+        ).fetchall()
+    assert variant_rows == 0
+    assert [(row["alias"], row["variant_index"]) for row in aliases] == [
+        ("rs1", 0),
+        ("rs2", 1),
+        ("rs3", 2),
+    ]
     assert dense_meta["chunk_shape"] == [1000, 1000]
     assert dense_meta["compressor"]["cname"] == "zstd"
     assert dense_meta["compressor"]["shuffle"] == "bitshuffle"
+    assert dense_meta["variant_axis"]["format"] == "tabix_tsv_v1"
+
+
+def test_query_facade_supports_variant_range_analysis_phewas_top_hits_and_metadata(
+    dense_store_path,
+):
+    # z matrix (3 variants × 2 analyses):
+    #   a1(0)  a2(1)
+    #   2.0    6.0   ← variant 0: 1:100:A:G (rs1)
+    #  -3.0    NaN   ← variant 1: 1:200:C:T (rs2)
+    #   NaN    6.0   ← variant 2: 1:300:A:G (rs3)
+    query = query_store(dense_store_path)
+
+    # phewas via alias — variant 0 has data in both analyses
+    phewas = query.phewas("rs1")
+    assert sorted(phewas["analysis_index"].tolist()) == [0, 1]
+    assert len(phewas["z"]) == 2
+
+    # range: variants 0 and 1 are in [1, 250]; variant 1 missing a2 → 3 cells
+    range_res = query.range("1", 1, 250)
+    cells = sorted(zip(range_res["variant_index"].tolist(), range_res["analysis_index"].tolist()))
+    assert cells == [(0, 0), (0, 1), (1, 0)]
+
+    # analysis: a1 has cells for variants 0 and 1 only
+    a1 = query.analysis("a1")
+    assert sorted(a1["variant_index"].tolist()) == [0, 1]
+    assert (a1["analysis_index"] == 0).all()
+    z_by_vi = {v: z for v, z in zip(a1["variant_index"].tolist(), a1["z"].tolist())}
+    assert z_by_vi[0] == pytest.approx(2.0, rel=5e-3)
+    assert z_by_vi[1] == pytest.approx(-3.0, rel=5e-3)
+
+    # lookup: 3 finite cells out of 4 requested (1:300×a1 is NaN)
+    lookup = query.lookup(["1:100:A:G", "1:300:A:G"], ["a1", "a2"])
+    assert len(lookup["z"]) == 3
+
+    # top_hits: only |z|=6.0 cells pass p < 5e-8 → 2 cells (both a2)
+    top_hits = query.top_hits(threshold=5e-8)
+    assert len(top_hits["z"]) == 2
+    assert all(abs(z) >= 6.0 for z in top_hits["z"])
+    assert (top_hits["analysis_index"] == 1).all()
+
+    # metadata accessors
+    variants = query.variants_table()
+    assert len(variants) == 3
+    assert variants[0]["alid"] == "1:100:A:G"
+    assert variants[0]["rsid"] == "rs1"
+
+    analyses = query.analyses_table()
+    assert len(analyses) == 2
+    assert analyses[0]["analysis_id"] == "a1"
+    assert analyses[1]["stored_effect_scale"] == "log_or"
 
 
 def test_dense_index_does_not_duplicate_canonical_alids(dense_store_path):
-    with connect(dense_store_path / "index.sqlite") as connection:
-        indexes = connection.execute("PRAGMA index_list(variants)").fetchall()
-        aliases = connection.execute("SELECT alias FROM variant_aliases ORDER BY alias").fetchall()
-
-    assert all(not bool(index["unique"]) for index in indexes)
-    assert [row["alias"] for row in aliases] == ["rs1", "rs2", "rs3"]
-
-
-def test_query_facade_supports_variant_range_analysis_phewas_and_top_hits(dense_store_path):
     query = query_store(dense_store_path)
-
-    by_alias = query.variant("rs1")
-    assert [row.analysis_id for row in by_alias] == ["a1", "a2"]
-    assert by_alias[1].beta == pytest.approx(1.2, rel=5e-4)
-    assert by_alias[1].stored_effect_scale == "log_or"
-    assert by_alias[1].p_value < 5e-8
-
-    range_results = query.range("1", 1, 250)
-    assert [(row.alid, row.analysis_id) for row in range_results] == [
-        ("1:100:A:G", "a1"),
-        ("1:100:A:G", "a2"),
-        ("1:200:C:T", "a1"),
-    ]
-
-    a1 = query.analysis("a1")
-    assert [(row.alid, row.z) for row in a1] == [("1:100:A:G", 2.0), ("1:200:C:T", -3.0)]
-    a1_arrays = query.analysis_arrays("a1")
-    assert a1_arrays is not None
-    assert a1_arrays["z"].shape == (3,)
-
-    phewas = query.phewas("1:100:A:G")
-    assert [row.analysis_id for row in phewas] == ["a1", "a2"]
-
-    lookup = query.lookup(["1:100:A:G", "1:300:A:G"], ["a1", "a2"])
-    assert [(row.alid, row.analysis_id) for row in lookup] == [
-        ("1:100:A:G", "a1"),
-        ("1:100:A:G", "a2"),
-        ("1:300:A:G", "a2"),
-    ]
-
-    top_hits = query.top_hits(threshold=5e-8)
-    assert [(row.alid, row.analysis_id, row.z) for row in top_hits] == [
-        ("1:100:A:G", "a2", 6.0),
-        ("1:300:A:G", "a2", 6.0),
-    ]
+    variants = query.variants_table()
+    alids = [v["alid"] for v in variants.values()]
+    assert len(alids) == len(set(alids))
 
 
 def test_query_excludes_missing_dense_cells(dense_store_path):
     query = query_store(dense_store_path)
 
-    results = query.range("1", 150, 350)
+    result = query.range("1", 150, 350)
 
-    assert [(row.alid, row.analysis_id) for row in results] == [
-        ("1:200:C:T", "a1"),
-        ("1:300:A:G", "a2"),
-    ]
-    assert all(np.isfinite(row.z) and np.isfinite(row.se) for row in results)
+    # variant 1 (pos 200) has a1 only; variant 2 (pos 300) has a2 only → 2 cells
+    assert len(result["z"]) == 2
+    assert all(np.isfinite(result["z"]))
+    assert all(np.isfinite(result["se"]))
+
+
+def test_range_indices_matches_range_variant_index(dense_store_path):
+    from opengwasdb.index import connect
+    from opengwasdb.variants import VariantAxis
+
+    with connect(dense_store_path / "index.sqlite") as conn:
+        va = VariantAxis(dense_store_path, conn)
+        full_records = va.range("1", 1, 500)
+        fast_indices = va.range_indices("1", 1, 500)
+        va.close()
+
+    expected = np.array([r.variant_index for r in full_records], dtype="int32")
+    assert np.array_equal(fast_indices, expected)
+    # empty range returns empty array
+    with connect(dense_store_path / "index.sqlite") as conn:
+        va = VariantAxis(dense_store_path, conn)
+        assert len(va.range_indices("1", 999999, 999999)) == 0
+        va.close()

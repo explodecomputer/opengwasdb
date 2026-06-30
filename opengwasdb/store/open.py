@@ -27,6 +27,18 @@ class OpenGWASDBStore:
     def data_path(self) -> Path:
         return self.path / "data.zarr"
 
+    @property
+    def variant_table_path(self) -> Path:
+        return self.path / "variants.tsv.gz"
+
+    @property
+    def variant_tabix_path(self) -> Path:
+        return self.path / "variants.tsv.gz.tbi"
+
+    @property
+    def variant_offsets_path(self) -> Path:
+        return self.path / "variant_offsets.npy"
+
     def query(self) -> StoreQuery:
         from opengwasdb.query.facade import StoreQuery
 

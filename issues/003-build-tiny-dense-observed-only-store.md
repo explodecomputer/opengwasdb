@@ -6,7 +6,7 @@
 
 Build a tiny Dense Observed-Only Store Release end to end from deterministic fixture inputs. The output must contain `manifest.json`, `index.sqlite`, and `data.zarr/` with `z` and `se` arrays, using the source-faithful dense variant axis required by the v0.1 specification.
 
-Use `/Users/gh13047/repo/besdq/data/ebi_input/` and `/Users/gh13047/repo/besdq/data/38714679/` as references for realistic source and intermediate structures, but the test fixture used by this issue should live in OpenGWASDB so the test suite is self-contained.
+Use `/Users/gh13047/repo/besdq/data/ebi_input/` as the realistic Dense-mode source reference, but the test fixture used by this issue should live in OpenGWASDB so the test suite is self-contained. Do not use or compare the sparse `38714679` fixture for the Dense vertical slice.
 
 ## Acceptance criteria
 

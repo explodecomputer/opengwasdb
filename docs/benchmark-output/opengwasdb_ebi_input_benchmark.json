@@ -1,6 +1,6 @@
 {
   "build": {
-    "build_seconds": 275.383,
+    "build_seconds": 284.642,
     "store_path": "/Users/gh13047/repo/opengwasdb/docs/benchmark-output/ebi_input_dense.opengwasdb"
   },
   "dataset": {
@@ -127,39 +127,48 @@
     "top_hit_threshold": 5e-08
   },
   "storage": {
-    "opengwasdb_store_bytes": 993924043,
+    "components": {
+      "data_zarr": 270372736,
+      "index_sqlite": 368349184,
+      "manifest_json": 1293,
+      "top_hits": 101171,
+      "variant_offsets_npy": 61484952,
+      "variants_tbi": 1478308,
+      "variants_tsv_gz": 108809898
+    },
+    "opengwasdb_store_bytes": 810496371,
     "raw_tsv_gz_bytes": 1001477812,
     "raw_tsv_gz_plus_sidecars_bytes": 1005996242,
-    "raw_tsv_gz_to_store_ratio": 1.0075999459447627
+    "raw_tsv_gz_to_store_ratio": 1.2356351586921541
   },
   "timings": [
     {
-      "median_ms": 69.29,
-      "p95_ms": 70.021,
+      "median_ms": 74.581,
+      "p95_ms": 75.499,
       "query": "regional",
       "result_count": 26613
     },
     {
-      "median_ms": 0.784,
-      "p95_ms": 1.291,
+      "median_ms": 0.788,
+      "p95_ms": 0.917,
       "query": "phewas",
       "result_count": 3
     },
     {
-      "median_ms": 1.072,
-      "p95_ms": 1.202,
+      "median_ms": 10.665,
+      "p95_ms": 10.955,
       "query": "tophits",
       "result_count": 177
     },
     {
-      "median_ms": 5045.381,
-      "p95_ms": 5135.246,
+      "median_ms": 5166.538,
+      "p95_ms": 5800.412,
       "query": "bulk_arrays",
       "result_count": 7685603
     },
     {
-      "median_ms": 50.244,
-      "p95_ms": 51.946,
+      "median_ms": 55.497,
+      "p95_ms": 57.329,
       "query": "random_lookup",
       "result_count": 300
     }

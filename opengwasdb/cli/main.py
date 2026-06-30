@@ -3,10 +3,11 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import typer
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
-from opengwasdb.query import AssociationResult, query_store
+from opengwasdb.query import query_store
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
 
@@ -72,11 +73,11 @@ def build_dense_command(
     )
 
 
-@app.command("query-variant")
-def query_variant_command(store_path: Path, identifier: str) -> None:
-    """Query one variant by canonical ALID or alias across analyses."""
+@app.command("query-phewas")
+def query_phewas_command(store_path: Path, identifier: str) -> None:
+    """Extract one variant across all analyses (PheWAS)."""
 
-    _emit_results(query_store(store_path).variant(identifier))
+    _emit_results(query_store(store_path).phewas(identifier))
 
 
 @app.command("query-range")
@@ -85,11 +86,10 @@ def query_range_command(
     chromosome: str,
     start: int,
     end: int,
-    analysis_id: str | None = typer.Option(None),
 ) -> None:
     """Query a genomic range."""
 
-    _emit_results(query_store(store_path).range(chromosome, start, end, analysis_id=analysis_id))
+    _emit_results(query_store(store_path).range(chromosome, start, end))
 
 
 @app.command("query-analysis")
@@ -97,13 +97,6 @@ def query_analysis_command(store_path: Path, analysis_id: str) -> None:
     """Extract all finite associations for one analysis."""
 
     _emit_results(query_store(store_path).analysis(analysis_id))
-
-
-@app.command("query-phewas")
-def query_phewas_command(store_path: Path, identifier: str) -> None:
-    """Extract one variant across all analyses."""
-
-    _emit_results(query_store(store_path).phewas(identifier))
 
 
 @app.command("query-lookup")
@@ -129,5 +122,20 @@ def query_top_hits_command(
     _emit_results(query_store(store_path).top_hits(threshold=threshold, limit=limit))
 
 
-def _emit_results(results: list[AssociationResult]) -> None:
-    typer.echo(json.dumps([result.to_dict() for result in results], sort_keys=True))
+def _emit_results(result: dict[str, np.ndarray]) -> None:
+    rows = [
+        {
+            "variant_index": int(vi),
+            "analysis_index": int(ai),
+            "z": float(z),
+            "se": float(se),
+        }
+        for vi, ai, z, se in zip(
+            result["variant_index"],
+            result["analysis_index"],
+            result["z"],
+            result["se"],
+            strict=True,
+        )
+    ]
+    typer.echo(json.dumps(rows, sort_keys=True))

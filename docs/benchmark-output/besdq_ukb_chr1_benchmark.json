@@ -1,0 +1,46 @@
+{
+  "raw_float16": {
+    "regional": {
+      "median_ms": 2.718,
+      "p95_ms": 3.214
+    },
+    "phewas": {
+      "median_ms": 0.334,
+      "p95_ms": 0.47
+    },
+    "tophits": {
+      "median_ms": 0.698,
+      "p95_ms": 0.797
+    },
+    "bulk": {
+      "median_ms": 251.373,
+      "p95_ms": 280.894
+    },
+    "random_lookup": {
+      "median_ms": 7.269,
+      "p95_ms": 10.693
+    }
+  },
+  "zstd_bitshuffle": {
+    "regional": {
+      "median_ms": 4.988,
+      "p95_ms": 5.715
+    },
+    "phewas": {
+      "median_ms": 0.906,
+      "p95_ms": 1.003
+    },
+    "tophits": {
+      "median_ms": 0.688,
+      "p95_ms": 0.785
+    },
+    "bulk": {
+      "median_ms": 490.517,
+      "p95_ms": 540.582
+    },
+    "random_lookup": {
+      "median_ms": 30.424,
+      "p95_ms": 30.978
+    }
+  }
+}

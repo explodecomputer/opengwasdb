@@ -1,0 +1,55 @@
+---
+title: "UKB chr1 Dense Store — Array Query API Benchmark"
+subtitle: "chr1 × 100 UKB analyses · sparse flat array return contract"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+---
+
+## Dataset
+
+| Field | Value |
+|---|---:|
+| Variants (hg38) | 762,080 |
+| Analyses | 100 |
+| Store size | 309.4 MB |
+| Build time | not rebuilt — existing store reused |
+| Liftover failures | 0 |
+| Store path | `/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_dense.opengwasdb` |
+
+## Query API
+
+All five query methods return `dict[str, np.ndarray]` with four parallel sparse
+flat arrays (`variant_index`, `analysis_index`, `z`, `se`), matching the format
+of the internal top-hit index. `AssociationResult` Python object materialisation
+is completely eliminated.
+
+## Timings
+
+Each pattern ran 10 repetitions after one warm-up call.
+Row API column shows the previous `AssociationResult` baseline for comparison.
+besdq column is the besdq zarr `zstd_bitshuffle` baseline.
+
+| Query | Median ms | p95 ms | Result count | Row API ms | Speedup | besdq ms | vs besdq |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| regional | 16.0 | 17.8 | 154,615 | n/a | n/a | 4.988 | 3.2× ⚠ |
+| phewas | 1.8 | 2.2 | 100 | n/a | n/a | 0.906 | 2.0× ⚠ |
+| tophits | 1.4 | 1.8 | 14,557 | n/a | n/a | 0.688 | 2.1× ⚠ |
+| bulk | 854.4 | 937.2 | 762,080 | n/a | n/a | 490.517 | 1.7× |
+| random_lookup | 126.3 | 190.4 | 598 | n/a | n/a | 30.424 | 4.2× ⚠ |
+
+## Interpretation
+
+- WARNING: 3.2× slower than besdq zstd_bitshuffle baseline.
+- WARNING: 2.0× slower than besdq zstd_bitshuffle baseline.
+- WARNING: 2.1× slower than besdq zstd_bitshuffle baseline.
+- WARNING: 4.2× slower than besdq zstd_bitshuffle baseline.
+
+## Provenance
+
+- JSON results: `opengwasdb_vcf_ukb_chr1_benchmark.json`
+- Row-API baseline: `n/a`
+- besdq baseline: `ukb-chr1_zarr_benchmark.json`

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+import numpy as np
 import zarr
 
 from opengwasdb.validation import validate_store
@@ -58,3 +59,24 @@ def test_validator_rejects_inconsistent_top_hit_index(dense_store_path):
 
     assert not result.ok
     assert any("top-hit index p_5e_08" in error for error in result.errors)
+
+
+def test_validator_rejects_missing_variant_axis_file(dense_store_path):
+    (dense_store_path / "variants.tsv.gz").unlink()
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert "missing variants.tsv.gz" in result.errors
+
+
+def test_validator_rejects_bad_variant_offset(dense_store_path):
+    offsets_path = dense_store_path / "variant_offsets.npy"
+    offsets = np.load(offsets_path)
+    offsets[1] = offsets[0]
+    np.save(offsets_path, offsets)
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("variant offset for row 1" in error for error in result.errors)

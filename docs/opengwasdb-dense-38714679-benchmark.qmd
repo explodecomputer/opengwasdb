@@ -1,6 +1,6 @@
 ---
-title: "OpenGWASDB Dense Observed-Only Benchmark"
-subtitle: "Local 38714679 fixture · 60 analyses"
+title: "Archived Sparse Fixture Smoke Test"
+subtitle: "Local 38714679 fixture · not a Dense vertical-slice benchmark"
 date: today
 format:
   html:
@@ -12,11 +12,11 @@ format:
 
 ## Summary
 
-This benchmark uses the local `besdq/data/38714679/38714679` fixture because the
-UKB chr1 VCF directory used by the original `besdq` dense benchmark is not
-present in this checkout.
+This document is retained only as an archived smoke-test record for the local
+`besdq/data/38714679/38714679` fixture. The dataset is sparse and is not used or
+compared for Dense-mode vertical-slice evaluation.
 
-The workload mirrors the `besdq` dense query benchmark:
+The historical workload was:
 
 1. regional query;
 2. PheWAS-style single variant across analyses;
@@ -45,10 +45,10 @@ The workload mirrors the `besdq` dense query benchmark:
 | Combined benchmark source TSV.gz | 8.53 MB | 0.82× raw TSV.gz |
 | OpenGWASDB dense store | 14.59 MB | 1.41× raw TSV.gz |
 
-For this sparse molecular-style fixture, the dense store is expected to be
+For this sparse molecular-style fixture, the dense store was expected to be
 larger than the raw gzipped inputs because most dense cells are missing. This is
-not the target shape for Dense mode; it is a local performance smoke test using
-available data.
+not the target shape for Dense mode. The active Dense-mode benchmark now uses
+the full GWAS-SSF files in `besdq/data/ebi_input`.
 
 ## Query selection
 
@@ -75,6 +75,7 @@ query repeated 20 times.
 
 ## Interpretation
 
+- This fixture should not be used as evidence for Dense-mode storage footprint.
 - Batched query paths are fast on this small local fixture: PheWAS is sub-ms,
   random lookup and top hits are tens of milliseconds, and the largest regional
   query is dominated by materialising tens of thousands of Python result rows.
@@ -82,8 +83,8 @@ query repeated 20 times.
   fixture because the observed cell fraction is low. That reinforces the current
   design split: Dense for many analyses over a shared variant axis; Ragged/Sparse
   for cis-and-signals molecular datasets.
-- The benchmark still validates the v0.1 implementation path: build, validate,
-  top-hit index, layout-independent queries, and rendered documentation.
+- The active Dense-mode benchmark and comparison target is
+  `docs/opengwasdb-dense-ebi-input-benchmark.qmd`.
 
 ## Artifacts
 
