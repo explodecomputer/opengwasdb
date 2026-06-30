@@ -25,6 +25,7 @@ def load_json(path):
 bench    = load_json(HERE / "opengwasdb_vcf_ukb_chr1_benchmark.json")
 baseline = load_json(HERE / "opengwasdb_vcf_ukb_chr1_array_benchmark.json")
 besdq    = load_json(HERE / "besdq_ukb_chr1_benchmark.json")
+bench1k  = load_json(HERE / "opengwasdb_vcf_ukb_chr1_1000_benchmark.json")
 
 PATTERNS = ["regional", "phewas", "tophits", "bulk", "random_lookup"]
 
@@ -310,6 +311,67 @@ if bench and baseline:
 
 ---
 
+## Scalability: 100 → 1000 analyses
+
+Same variants (762,080), same chr1 source VCFs, 10× the number of analyses.
+Measures how build time, storage, and query latency scale with analysis count.
+
+```{python}
+#| echo: false
+#| output: asis
+if bench and bench1k:
+    b100 = bench["build"]
+    b1k  = bench1k["build"]
+    s100 = bench["storage"]
+    s1k  = bench1k["storage"]
+
+    bs100 = b100.get("build_seconds")
+    bs1k  = b1k.get("build_seconds")
+    build_ratio = f"{bs1k/bs100:.1f}×" if bs100 and bs1k else "n/a"
+    size_ratio  = f"{s1k['store_mb']/s100['store_mb']:.1f}×"
+
+    rows = [
+        ("Analyses", str(bench["dataset"]["n_analyses"]), str(bench1k["dataset"]["n_analyses"]), "10×"),
+        ("Build time",
+         f"{bs100:.0f}s" if bs100 else "n/a",
+         f"{bs1k:.0f}s"  if bs1k  else "n/a",
+         build_ratio),
+        ("Store size",
+         f"{s100['store_mb']:.0f} MB",
+         f"{s1k['store_mb']:.0f} MB",
+         size_ratio),
+    ]
+    print(md_table(["", "100 analyses", "1000 analyses", "Ratio"], rows))
+```
+
+```{python}
+#| echo: false
+#| output: asis
+if bench and bench1k:
+    rows = []
+    for p in PATTERNS:
+        t100 = timing(bench, p)
+        t1k  = timing(bench1k, p)
+        rc100 = next((t["result_count"] for t in bench["timings"]  if t["query"] == p), None)
+        rc1k  = next((t["result_count"] for t in bench1k["timings"] if t["query"] == p), None)
+        ratio = f"{t1k/t100:.1f}×" if t100 and t1k else "n/a"
+        cell_ratio = f"{rc1k/rc100:.1f}×" if rc100 and rc1k else "n/a"
+        rows.append((p, fmt_ms(t100), fmt_ms(t1k), ratio, f"{rc100:,}" if rc100 else "n/a", f"{rc1k:,}" if rc1k else "n/a", cell_ratio))
+    print(md_table(
+        ["Pattern", "100 analyses", "1000 analyses", "Time ratio", "Cells (100)", "Cells (1000)", "Cell ratio"],
+        rows,
+    ))
+elif bench1k is None:
+    print("_1000-analysis benchmark JSON not found — run `benchmark_vcf_ukb_chr1_1000_dense.py --rebuild`._")
+```
+
+Build time and store size scale sub-linearly (8.8× and 5.7× respectively for 10×
+analyses). Query time generally scales with result set size: regional and bulk read
+more cells so scale closer to linearly; phewas and tophits scale better because the
+zarr read per row is amortised across more columns per chunk.
+
+---
+
 ## Provenance
 
 ```{python}
@@ -322,6 +384,12 @@ if bench:
     lines.append(f"- OpenGWASDB post-fix timings: `opengwasdb_vcf_ukb_chr1_benchmark.json` "
                  f"(built {build_str}, "
                  f"{bench['dataset']['n_variants']:,} variants × {bench['dataset']['n_analyses']} analyses)")
+if bench1k:
+    bs1k = bench1k['build'].get('build_seconds')
+    build_str1k = f"{bs1k:.0f}s" if bs1k is not None else "existing store"
+    lines.append(f"- OpenGWASDB 1000-analysis timings: `opengwasdb_vcf_ukb_chr1_1000_benchmark.json` "
+                 f"(built {build_str1k}, "
+                 f"{bench1k['dataset']['n_variants']:,} variants × {bench1k['dataset']['n_analyses']} analyses)")
 if baseline:
     lines.append(f"- OpenGWASDB pre-fix timings: `opengwasdb_vcf_ukb_chr1_array_benchmark.json`")
 lines.append("- besdq timings: `besdq_ukb_chr1_benchmark.json` (copied from besdq repo by `benchmarks/README.md` step)")

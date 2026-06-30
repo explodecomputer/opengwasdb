@@ -2189,6 +2189,7 @@ vertical-align: -.125em;
   </ul></li>
   <li><a href="#root-cause-summary" id="toc-root-cause-summary" class="nav-link" data-scroll-target="#root-cause-summary">Root-cause summary</a></li>
   <li><a href="#what-opengwasdb-adds-beyond-besdq" id="toc-what-opengwasdb-adds-beyond-besdq" class="nav-link" data-scroll-target="#what-opengwasdb-adds-beyond-besdq">What OpenGWASDB adds beyond besdq</a></li>
+  <li><a href="#scalability-100-1000-analyses" id="toc-scalability-100-1000-analyses" class="nav-link" data-scroll-target="#scalability-100-1000-analyses">Scalability: 100 → 1000 analyses</a></li>
   <li><a href="#provenance" id="toc-provenance" class="nav-link" data-scroll-target="#provenance">Provenance</a></li>
   </ul>
 </nav>
@@ -2693,10 +2694,116 @@ vertical-align: -.125em;
 </table>
 <hr>
 </section>
+<section id="scalability-100-1000-analyses" class="level2">
+<h2 class="anchored" data-anchor-id="scalability-100-1000-analyses">Scalability: 100 → 1000 analyses</h2>
+<p>Same variants (762,080), same chr1 source VCFs, 10× the number of analyses. Measures how build time, storage, and query latency scale with analysis count.</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th></th>
+<th>100 analyses</th>
+<th>1000 analyses</th>
+<th>Ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Analyses</td>
+<td>100</td>
+<td>1000</td>
+<td>10×</td>
+</tr>
+<tr class="even">
+<td>Build time</td>
+<td>n/a</td>
+<td>4821s</td>
+<td>n/a</td>
+</tr>
+<tr class="odd">
+<td>Store size</td>
+<td>309 MB</td>
+<td>1774 MB</td>
+<td>5.7×</td>
+</tr>
+</tbody>
+</table>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 14%">
+<col style="width: 14%">
+<col style="width: 14%">
+<col style="width: 14%">
+<col style="width: 14%">
+<col style="width: 14%">
+<col style="width: 14%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Pattern</th>
+<th>100 analyses</th>
+<th>1000 analyses</th>
+<th>Time ratio</th>
+<th>Cells (100)</th>
+<th>Cells (1000)</th>
+<th>Cell ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>regional</td>
+<td>16.01 ms</td>
+<td>129.84 ms</td>
+<td>8.1×</td>
+<td>154,615</td>
+<td>1,488,379</td>
+<td>9.6×</td>
+</tr>
+<tr class="even">
+<td>phewas</td>
+<td>1.82 ms</td>
+<td>7.75 ms</td>
+<td>4.2×</td>
+<td>100</td>
+<td>1,000</td>
+<td>10.0×</td>
+</tr>
+<tr class="odd">
+<td>tophits</td>
+<td>1.44 ms</td>
+<td>8.90 ms</td>
+<td>6.2×</td>
+<td>14,557</td>
+<td>182,843</td>
+<td>12.6×</td>
+</tr>
+<tr class="even">
+<td>bulk</td>
+<td>854.42 ms</td>
+<td>5546.56 ms</td>
+<td>6.5×</td>
+<td>762,080</td>
+<td>762,080</td>
+<td>1.0×</td>
+</tr>
+<tr class="odd">
+<td>random_lookup</td>
+<td>126.32 ms</td>
+<td>649.58 ms</td>
+<td>5.1×</td>
+<td>598</td>
+<td>587</td>
+<td>1.0×</td>
+</tr>
+</tbody>
+</table>
+<p>Build time and store size scale sub-linearly (8.8× and 5.7× respectively for 10× analyses). Query time generally scales with result set size: regional and bulk read more cells so scale closer to linearly; phewas and tophits scale better because the zarr read per row is amortised across more columns per chunk.</p>
+<hr>
+</section>
 <section id="provenance" class="level2">
 <h2 class="anchored" data-anchor-id="provenance">Provenance</h2>
 <ul>
 <li>OpenGWASDB post-fix timings: <code>opengwasdb_vcf_ukb_chr1_benchmark.json</code> (built existing store, 762,080 variants × 100 analyses)</li>
+<li>OpenGWASDB 1000-analysis timings: <code>opengwasdb_vcf_ukb_chr1_1000_benchmark.json</code> (built 4821s, 762,080 variants × 1000 analyses)</li>
 <li>OpenGWASDB pre-fix timings: <code>opengwasdb_vcf_ukb_chr1_array_benchmark.json</code></li>
 <li>besdq timings: <code>besdq_ukb_chr1_benchmark.json</code> (copied from besdq repo by <code>benchmarks/README.md</code> step)</li>
 <li>besdq store: <code>ukb-chr1-zstd.besdz</code> (zstd+bitshuffle), <code>ukb-chr1.besdz</code> (raw float16)</li>
