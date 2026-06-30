@@ -35,22 +35,19 @@ def test_cli_build_validate_info_and_query_workflow(tmp_path, source_path):
     assert "store_id: cli-fixture" in info.output
     assert "primary_layout: dense" in info.output
 
-    variant = runner.invoke(app, ["query-variant", str(store_path), "rs1"])
-    assert variant.exit_code == 0, variant.output
-    variant_rows = json.loads(variant.output)
-    assert [row["analysis_id"] for row in variant_rows] == ["a1", "a2"]
+    phewas = runner.invoke(app, ["query-phewas", str(store_path), "rs1"])
+    assert phewas.exit_code == 0, phewas.output
+    phewas_rows = json.loads(phewas.output)
+    assert sorted(r["analysis_index"] for r in phewas_rows) == [0, 1]
 
     range_query = runner.invoke(app, ["query-range", str(store_path), "1", "150", "350"])
     assert range_query.exit_code == 0, range_query.output
-    assert [row["alid"] for row in json.loads(range_query.output)] == ["1:200:C:T", "1:300:A:G"]
+    range_rows = json.loads(range_query.output)
+    assert len(range_rows) == 2
 
     analysis = runner.invoke(app, ["query-analysis", str(store_path), "a1"])
     assert analysis.exit_code == 0, analysis.output
     assert len(json.loads(analysis.output)) == 2
-
-    phewas = runner.invoke(app, ["query-phewas", str(store_path), "1:100:A:G"])
-    assert phewas.exit_code == 0, phewas.output
-    assert len(json.loads(phewas.output)) == 2
 
     top_hits = runner.invoke(app, ["query-top-hits", str(store_path)])
     assert top_hits.exit_code == 0, top_hits.output

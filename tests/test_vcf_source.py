@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -187,3 +188,20 @@ def test_read_vcf_study_type_returns_scale(tmp_path):
     _write_vcf(vcf, "", study_type="CaseControl")
 
     assert read_vcf_study_type(vcf) == StoredEffectScale.LOG_OR
+
+
+def test_all_three_functions_raise_when_bcftools_not_on_path(tmp_path):
+    vcf = tmp_path / "test.vcf"
+    _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n")
+
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="bcftools"):
+            list(stream_vcf_variants(vcf))
+
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="bcftools"):
+            list(stream_vcf_associations(vcf))
+
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="bcftools"):
+            read_vcf_study_type(vcf)

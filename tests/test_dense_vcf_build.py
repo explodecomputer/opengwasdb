@@ -11,9 +11,10 @@ Known positions:
 
 from __future__ import annotations
 
-import math
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
@@ -96,6 +97,8 @@ def test_build_creates_standard_store_envelope(two_trait_store):
     assert (two_trait_store / "manifest.json").exists()
     assert (two_trait_store / "index.sqlite").exists()
     assert (two_trait_store / "data.zarr").exists()
+    assert (two_trait_store / "variants.tsv.gz").exists()
+    assert (two_trait_store / "variant_offsets.npy").exists()
 
 
 def test_validate_store_passes(two_trait_store):
@@ -104,8 +107,6 @@ def test_validate_store_passes(two_trait_store):
 
 
 def test_manifest_json_has_grch38_assembly(two_trait_store):
-    import json
-
     manifest = json.loads((two_trait_store / "manifest.json").read_text())
     assert manifest["reference_assembly"] == "GRCh38"
     assert manifest["completion_state"] == "observed_only"
@@ -122,46 +123,54 @@ def test_store_has_correct_dimensions(two_trait_store):
 def test_allele_flip_z_negated_when_alt_not_a1(two_trait_store):
     """Variants where ALT > REF (A1=REF) should have z negated."""
     query = query_store(two_trait_store)
-    results = {row.analysis_id: row for row in query.phewas(HG38_ALID_1)}
+    # Use lookup to get trait_a's z for ALID_1 directly
+    result = query.lookup([HG38_ALID_1], ["trait_a"])
+    assert len(result["z"]) == 1
     # ALT=G > REF=A → z was negated; ES=2.0/SE=0.5=4.0 → stored z=-4.0
-    assert results["trait_a"].z == pytest.approx(-4.0, rel=5e-3)
+    assert result["z"][0] == pytest.approx(-4.0, rel=5e-3)
 
 
 def test_z_not_negated_when_alt_is_a1(two_trait_store):
     """Variants where ALT < REF (A1=ALT) should preserve z sign."""
     query = query_store(two_trait_store)
-    results = {row.analysis_id: row for row in query.phewas(HG38_ALID_3)}
+    result = query.lookup([HG38_ALID_3], ["trait_a"])
+    assert len(result["z"]) == 1
     # ALT=A < REF=G → A is A1, no flip; ES=0.6/SE=0.2=3.0 → stored z=3.0
-    assert results["trait_a"].z == pytest.approx(3.0, rel=5e-3)
+    assert result["z"][0] == pytest.approx(3.0, rel=5e-3)
 
 
-def test_missing_cells_are_nan(two_trait_store):
-    """trait_b does not have a value for HG38_ALID_2; cell should be absent."""
+def test_missing_cells_are_absent(two_trait_store):
+    """trait_b does not have a value for HG38_ALID_2; only one analysis returned."""
     query = query_store(two_trait_store)
-    results = {row.analysis_id: row for row in query.phewas(HG38_ALID_2)}
-    assert "trait_b" not in {row.analysis_id for row in query.phewas(HG38_ALID_2)}
+    result = query.phewas(HG38_ALID_2)
+    # Only trait_a has data for variant at HG38_ALID_2
+    assert len(result["z"]) == 1
+    analyses = query.analyses_table()
+    trait_b_idx = next(k for k, v in analyses.items() if v["analysis_id"] == "trait_b")
+    assert trait_b_idx not in result["analysis_index"].tolist()
 
 
 def test_range_query_returns_expected_variants(two_trait_store):
     query = query_store(two_trait_store)
-    rows = query.range("1", 50_000, 200_000)
-    alids = {row.alid for row in rows}
+    result = query.range("1", 50_000, 200_000)
+    variants = query.variants_table()
+    alids = {variants[int(vi)]["alid"] for vi in result["variant_index"]}
     assert HG38_ALID_1 in alids
 
 
 def test_analysis_query_returns_all_variants_for_trait(two_trait_store):
     query = query_store(two_trait_store)
-    rows = list(query.analysis("trait_a"))
-    assert len(rows) == 3
-    assert all(math.isfinite(row.z) for row in rows)
+    result = query.analysis("trait_a")
+    assert len(result["z"]) == 3
+    assert all(np.isfinite(result["z"]))
 
 
 def test_stored_effect_scale_matches_vcf_study_type(two_trait_store):
     query = query_store(two_trait_store)
-    rows_a = query.phewas(HG38_ALID_1)
-    by_analysis = {row.analysis_id: row for row in rows_a}
-    assert by_analysis["trait_a"].stored_effect_scale == "sd_units"
-    assert by_analysis["trait_b"].stored_effect_scale == "log_or"
+    analyses = query.analyses_table()
+    by_id = {v["analysis_id"]: v for v in analyses.values()}
+    assert by_id["trait_a"]["stored_effect_scale"] == "sd_units"
+    assert by_id["trait_b"]["stored_effect_scale"] == "log_or"
 
 
 def test_liftover_failure_above_threshold_raises(tmp_path):
@@ -200,7 +209,7 @@ def test_ez_preferred_over_es_se(tmp_path):
     build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
 
     query = query_store(store_path)
-    rows = list(query.analysis("ez_trait"))
-    assert len(rows) == 1
+    result = query.analysis("ez_trait")
+    assert len(result["z"]) == 1
     # EZ=7.5, ALT>REF → flip → stored z = -7.5
-    assert rows[0].z == pytest.approx(-7.5, rel=5e-3)
+    assert result["z"][0] == pytest.approx(-7.5, rel=5e-3)

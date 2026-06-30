@@ -211,7 +211,7 @@ def _bench(fn, n_reps: int) -> tuple[float, float, int]:
     return (
         float(np.median(times) * 1000),
         float(np.percentile(times, 95) * 1000),
-        len(result),
+        int(len(result["z"])),
     )
 
 

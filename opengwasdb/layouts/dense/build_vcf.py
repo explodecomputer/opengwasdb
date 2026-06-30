@@ -20,7 +20,7 @@ from opengwasdb.build.vcf_source import (
     stream_vcf_associations,
     stream_vcf_variants,
 )
-from opengwasdb.index import connect, create_lookup_indexes, initialise_schema, set_metadata
+from opengwasdb.index import connect, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import AnalysisMetadata, DenseBuildResult
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
@@ -30,6 +30,7 @@ from opengwasdb.layouts.dense.constants import (
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.variants import CanonicalVariant, write_variant_axis
 from opengwasdb.variants.normalise import chromosome_sort_key
 
 log = logging.getLogger(__name__)
@@ -140,9 +141,20 @@ def build_dense_from_vcf_manifest(
         )
 
     # ------------------------------------------------------------------
-    # Write SQLite index
+    # Write SQLite index + tabix variant axis
     # ------------------------------------------------------------------
     _write_index(out, hg38_alids, analyses, chunk_shape, dtype)
+    canonical_variants = [
+        CanonicalVariant(
+            chromosome=chrom,
+            position=int(pos_str),
+            effect_allele=a1,
+            other_allele=a2,
+        )
+        for alid in hg38_alids
+        for chrom, pos_str, a1, a2 in [alid.split(":")]
+    ]
+    write_variant_axis(out, canonical_variants, {})
 
     # ------------------------------------------------------------------
     # Allocate output arrays (O(n_variants × n_analyses) peak memory)
@@ -227,7 +239,6 @@ def _write_index(
                 for i, alid in enumerate(hg38_alids)
             ],
         )
-        create_lookup_indexes(connection)
         connection.executemany(
             """
             INSERT INTO analyses(
