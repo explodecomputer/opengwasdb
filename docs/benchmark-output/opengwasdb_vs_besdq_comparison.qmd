@@ -228,19 +228,20 @@ if bench and baseline:
 
 ### Comparability notes
 
-**(a) Regional — different benchmark windows.**
-OpenGWASDB's benchmark selects chr1:4–5 Mb; besdq's benchmark uses chr1:100–101 Mb.
+**(a) Regional — same window, different variant counts.**
+Both benchmarks use chr1:100–101 Mb. OpenGWASDB's store has fewer variants in this
+window due to hg19→hg38 liftover losses (0.05% of variants fail liftover).
+besdq's store was built from pre-lifted hg38 input so retains more variants.
 ```{python}
 #| echo: false
 #| output: asis
 if bench:
-    s = bench.get("selection", {})
-    rc = bench["timings"][0].get("result_count", "?")
-    n_vars = rc // bench["dataset"]["n_analyses"] if rc else "?"
-    print(f"Our window has ~{n_vars:,} variants; besdq's has ~2 751. "
-          f"The `range_indices()` fix eliminates per-variant Python object allocation "
-          f"(previously 51.6 ms for 5 463 variants); the remaining gap tracks the "
-          f"variant count difference.")
+    rc = bench["timings"][0].get("result_count", 0)
+    n_vars = rc // bench["dataset"]["n_analyses"] if rc else 0
+    print(f"OpenGWASDB window: ~{n_vars:,} variants (~{rc:,} finite cells); "
+          f"besdq window: ~2,751 variants. The remaining gap reflects "
+          f"the sparse result construction (isfinite mask + dict allocation) "
+          f"vs besdq's dense summary return.")
 ```
 
 **(b) Bulk — both systems read two arrays.**
@@ -316,8 +317,10 @@ if bench and baseline:
 #| output: asis
 lines = []
 if bench:
+    bs = bench['build'].get('build_seconds')
+    build_str = f"{bs:.0f}s" if bs is not None else "existing store"
     lines.append(f"- OpenGWASDB post-fix timings: `opengwasdb_vcf_ukb_chr1_benchmark.json` "
-                 f"(built {bench['build'].get('build_seconds', '?'):.0f}s, "
+                 f"(built {build_str}, "
                  f"{bench['dataset']['n_variants']:,} variants × {bench['dataset']['n_analyses']} analyses)")
 if baseline:
     lines.append(f"- OpenGWASDB pre-fix timings: `opengwasdb_vcf_ukb_chr1_array_benchmark.json`")

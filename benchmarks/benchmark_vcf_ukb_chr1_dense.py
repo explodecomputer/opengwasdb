@@ -40,6 +40,9 @@ BESDQ_BASELINE = Path("/home/gh13047/repo/besdq/data/ukb-chr1_zarr_benchmark.jso
 ROW_BASELINE = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.json")
 SLOWDOWN_FLAG_THRESHOLD = 2.0  # flag patterns >2× slower than besdq zstd_bitshuffle
 
+# Match besdq's benchmark region exactly (dense_05_query_benchmark.py REGION constant)
+BESDQ_REGION = ("1", 100_000_000, 101_000_000)
+
 RNG = np.random.default_rng(42)
 
 
@@ -182,13 +185,8 @@ def _choose_queries(store_path: Path) -> dict:
     phewas_row = int(np.argmax(finite.sum(axis=1)))
     bulk_col = int(np.argmax(finite.sum(axis=0)))
 
-    positions_by_window: dict[tuple, list] = {}
-    for v in variants:
-        key = (str(v["chromosome"]), int(v["position"]) // 1_000_000)
-        positions_by_window.setdefault(key, []).append(int(v["position"]))
-    (region_chrom, window), _ = max(positions_by_window.items(), key=lambda item: len(item[1]))
-    region_start = window * 1_000_000
-    region_end = region_start + 999_999
+    # Use the same window as besdq's benchmark for a fair comparison.
+    region_chrom, region_start, region_end = BESDQ_REGION
 
     # Top-hit threshold: pick the loosest threshold that returns results
     top_hit_threshold = 5e-8

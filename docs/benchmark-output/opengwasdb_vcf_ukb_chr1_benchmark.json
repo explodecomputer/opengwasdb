@@ -1,6 +1,6 @@
 {
   "build": {
-    "build_seconds": 547.2,
+    "build_seconds": null,
     "liftover_failure_count": 0,
     "store_path": "/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_dense.opengwasdb"
   },
@@ -126,8 +126,8 @@
       "ukb-b-8007"
     ],
     "region_chrom": "1",
-    "region_end": 4999999,
-    "region_start": 4000000,
+    "region_end": 101000000,
+    "region_start": 100000000,
     "top_hit_threshold": 5e-08
   },
   "storage": {
@@ -137,45 +137,46 @@
   "timings": [
     {
       "besdq_zstd_median_ms": 4.988,
-      "median_ms": 29.139,
-      "notes": "WARNING: 5.8\u00d7 slower than besdq zstd_bitshuffle baseline.",
-      "p95_ms": 34.18,
+      "median_ms": 16.014,
+      "notes": "WARNING: 3.2\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 17.774,
       "query": "regional",
-      "ratio_vs_besdq": 5.84,
-      "result_count": 324048
+      "ratio_vs_besdq": 3.21,
+      "result_count": 154615
     },
     {
       "besdq_zstd_median_ms": 0.906,
-      "median_ms": 1.907,
-      "notes": "WARNING: 2.1\u00d7 slower than besdq zstd_bitshuffle baseline.",
-      "p95_ms": 2.156,
+      "median_ms": 1.824,
+      "notes": "WARNING: 2.0\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 2.194,
       "query": "phewas",
-      "ratio_vs_besdq": 2.1,
+      "ratio_vs_besdq": 2.01,
       "result_count": 100
     },
     {
       "besdq_zstd_median_ms": 0.688,
-      "median_ms": 1.376,
-      "p95_ms": 1.567,
+      "median_ms": 1.442,
+      "notes": "WARNING: 2.1\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 1.812,
       "query": "tophits",
-      "ratio_vs_besdq": 2.0,
+      "ratio_vs_besdq": 2.1,
       "result_count": 14557
     },
     {
       "besdq_zstd_median_ms": 490.517,
-      "median_ms": 816.305,
-      "p95_ms": 898.589,
+      "median_ms": 854.42,
+      "p95_ms": 937.235,
       "query": "bulk",
-      "ratio_vs_besdq": 1.66,
+      "ratio_vs_besdq": 1.74,
       "result_count": 762080
     },
     {
       "besdq_zstd_median_ms": 30.424,
-      "median_ms": 120.016,
-      "notes": "WARNING: 3.9\u00d7 slower than besdq zstd_bitshuffle baseline.",
-      "p95_ms": 173.246,
+      "median_ms": 126.317,
+      "notes": "WARNING: 4.2\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 190.412,
       "query": "random_lookup",
-      "ratio_vs_besdq": 3.94,
+      "ratio_vs_besdq": 4.15,
       "result_count": 598
     }
   ]

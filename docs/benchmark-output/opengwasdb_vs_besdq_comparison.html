@@ -2280,7 +2280,7 @@ vertical-align: -.125em;
 <tbody>
 <tr class="odd">
 <td>Build time</td>
-<td>547 s</td>
+<td>not measured</td>
 <td>not measured</td>
 </tr>
 <tr class="even">
@@ -2375,38 +2375,38 @@ vertical-align: -.125em;
 <tbody>
 <tr class="odd">
 <td>regional</td>
-<td>29.14 ms</td>
+<td>16.01 ms</td>
 <td>4.99 ms</td>
 <td>2.72 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">5.84×</span></td>
+<td><span style="color:#c0392b;font-weight:bold">3.21×</span></td>
 </tr>
 <tr class="even">
 <td>phewas</td>
-<td>1.91 ms</td>
+<td>1.82 ms</td>
 <td>0.91 ms</td>
 <td>0.33 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.10×</span></td>
+<td><span style="color:#c0392b;font-weight:bold">2.01×</span></td>
 </tr>
 <tr class="odd">
 <td>tophits</td>
-<td>1.38 ms</td>
+<td>1.44 ms</td>
 <td>0.69 ms</td>
 <td>0.70 ms</td>
-<td><span style="color:#27ae60">2.00×</span></td>
+<td><span style="color:#c0392b;font-weight:bold">2.10×</span></td>
 </tr>
 <tr class="even">
 <td>bulk</td>
-<td>816.30 ms</td>
+<td>854.42 ms</td>
 <td>490.52 ms</td>
 <td>251.37 ms</td>
-<td><span style="color:#27ae60">1.66×</span></td>
+<td><span style="color:#27ae60">1.74×</span></td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
-<td>120.02 ms</td>
+<td>126.32 ms</td>
 <td>30.42 ms</td>
 <td>7.27 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">3.94×</span></td>
+<td><span style="color:#c0392b;font-weight:bold">4.15×</span></td>
 </tr>
 </tbody>
 </table>
@@ -2483,32 +2483,32 @@ vertical-align: -.125em;
 <tr class="odd">
 <td>regional</td>
 <td>97.61 ms</td>
-<td>29.14 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">3.3×</span></td>
+<td>16.01 ms</td>
+<td><span style="color:#2980b9;font-weight:bold">6.1×</span></td>
 </tr>
 <tr class="even">
 <td>phewas</td>
 <td>2.65 ms</td>
-<td>1.91 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">1.4×</span></td>
+<td>1.82 ms</td>
+<td><span style="color:#2980b9;font-weight:bold">1.5×</span></td>
 </tr>
 <tr class="odd">
 <td>tophits</td>
 <td>1.30 ms</td>
-<td>1.38 ms</td>
+<td>1.44 ms</td>
 <td><span style="color:#2980b9;font-weight:bold">0.9×</span></td>
 </tr>
 <tr class="even">
 <td>bulk</td>
 <td>1764.18 ms</td>
-<td>816.30 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">2.2×</span></td>
+<td>854.42 ms</td>
+<td><span style="color:#2980b9;font-weight:bold">2.1×</span></td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
 <td>224.24 ms</td>
-<td>120.02 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">1.9×</span></td>
+<td>126.32 ms</td>
+<td><span style="color:#2980b9;font-weight:bold">1.8×</span></td>
 </tr>
 </tbody>
 </table>
@@ -2560,8 +2560,8 @@ vertical-align: -.125em;
 </table>
 <section id="comparability-notes" class="level3">
 <h3 class="anchored" data-anchor-id="comparability-notes">Comparability notes</h3>
-<p><strong>(a) Regional — different benchmark windows.</strong> OpenGWASDB’s benchmark selects chr1:4–5 Mb; besdq’s benchmark uses chr1:100–101 Mb.</p>
-<p>Our window has ~3,240 variants; besdq’s has ~2 751. The <code>range_indices()</code> fix eliminates per-variant Python object allocation (previously 51.6 ms for 5 463 variants); the remaining gap tracks the variant count difference.</p>
+<p><strong>(a) Regional — same window, different variant counts.</strong> Both benchmarks use chr1:100–101 Mb. OpenGWASDB’s store has fewer variants in this window due to hg19→hg38 liftover losses (0.05% of variants fail liftover). besdq’s store was built from pre-lifted hg38 input so retains more variants.</p>
+<p>OpenGWASDB window: ~1,546 variants (~154,615 finite cells); besdq window: ~2,751 variants. The remaining gap reflects the sparse result construction (isfinite mask + dict allocation) vs besdq’s dense summary return.</p>
 <p><strong>(b) Bulk — both systems read two arrays.</strong> besdq’s <code>query_bulk</code> reads <code>beta</code> + <code>zscore</code> (2 zarr columns); OpenGWASDB reads <code>z</code> + <code>se</code> (2 zarr columns) and applies an <code>np.isfinite</code> mask. The gap is not explained by array count; it likely reflects I/O timing variance between benchmark runs.</p>
 <p><strong>(c) Random lookup — inherent two-array cost.</strong> besdq’s <code>query_random_lookup</code> reads one array (<code>beta</code>); OpenGWASDB reads two (<code>z</code> and <code>se</code>) per the sparse array contract (ADR-0020). A ~2× gap is therefore expected. The mmap’d ALID index eliminates sequential tabix fetch overhead (~15 ms previously).</p>
 <hr>
@@ -2593,41 +2593,41 @@ vertical-align: -.125em;
 <td>regional</td>
 <td>97.61 ms</td>
 <td><span style="color:#c0392b;font-weight:bold">19.57×</span></td>
-<td>29.14 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">5.84×</span></td>
-<td><strong>3.3× faster</strong></td>
+<td>16.01 ms</td>
+<td><span style="color:#c0392b;font-weight:bold">3.21×</span></td>
+<td><strong>6.1× faster</strong></td>
 </tr>
 <tr class="even">
 <td>phewas</td>
 <td>2.65 ms</td>
 <td><span style="color:#c0392b;font-weight:bold">2.92×</span></td>
-<td>1.91 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.10×</span></td>
-<td><strong>1.4× faster</strong></td>
+<td>1.82 ms</td>
+<td><span style="color:#c0392b;font-weight:bold">2.01×</span></td>
+<td><strong>1.5× faster</strong></td>
 </tr>
 <tr class="odd">
 <td>tophits</td>
 <td>1.30 ms</td>
 <td><span style="color:#27ae60">1.89×</span></td>
-<td>1.38 ms</td>
-<td><span style="color:#27ae60">2.00×</span></td>
+<td>1.44 ms</td>
+<td><span style="color:#c0392b;font-weight:bold">2.10×</span></td>
 <td>—</td>
 </tr>
 <tr class="even">
 <td>bulk</td>
 <td>1764.18 ms</td>
 <td><span style="color:#c0392b;font-weight:bold">3.60×</span></td>
-<td>816.30 ms</td>
-<td><span style="color:#27ae60">1.66×</span></td>
-<td><strong>2.2× faster</strong></td>
+<td>854.42 ms</td>
+<td><span style="color:#27ae60">1.74×</span></td>
+<td><strong>2.1× faster</strong></td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
 <td>224.24 ms</td>
 <td><span style="color:#c0392b;font-weight:bold">7.37×</span></td>
-<td>120.02 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">3.94×</span></td>
-<td><strong>1.9× faster</strong></td>
+<td>126.32 ms</td>
+<td><span style="color:#c0392b;font-weight:bold">4.15×</span></td>
+<td><strong>1.8× faster</strong></td>
 </tr>
 </tbody>
 </table>
@@ -2696,7 +2696,7 @@ vertical-align: -.125em;
 <section id="provenance" class="level2">
 <h2 class="anchored" data-anchor-id="provenance">Provenance</h2>
 <ul>
-<li>OpenGWASDB post-fix timings: <code>opengwasdb_vcf_ukb_chr1_benchmark.json</code> (built 547s, 762,080 variants × 100 analyses)</li>
+<li>OpenGWASDB post-fix timings: <code>opengwasdb_vcf_ukb_chr1_benchmark.json</code> (built existing store, 762,080 variants × 100 analyses)</li>
 <li>OpenGWASDB pre-fix timings: <code>opengwasdb_vcf_ukb_chr1_array_benchmark.json</code></li>
 <li>besdq timings: <code>besdq_ukb_chr1_benchmark.json</code> (copied from besdq repo by <code>benchmarks/README.md</code> step)</li>
 <li>besdq store: <code>ukb-chr1-zstd.besdz</code> (zstd+bitshuffle), <code>ukb-chr1.besdz</code> (raw float16)</li>
