@@ -21,10 +21,15 @@ from opengwasdb.variants.normalise import (
 VARIANT_TABLE_FILENAME = "variants.tsv.gz"
 VARIANT_TABIX_FILENAME = "variants.tsv.gz.tbi"
 VARIANT_OFFSETS_FILENAME = "variant_offsets.npy"
+VARIANT_ALID_BYTES_FILENAME = "variant_alid_bytes.npy"
+VARIANT_ALID_ROWS_FILENAME = "variant_alid_rows.npy"
 VARIANT_AXIS_FORMAT = "tabix_tsv_v1"
 VARIANT_HEADER = (
     "#chromosome\tposition\tvariant_index\teffect_allele\tother_allele\talid\trsid\n"
 )
+# Fixed byte-width for ALID encoding in the mmap'd search index.
+# Supports chromosomes up to 3 chars, positions up to 9 digits, alleles up to ~20 chars.
+_ALID_DTYPE = "|S64"
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,14 @@ def variant_offsets_path(store_path: str | Path) -> Path:
     return Path(store_path) / VARIANT_OFFSETS_FILENAME
 
 
+def variant_alid_bytes_path(store_path: str | Path) -> Path:
+    return Path(store_path) / VARIANT_ALID_BYTES_FILENAME
+
+
+def variant_alid_rows_path(store_path: str | Path) -> Path:
+    return Path(store_path) / VARIANT_ALID_ROWS_FILENAME
+
+
 def parse_canonical_alid(identifier: str) -> ParsedAlid | None:
     """Parse a canonical ALID-like identifier, returning None for aliases."""
 
@@ -130,6 +143,12 @@ def write_variant_axis(
         zerobased=False,
         force=True,
     )
+    # Write mmap'd ALID search index: two parallel arrays sorted by ALID bytes.
+    alid_bytes = np.array([v.alid for v in variants], dtype=_ALID_DTYPE)
+    row_indices = np.arange(len(variants), dtype="int32")
+    sort_order = np.argsort(alid_bytes)
+    np.save(variant_alid_bytes_path(store), alid_bytes[sort_order])
+    np.save(variant_alid_rows_path(store), row_indices[sort_order])
 
 
 class VariantAxis:
@@ -143,6 +162,16 @@ class VariantAxis:
         self.offsets_path = variant_offsets_path(self.store_path)
         self._offsets = np.load(self.offsets_path, mmap_mode="r")
         self._tabix = pysam.TabixFile(str(self.table_path))
+        # mmap'd ALID search index — present on stores built after issue 029.
+        # Falls back gracefully to tabix-per-call if absent (older stores).
+        _bytes_path = variant_alid_bytes_path(self.store_path)
+        _rows_path = variant_alid_rows_path(self.store_path)
+        if _bytes_path.exists() and _rows_path.exists():
+            self._alid_bytes: np.ndarray | None = np.load(_bytes_path, mmap_mode="r")
+            self._alid_rows: np.ndarray | None = np.load(_rows_path, mmap_mode="r")
+        else:
+            self._alid_bytes = None
+            self._alid_rows = None
 
     @property
     def n_variants(self) -> int:
@@ -172,6 +201,15 @@ class VariantAxis:
         return self.by_index(int(row["variant_index"]))
 
     def by_alid(self, parsed: ParsedAlid) -> VariantRecord | None:
+        if self._alid_bytes is not None:
+            query = np.array(
+                [f"{parsed.chromosome}:{parsed.position}:{parsed.effect_allele}:{parsed.other_allele}"],
+                dtype=_ALID_DTYPE,
+            )
+            idx = int(np.searchsorted(self._alid_bytes, query[0]))
+            if idx < len(self._alid_bytes) and self._alid_bytes[idx] == query[0]:
+                return self.by_index(int(self._alid_rows[idx]))
+            return None
         for record in self.range(parsed.chromosome, parsed.position, parsed.position):
             if (
                 record.effect_allele == parsed.effect_allele
@@ -187,6 +225,20 @@ class VariantAxis:
         except ValueError:
             return []
         return [_parse_variant_line(line) for line in lines]
+
+    def range_indices(self, chromosome: str, start: int, end: int) -> np.ndarray:
+        """Return variant indices for a genomic range as int32 array, without object allocation."""
+        chrom = normalise_chromosome(chromosome)
+        try:
+            lines = self._tabix.fetch(chrom, max(0, int(start) - 1), int(end))
+        except ValueError:
+            return np.empty(0, dtype="int32")
+        indices = []
+        for line in lines:
+            # variant_index is the third tab-separated field (index 2)
+            fields = line.split("\t", 3)
+            indices.append(int(fields[2]))
+        return np.array(indices, dtype="int32")
 
     def by_index(self, variant_index: int) -> VariantRecord | None:
         if variant_index < 0 or variant_index >= self.n_variants:

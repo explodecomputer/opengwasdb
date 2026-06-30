@@ -1,6 +1,6 @@
 {
   "build": {
-    "build_seconds": 567.23,
+    "build_seconds": 547.2,
     "liftover_failure_count": 0,
     "store_path": "/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_dense.opengwasdb"
   },
@@ -131,50 +131,51 @@
     "top_hit_threshold": 5e-08
   },
   "storage": {
-    "store_bytes": 257618745,
-    "store_mb": 257.62
+    "store_bytes": 309440441,
+    "store_mb": 309.44
   },
   "timings": [
     {
       "besdq_zstd_median_ms": 4.988,
-      "median_ms": 77.96,
-      "notes": "WARNING: 15.6\u00d7 slower than besdq zstd_bitshuffle baseline.",
-      "p95_ms": 84.412,
+      "median_ms": 29.139,
+      "notes": "WARNING: 5.8\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 34.18,
       "query": "regional",
-      "ratio_vs_besdq": 15.63,
+      "ratio_vs_besdq": 5.84,
       "result_count": 324048
     },
     {
       "besdq_zstd_median_ms": 0.906,
-      "median_ms": 1.418,
-      "p95_ms": 6.59,
+      "median_ms": 1.907,
+      "notes": "WARNING: 2.1\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 2.156,
       "query": "phewas",
-      "ratio_vs_besdq": 1.57,
+      "ratio_vs_besdq": 2.1,
       "result_count": 100
     },
     {
       "besdq_zstd_median_ms": 0.688,
-      "median_ms": 1.134,
-      "p95_ms": 1.244,
+      "median_ms": 1.376,
+      "p95_ms": 1.567,
       "query": "tophits",
-      "ratio_vs_besdq": 1.65,
+      "ratio_vs_besdq": 2.0,
       "result_count": 14557
     },
     {
       "besdq_zstd_median_ms": 490.517,
-      "median_ms": 823.933,
-      "p95_ms": 1210.698,
+      "median_ms": 816.305,
+      "p95_ms": 898.589,
       "query": "bulk",
-      "ratio_vs_besdq": 1.68,
+      "ratio_vs_besdq": 1.66,
       "result_count": 762080
     },
     {
       "besdq_zstd_median_ms": 30.424,
-      "median_ms": 114.452,
-      "notes": "WARNING: 3.8\u00d7 slower than besdq zstd_bitshuffle baseline.",
-      "p95_ms": 329.498,
+      "median_ms": 120.016,
+      "notes": "WARNING: 3.9\u00d7 slower than besdq zstd_bitshuffle baseline.",
+      "p95_ms": 173.246,
       "query": "random_lookup",
-      "ratio_vs_besdq": 3.76,
+      "ratio_vs_besdq": 3.94,
       "result_count": 598
     }
   ]

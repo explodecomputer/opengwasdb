@@ -88,6 +88,12 @@ def main() -> None:
     )
     print(f"Results written to {args.output}")
 
+    # Copy besdq baseline alongside our output so the comparison QMD is self-contained.
+    besdq_copy = args.output.parent / "besdq_ukb_chr1_benchmark.json"
+    if BESDQ_BASELINE.exists():
+        shutil.copy2(BESDQ_BASELINE, besdq_copy)
+        print(f"besdq baseline copied to {besdq_copy}")
+
     qmd_path = args.qmd
     _write_qmd(results, qmd_path, args.output, besdq_baseline, row_baseline, args.reps)
     print(f"QMD written to {qmd_path}")

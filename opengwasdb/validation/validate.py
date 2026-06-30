@@ -18,6 +18,8 @@ from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.variants import (
     VariantAxis,
+    variant_alid_bytes_path,
+    variant_alid_rows_path,
     variant_offsets_path,
     variant_tabix_path,
     variant_table_path,
@@ -59,6 +61,16 @@ def validate_store(path: str | Path) -> ValidationResult:
         errors.append("missing variants.tsv.gz.tbi")
     if not offsets_path.exists():
         errors.append("missing variant_offsets.npy")
+    alid_bytes_path = variant_alid_bytes_path(store_path)
+    alid_rows_path = variant_alid_rows_path(store_path)
+    if not alid_bytes_path.exists():
+        errors.append(
+            "missing variant_alid_bytes.npy — rebuild the store to generate the ALID search index"
+        )
+    if not alid_rows_path.exists():
+        errors.append(
+            "missing variant_alid_rows.npy — rebuild the store to generate the ALID search index"
+        )
     if errors:
         return ValidationResult(errors=errors)
 
@@ -130,6 +142,11 @@ def _validate_variant_axis(variant_axis: VariantAxis, errors: list[str]) -> int:
     if variant_axis.n_variants != len(records):
         errors.append(
             f"variant_offsets.npy has {variant_axis.n_variants} rows but "
+            f"variants.tsv.gz has {len(records)} rows"
+        )
+    if variant_axis._alid_bytes is not None and len(variant_axis._alid_bytes) != len(records):
+        errors.append(
+            f"variant_alid_bytes.npy has {len(variant_axis._alid_bytes)} entries but "
             f"variants.tsv.gz has {len(records)} rows"
         )
     seen_alids: set[str] = set()

@@ -16,6 +16,8 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     assert (dense_store_path / "variants.tsv.gz").exists()
     assert (dense_store_path / "variants.tsv.gz.tbi").exists()
     assert (dense_store_path / "variant_offsets.npy").exists()
+    assert (dense_store_path / "variant_alid_bytes.npy").exists()
+    assert (dense_store_path / "variant_alid_rows.npy").exists()
 
     result = validate_store(dense_store_path)
     assert result.ok, result.errors
@@ -122,3 +124,22 @@ def test_query_excludes_missing_dense_cells(dense_store_path):
     assert len(result["z"]) == 2
     assert all(np.isfinite(result["z"]))
     assert all(np.isfinite(result["se"]))
+
+
+def test_range_indices_matches_range_variant_index(dense_store_path):
+    from opengwasdb.index import connect
+    from opengwasdb.variants import VariantAxis
+
+    with connect(dense_store_path / "index.sqlite") as conn:
+        va = VariantAxis(dense_store_path, conn)
+        full_records = va.range("1", 1, 500)
+        fast_indices = va.range_indices("1", 1, 500)
+        va.close()
+
+    expected = np.array([r.variant_index for r in full_records], dtype="int32")
+    assert np.array_equal(fast_indices, expected)
+    # empty range returns empty array
+    with connect(dense_store_path / "index.sqlite") as conn:
+        va = VariantAxis(dense_store_path, conn)
+        assert len(va.range_indices("1", 999999, 999999)) == 0
+        va.close()

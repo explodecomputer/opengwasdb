@@ -104,16 +104,15 @@ class StoreQuery:
 
     def range(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
         """Return finite associations in a genomic range."""
-        variants = self._variant_axis.range(chromosome, start, end)
-        if not variants:
+        row_indices = self._variant_axis.range_indices(chromosome, start, end)
+        if len(row_indices) == 0:
             return _empty_result()
-        row_indices = [v.variant_index for v in variants]
         z_block = self._root["z"].oindex[row_indices, :].astype("float32")
         se_block = self._root["se"].oindex[row_indices, :].astype("float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols = np.where(mask)
         return {
-            "variant_index": np.array([row_indices[r] for r in rows_rel], dtype="int32"),
+            "variant_index": row_indices[rows_rel],
             "analysis_index": cols.astype("int32"),
             "z": z_block[mask],
             "se": se_block[mask],

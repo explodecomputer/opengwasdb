@@ -5,12 +5,16 @@ from opengwasdb.variants.axis import (
     VARIANT_OFFSETS_FILENAME,
     VARIANT_TABIX_FILENAME,
     VARIANT_TABLE_FILENAME,
+    VARIANT_ALID_BYTES_FILENAME,
+    VARIANT_ALID_ROWS_FILENAME,
     VariantAxis,
     VariantRecord,
     parse_canonical_alid,
     variant_offsets_path,
     variant_tabix_path,
     variant_table_path,
+    variant_alid_bytes_path,
+    variant_alid_rows_path,
     write_variant_axis,
 )
 from opengwasdb.variants.normalise import (
@@ -28,6 +32,8 @@ __all__ = [
     "VARIANT_OFFSETS_FILENAME",
     "VARIANT_TABIX_FILENAME",
     "VARIANT_TABLE_FILENAME",
+    "VARIANT_ALID_BYTES_FILENAME",
+    "VARIANT_ALID_ROWS_FILENAME",
     "CanonicalVariant",
     "Orientation",
     "VariantAxis",
@@ -41,5 +47,7 @@ __all__ = [
     "variant_offsets_path",
     "variant_tabix_path",
     "variant_table_path",
+    "variant_alid_bytes_path",
+    "variant_alid_rows_path",
     "write_variant_axis",
 ]
