@@ -57,9 +57,10 @@ bash data/ukb-b/build.sh
 Expected build time: ~17 hours single-threaded (same two-pass pipeline as the
 100-trait chr1 benchmark, scaled to ~9.8M variants × 2514 analyses).
 
-Expected store size: ~45 GB (extrapolated from 1774 MB at 1000 analyses × chr1,
-scaled by 2514/1000 analyses × 12.9 chromosomes, with expected compression
-improvement at larger chunk fill).
+Expected store size: ~86 GB. The store has ~1.15 GB of fixed overhead (variant
+axis files, rsid alias index) plus zarr arrays that scale linearly with n_analyses.
+The 10-trait smoke test measured 338 MB of zarr for 10 analyses → 338 MB × 251.4 = ~85 GB
+of zarr, giving ~86 GB total. The fixed overhead does not grow with analysis count.
 
 ## Query performance (projected from chr1 × 1000 benchmark)
 
