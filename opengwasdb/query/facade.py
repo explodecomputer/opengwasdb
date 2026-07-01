@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -9,8 +10,11 @@ import zarr
 
 from opengwasdb.index import analysis_by_id, connect
 from opengwasdb.layouts.dense.top_hits import threshold_key
+from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import PrimaryStorageLayout
+from opengwasdb.stats import p_value_from_z
 from opengwasdb.store.open import OpenGWASDBStore, open_store
+from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants import VariantAxis
 
 
@@ -24,12 +28,10 @@ def _empty_result() -> dict[str, np.ndarray]:
 
 
 class StoreQuery:
-    """Public query object that hides the physical store layout."""
+    """Public query object that hides the physical store layout — Dense stores."""
 
     def __init__(self, store: OpenGWASDBStore):
         self.store = store
-        if store.manifest.primary_layout is not PrimaryStorageLayout.DENSE:
-            raise NotImplementedError("only dense layout is implemented in v0.1")
         self._connection = connect(store.index_path)
         self._root = zarr.open_group(str(store.data_path), mode="r")
         self._variant_axis = VariantAxis(store.path, self._connection)
@@ -190,6 +192,222 @@ class StoreQuery:
         }
 
 
-def query_store(path: str | Path) -> StoreQuery:
+class RaggedStoreQuery:
+    """Public query object that hides the physical store layout — Ragged stores."""
+
+    def __init__(self, store: OpenGWASDBStore):
+        self.store = store
+        self._csr = RaggedCSRReader(store.path)
+        self._variant_axis = VariantAxis(store.path)
+        self._traits_reader = TraitsAxisReader(store.path)
+        self._db: sqlite3.Connection = sqlite3.connect(
+            str(store.path / "index.sqlite")
+        )
+        self._db.row_factory = sqlite3.Row
+
+    def close(self) -> None:
+        self._variant_axis.close()
+        self._traits_reader.close()
+        self._db.close()
+
+    def __enter__(self) -> RaggedStoreQuery:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def _resolve_analysis_id(self, analysis_id: str) -> int | None:
+        row = self._db.execute(
+            "SELECT analysis_index FROM analyses WHERE probe_id = ? OR analysis_id = ? LIMIT 1",
+            (analysis_id, analysis_id),
+        ).fetchone()
+        return None if row is None else int(row["analysis_index"])
+
+    def analysis(self, analysis_id: str) -> dict[str, np.ndarray]:
+        """All associations for one analysis (probe_id or analysis_id lookup)."""
+        idx = self._resolve_analysis_id(analysis_id)
+        if idx is None:
+            return _empty_result()
+        assoc = self._csr.get_analysis(idx)
+        return {
+            "variant_index": assoc.variant_index.astype("int32"),
+            "analysis_index": np.full(len(assoc.z), idx, dtype="int32"),
+            "z": assoc.z.astype("float32"),
+            "se": assoc.se.astype("float32"),
+        }
+
+    def range(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+        """All associations where the variant falls in [start, end]."""
+        variant_set = set(
+            self._variant_axis.range_indices(chromosome, start, end).tolist()
+        )
+        if not variant_set:
+            return _empty_result()
+
+        offsets = self._csr._offsets[:]
+        vi_all = self._csr._variant_index[:]
+        z_all = self._csr._z[:]
+        se_all = self._csr._se[:]
+
+        mask = np.isin(vi_all, np.array(sorted(variant_set), dtype=np.int32))
+        hit_positions = np.where(mask)[0]
+        if len(hit_positions) == 0:
+            return _empty_result()
+
+        # Derive analysis_index for each hit via searchsorted on offsets
+        analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
+
+        return {
+            "variant_index": vi_all[hit_positions].astype("int32"),
+            "analysis_index": analysis_indices,
+            "z": z_all[hit_positions].astype("float32"),
+            "se": se_all[hit_positions].astype("float32"),
+        }
+
+    def range_by_probe(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+        """All associations for analyses whose probe/TSS falls in [start, end]."""
+        trait_records = self._traits_reader.range(chromosome, start, end)
+        if not trait_records:
+            return _empty_result()
+
+        all_vi: list[np.ndarray] = []
+        all_ai: list[np.ndarray] = []
+        all_z: list[np.ndarray] = []
+        all_se: list[np.ndarray] = []
+
+        for rec in trait_records:
+            assoc = self._csr.get_analysis(rec.analysis_index)
+            if len(assoc.z) == 0:
+                continue
+            all_vi.append(assoc.variant_index.astype("int32"))
+            all_ai.append(np.full(len(assoc.z), rec.analysis_index, dtype="int32"))
+            all_z.append(assoc.z.astype("float32"))
+            all_se.append(assoc.se.astype("float32"))
+
+        if not all_vi:
+            return _empty_result()
+        return {
+            "variant_index": np.concatenate(all_vi),
+            "analysis_index": np.concatenate(all_ai),
+            "z": np.concatenate(all_z),
+            "se": np.concatenate(all_se),
+        }
+
+    def phewas(self, identifier: str) -> dict[str, np.ndarray]:
+        """All analyses that have an association for a given variant identifier.
+
+        O(n_total_associations) scan — acceptable for exploratory use; add a
+        variant-centric CSR index (issue deferred) for production phewas.
+        """
+        variant = self._variant_axis.by_identifier(identifier)
+        if variant is None:
+            return _empty_result()
+        target_vi = np.int32(variant.variant_index)
+
+        offsets = self._csr._offsets[:]
+        vi_all = self._csr._variant_index[:]
+        z_all = self._csr._z[:]
+        se_all = self._csr._se[:]
+
+        hit_positions = np.where(vi_all == target_vi)[0]
+        if len(hit_positions) == 0:
+            return _empty_result()
+
+        analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
+        return {
+            "variant_index": np.full(len(hit_positions), target_vi, dtype="int32"),
+            "analysis_index": analysis_indices,
+            "z": z_all[hit_positions].astype("float32"),
+            "se": se_all[hit_positions].astype("float32"),
+        }
+
+    def top_hits(
+        self,
+        *,
+        threshold: float = 5e-8,
+        limit: int | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Associations passing a significance threshold (full scan)."""
+        offsets = self._csr._offsets[:]
+        vi_all = self._csr._variant_index[:]
+        z_all = self._csr._z[:]
+        se_all = self._csr._se[:]
+
+        import math
+        # p = erfc(|z|/sqrt(2)) ≤ threshold  →  |z| ≥ sqrt(2)*erfinv(1-threshold)
+        # Avoid scipy: use erfinv approximation via inverse of erfc.
+        # erfinv(x) ≈ sign(p-0.5)*sqrt(-ln(min(p,1-p)*2)) for p near 0 or 1
+        # Simpler: use a per-element numpy erfc computation via math.erfc ufunc-style
+        z_f32 = z_all.astype("float32")
+        # Vectorised two-tailed p-value: p = erfc(|z|/sqrt2)
+        abs_z = np.abs(z_f32).astype(np.float64)
+        sqrt2 = math.sqrt(2.0)
+        p_values = np.array([math.erfc(float(v) / sqrt2) for v in abs_z], dtype=np.float64)
+        mask = p_values <= threshold
+        hit_positions = np.where(mask)[0]
+
+        if len(hit_positions) == 0:
+            return _empty_result()
+
+        # Sort by descending |z|
+        order = np.argsort(-np.abs(z_f32[hit_positions]))
+        hit_positions = hit_positions[order]
+        if limit is not None:
+            hit_positions = hit_positions[:limit]
+
+        analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
+        return {
+            "variant_index": vi_all[hit_positions].astype("int32"),
+            "analysis_index": analysis_indices,
+            "z": z_f32[hit_positions],
+            "se": se_all[hit_positions].astype("float32"),
+        }
+
+    def lookup(
+        self,
+        identifiers: list[str],
+        analysis_ids: list[str],
+    ) -> dict[str, np.ndarray]:
+        """Associations for a specific variant × analysis set."""
+        variants = [
+            v
+            for id_ in identifiers
+            if (v := self._variant_axis.by_identifier(id_)) is not None
+        ]
+        if not variants:
+            return _empty_result()
+
+        target_vi = {v.variant_index for v in variants}
+        all_vi, all_ai, all_z, all_se = [], [], [], []
+
+        for aid in analysis_ids:
+            idx = self._resolve_analysis_id(aid)
+            if idx is None:
+                continue
+            assoc = self._csr.get_analysis(idx)
+            if len(assoc.variant_index) == 0:
+                continue
+            sub_mask = np.isin(assoc.variant_index, np.array(sorted(target_vi), dtype=np.int32))
+            if not sub_mask.any():
+                continue
+            all_vi.append(assoc.variant_index[sub_mask].astype("int32"))
+            all_ai.append(np.full(sub_mask.sum(), idx, dtype="int32"))
+            all_z.append(assoc.z[sub_mask].astype("float32"))
+            all_se.append(assoc.se[sub_mask].astype("float32"))
+
+        if not all_vi:
+            return _empty_result()
+        return {
+            "variant_index": np.concatenate(all_vi),
+            "analysis_index": np.concatenate(all_ai),
+            "z": np.concatenate(all_z),
+            "se": np.concatenate(all_se),
+        }
+
+
+def query_store(path: str | Path) -> StoreQuery | RaggedStoreQuery:
     """Open a store and return the layout-independent query facade."""
-    return StoreQuery(open_store(path))
+    store = open_store(path)
+    if store.manifest.primary_layout is PrimaryStorageLayout.RAGGED:
+        return RaggedStoreQuery(store)
+    return StoreQuery(store)

@@ -25,6 +25,7 @@ from opengwasdb.variants.axis import (
     VARIANT_TABIX_FILENAME,
     write_variant_axis,
 )
+from opengwasdb.build.liftover import build_liftover_lookup
 from opengwasdb.variants.normalise import (
     CanonicalVariant,
     VariantNormalisationError,
@@ -52,12 +53,14 @@ def build_ragged_from_besd(
     store_id: str,
     release_id: str,
     tissue: str | None = None,
+    source_build: str = "hg38",
     overwrite: bool = False,
 ) -> RaggedBuildResult:
     """Build a Ragged Observed-Only Store from BESD files.
 
     besd_prefix: path without extension (.esi, .epi, .besd are appended).
-    The BESD dataset must already be in GRCh38; no liftover is applied.
+    source_build: genome assembly of the input BESD ("hg38" or "hg19").
+    When source_build is "hg19", SNP coordinates are lifted over to hg38 inline.
     """
     prefix = Path(besd_prefix)
     out = Path(output_path)
@@ -76,7 +79,34 @@ def build_ragged_from_besd(
     probes = read_epi(f"{prefix}.epi")
     print(f"Loaded {len(snps)} SNPs and {len(probes)} probes")
 
-    # ── 2. Build canonical variant list from ESI ─────────────────────────────
+    # ── 2. Optionally liftover ESI coordinates hg19 → hg38 ──────────────────
+    # Maps (chr, hg19_bp, a1, a2) → lifted hg38 (chr, bp) or None if failed.
+    _lifted: dict[int, tuple[str, int]] | None = None
+    _normalised_source = source_build.lower().strip()
+    if _normalised_source not in ("hg38", "grch38", "b38", "38"):
+        print(f"Lifting over {source_build} → hg38 ...")
+        lo_input = [
+            (s.chromosome, s.bp, s.a1 or "A", s.a2 or "T")
+            for s in snps if s.a1 and s.a2
+        ]
+        lo_lookup = build_liftover_lookup(
+            lo_input, from_build=source_build, to_build="hg38",
+        )
+        # Rebuild a map: esi_row_idx → (hg38_chr, hg38_bp)
+        _lifted = {}
+        for s in snps:
+            if not s.a1 or not s.a2:
+                continue
+            alid = lo_lookup.get((s.chromosome, s.bp, s.a1, s.a2))
+            if alid is None:
+                continue
+            parts = alid.split(":")
+            _lifted[s.row_idx] = (parts[0], int(parts[1]))
+        n_lifted = len(_lifted)
+        n_failed = len([s for s in snps if s.a1 and s.a2]) - n_lifted
+        print(f"Liftover {source_build}→hg38: {n_failed}/{len(snps)} variants failed")
+
+    # ── 3. Build canonical variant list from ESI ─────────────────────────────
     # esi_row_idx → (variant_index, flipped)
     esi_to_variant: dict[int, tuple[int, bool]] = {}
     variants: list[CanonicalVariant] = []
@@ -89,8 +119,16 @@ def build_ragged_from_besd(
     for snp in snps:
         if snp.a1 is None or snp.a2 is None:
             continue
+        # Use lifted coordinates when liftover was performed
+        if _lifted is not None:
+            pos_info = _lifted.get(snp.row_idx)
+            if pos_info is None:
+                continue
+            chrom, bp = pos_info
+        else:
+            chrom, bp = snp.chromosome, snp.bp
         try:
-            ori = orient_to_canonical(snp.chromosome, snp.bp, snp.a1, snp.a2)
+            ori = orient_to_canonical(chrom, bp, snp.a1, snp.a2)
         except VariantNormalisationError:
             continue
         sort_key = (chromosome_sort_key(ori.variant.chromosome), ori.variant.position)
@@ -224,6 +262,7 @@ def build_ragged_from_besd(
         n_analyses=len(probes),
         n_associations=csr.n_associations,
         besd_prefix=str(prefix),
+        source_build=source_build,
     )
 
     result = RaggedBuildResult(
@@ -249,6 +288,7 @@ def _write_manifest(
     n_analyses: int,
     n_associations: int,
     besd_prefix: str,
+    source_build: str = "hg38",
 ) -> None:
     manifest = StoreManifest(
         store_id=store_id,
@@ -262,6 +302,7 @@ def _write_manifest(
         provenance={
             "builder": "opengwasdb.v0.1_ragged_observed_besd",
             "source_besd_prefix": besd_prefix,
+            "source_build": source_build,
             "n_variants": n_variants,
             "n_analyses": n_analyses,
             "n_associations": n_associations,

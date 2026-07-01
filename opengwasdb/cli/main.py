@@ -115,12 +115,13 @@ def build_ragged_besd_command(
     store_id: str = typer.Option(...),
     release_id: str = typer.Option(...),
     tissue: str = typer.Option(None),
+    source_build: str = typer.Option("hg38"),
     overwrite: bool = typer.Option(False),
 ) -> None:
     """Build a Ragged Observed-Only store from BESD files.
 
     BESD_PREFIX is the path without extension (.esi, .epi, .besd are appended).
-    The BESD dataset must already be in GRCh38; no liftover is applied.
+    Use --source-build hg19 to liftover coordinates to hg38 inline.
     """
     result = build_ragged_from_besd(
         besd_prefix,
@@ -128,6 +129,7 @@ def build_ragged_besd_command(
         store_id=store_id,
         release_id=release_id,
         tissue=tissue or None,
+        source_build=source_build,
         overwrite=overwrite,
     )
     typer.echo(
