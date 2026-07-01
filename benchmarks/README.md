@@ -44,6 +44,57 @@ python benchmarks/benchmark_vcf_ukb_chr1_dense.py \
 
 ---
 
+### `benchmark_ragged_besd.py`
+
+Benchmarks a ragged observed-only store built from BESD files.  Six query
+patterns are timed and a storage comparison against the source BESD is included.
+Defaults to the pre-built eqtlgen-cis store.
+
+**Output files written to `docs/benchmark-output/`:**
+
+| File | Description |
+|---|---|
+| `opengwasdb_eqtlgen_ragged_benchmark.json` | Query timings + storage comparison |
+| `opengwasdb_eqtlgen_ragged_benchmark.qmd` | Self-contained Quarto report (rendered to HTML) |
+
+**Usage:**
+
+```bash
+# Benchmark existing store (no rebuild)
+conda run -n snakemake python benchmarks/benchmark_ragged_besd.py --reps 5
+
+# Force a full rebuild then benchmark
+conda run -n snakemake python benchmarks/benchmark_ragged_besd.py --rebuild --reps 5
+
+# Use a different BESD source (e.g. hg19 with liftover)
+conda run -n snakemake python benchmarks/benchmark_ragged_besd.py \
+    --besd /path/to/prefix \
+    --store /path/to/out.opengwasdb \
+    --source-build hg19 \
+    --tissue Whole_Blood
+```
+
+**Render the QMD:**
+
+```bash
+cd docs/benchmark-output
+QUARTO_PYTHON=/home/gh13047/miniforge3/envs/snakemake/bin/python \
+  /home/gh13047/miniforge3/bin/quarto render opengwasdb_eqtlgen_ragged_benchmark.qmd
+```
+
+**Query patterns:**
+
+| Pattern | Description |
+|---|---|
+| `analysis` | All cis associations for one probe (O(1) CSR slice) |
+| `range_by_probe` | All analyses whose TSS falls in a 2 Mb window |
+| `range` | All associations where the variant falls in a 2 Mb window (O(n) scan) |
+| `phewas` | One variant across all analyses (O(n) scan) |
+| `tophits` | Top-10 hits by \|z\| from precomputed index |
+| `random_lookup` | 100 random variants × 10 random analyses |
+
+---
+
 ## Comparison document
 
 After all JSONs are present in `docs/benchmark-output/`, render the comparison report:

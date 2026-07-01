@@ -1,0 +1,122 @@
+---
+title: "eQTLgen cis Ragged Store — Query Benchmark"
+subtitle: "Ragged CSR zarr layout · 18,280 analyses · 121,858,034 associations"
+date: today
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  echo: false
+---
+
+```{python}
+import json, pathlib
+data = json.loads(pathlib.Path("opengwasdb_eqtlgen_ragged_benchmark.json").read_text())
+d, b, s = data["dataset"], data["build"], data["storage"]
+timings = data["timings"]
+sel = data["selection"]
+```
+
+## Dataset
+
+```{python}
+from IPython.display import Markdown
+rows = [
+    ("Variants", f"{d['n_variants']:,}"),
+    ("Analyses", f"{d['n_analyses']:,}"),
+    ("Associations", f"{d['n_associations']:,}"),
+    ("Store size", f"{s['store_mb']:.1f} MB"),
+]
+if "source_mb" in s:
+    rows += [
+        ("Source BESD size", f"{s['source_mb']:.1f} MB"),
+        ("Size ratio (BESD / store)", f"{s['compression_ratio']:.2f}×"),
+    ]
+if b["build_seconds"]:
+    rate = d["n_associations"] / b["build_seconds"]
+    rows += [
+        ("Build time", f"{b['build_seconds']:.1f} s"),
+        ("Build rate", f"{rate:,.0f} assoc/s"),
+    ]
+rows.append(("Store path", f"`{b['store_path']}`"))
+table = "| Field | Value |\n|---|---:|\n"
+table += "\n".join(f"| {k} | {v} |" for k, v in rows)
+Markdown(table)
+```
+
+## Storage comparison
+
+```{python}
+if "source_mb" in s:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5, 2.5))
+    labels = ["BESD (.besd+.esi+.epi)", "opengwasdb (ragged)"]
+    values = [s["source_mb"], s["store_mb"]]
+    bars = ax.barh(labels, values, color=["#aec6cf", "#4a90d9"])
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_width() + 20, bar.get_y() + bar.get_height()/2,
+                f"{v:,.0f} MB", va="center", fontsize=9)
+    ax.set_xlabel("Size (MB)")
+    ax.set_xlim(0, max(values) * 1.25)
+    ax.set_title("File size comparison")
+    plt.tight_layout()
+    plt.show()
+```
+
+## Query timings
+
+Each pattern ran 5 repetitions after one warm-up call.
+
+```{python}
+header = "| Query | Median ms | p95 ms | Result count | Notes |"
+sep    = "|---|---:|---:|---:|---|"
+rows_md = []
+for t in timings:
+    rows_md.append(
+        f"| {t['query']} | {t['median_ms']:.1f} | {t['p95_ms']:.1f}"
+        f" | {t['result_count']:,} | {t.get('notes', '')} |"
+    )
+Markdown("\n".join([header, sep] + rows_md))
+```
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+
+names = [t["query"] for t in timings]
+medians = [t["median_ms"] for t in timings]
+p95s = [t["p95_ms"] for t in timings]
+errs = [p - m for m, p in zip(medians, p95s)]
+
+fig, ax = plt.subplots(figsize=(7, 4))
+y = np.arange(len(names))
+bars = ax.barh(y, medians, xerr=errs, align="center",
+               color="#4a90d9", ecolor="#333", capsize=4)
+ax.set_yticks(y)
+ax.set_yticklabels(names)
+ax.set_xlabel("Time (ms) — median + p95 error bar")
+ax.set_title("Query latency — ragged CSR store")
+ax.set_xscale("log")
+for bar, v in zip(bars, medians):
+    ax.text(v * 1.05, bar.get_y() + bar.get_height()/2,
+            f"{v:.1f}", va="center", fontsize=8)
+plt.tight_layout()
+plt.show()
+```
+
+## Query parameters
+
+```{python}
+param_rows = [
+    ("Analysis probe", sel["analysis_probe_id"]),
+    ("Region", f"{sel['region_chrom']}:{sel['region_start']:,}–{sel['region_end']:,}"),
+    ("PheWAS variant", sel["phewas_alid"]),
+    ("Top-hit threshold", str(sel["top_hit_threshold"])),
+    ("Random lookup variants", str(len(sel["random_alids"]))),
+    ("Random lookup analyses", str(len(sel["random_analysis_ids"]))),
+]
+table = "| Parameter | Value |\n|---|---|\n"
+table += "\n".join(f"| {k} | {v} |" for k, v in param_rows)
+Markdown(table)
+```
