@@ -104,8 +104,8 @@ class StoreQuery:
             "se": se_row[mask],
         }
 
-    def range(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
-        """Return finite associations in a genomic range."""
+    def range_phewas(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+        """Return finite associations for all variants in a genomic range (regional PheWAS)."""
         row_indices = self._variant_axis.range_indices(chromosome, start, end)
         if len(row_indices) == 0:
             return _empty_result()
@@ -236,8 +236,8 @@ class RaggedStoreQuery:
             "se": assoc.se.astype("float32"),
         }
 
-    def range(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
-        """All associations where the variant falls in [start, end]."""
+    def range_phewas(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+        """All associations where the variant falls in [start, end] (regional PheWAS)."""
         variant_set = set(
             self._variant_axis.range_indices(chromosome, start, end).tolist()
         )

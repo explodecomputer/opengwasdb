@@ -74,7 +74,7 @@ def test_query_facade_supports_variant_range_analysis_phewas_top_hits_and_metada
     assert len(phewas["z"]) == 2
 
     # range: variants 0 and 1 are in [1, 250]; variant 1 missing a2 → 3 cells
-    range_res = query.range("1", 1, 250)
+    range_res = query.range_phewas("1", 1, 250)
     cells = sorted(zip(range_res["variant_index"].tolist(), range_res["analysis_index"].tolist()))
     assert cells == [(0, 0), (0, 1), (1, 0)]
 
@@ -118,7 +118,7 @@ def test_dense_index_does_not_duplicate_canonical_alids(dense_store_path):
 def test_query_excludes_missing_dense_cells(dense_store_path):
     query = query_store(dense_store_path)
 
-    result = query.range("1", 150, 350)
+    result = query.range_phewas("1", 150, 350)
 
     # variant 1 (pos 200) has a1 only; variant 2 (pos 300) has a2 only → 2 cells
     assert len(result["z"]) == 2

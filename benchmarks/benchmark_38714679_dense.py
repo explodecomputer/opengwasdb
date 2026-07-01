@@ -179,7 +179,7 @@ def run_benchmark(
     timings = []
 
     query_specs = {
-        "regional": lambda: query.range(
+        "regional": lambda: query.range_phewas(
             selection.region_chromosome,
             selection.region_start,
             selection.region_end,

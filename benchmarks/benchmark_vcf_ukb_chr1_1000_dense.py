@@ -87,7 +87,7 @@ def _run_benchmark(store_path: Path, n_reps: int, build_seconds: float | None) -
     selection = _choose_queries(store_path)
 
     query_specs = {
-        "regional": lambda: query.range(
+        "regional": lambda: query.range_phewas(
             selection["region_chrom"], selection["region_start"], selection["region_end"]
         ),
         "phewas": lambda: query.phewas(selection["phewas_alid"]),

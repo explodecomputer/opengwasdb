@@ -160,16 +160,16 @@ def query_phewas_command(store_path: Path, identifier: str) -> None:
     _emit_results(query_store(store_path).phewas(identifier))
 
 
-@app.command("query-range")
-def query_range_command(
+@app.command("query-range-phewas")
+def query_range_phewas_command(
     store_path: Path,
     chromosome: str,
     start: int,
     end: int,
 ) -> None:
-    """Query a genomic range."""
+    """Regional PheWAS: all variants in a genomic range across all analyses."""
 
-    _emit_results(query_store(store_path).range(chromosome, start, end))
+    _emit_results(query_store(store_path).range_phewas(chromosome, start, end))
 
 
 @app.command("query-analysis")

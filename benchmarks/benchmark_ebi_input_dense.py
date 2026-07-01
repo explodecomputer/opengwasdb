@@ -385,7 +385,7 @@ def run_benchmark(
     query = query_store(store_path)
     selection = choose_queries(store_path)
     query_specs = {
-        "regional": lambda: query.range(
+        "regional": lambda: query.range_phewas(
             selection["region_chromosome"],
             selection["region_start"],
             selection["region_end"],

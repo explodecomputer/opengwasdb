@@ -152,7 +152,7 @@ def test_missing_cells_are_absent(two_trait_store):
 
 def test_range_query_returns_expected_variants(two_trait_store):
     query = query_store(two_trait_store)
-    result = query.range("1", 50_000, 200_000)
+    result = query.range_phewas("1", 50_000, 200_000)
     variants = query.variants_table()
     alids = {variants[int(vi)]["alid"] for vi in result["variant_index"]}
     assert HG38_ALID_1 in alids

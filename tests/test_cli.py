@@ -40,7 +40,7 @@ def test_cli_build_validate_info_and_query_workflow(tmp_path, source_path):
     phewas_rows = json.loads(phewas.output)
     assert sorted(r["analysis_index"] for r in phewas_rows) == [0, 1]
 
-    range_query = runner.invoke(app, ["query-range", str(store_path), "1", "150", "350"])
+    range_query = runner.invoke(app, ["query-range-phewas", str(store_path), "1", "150", "350"])
     assert range_query.exit_code == 0, range_query.output
     range_rows = json.loads(range_query.output)
     assert len(range_rows) == 2

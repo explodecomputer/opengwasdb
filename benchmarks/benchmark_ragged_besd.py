@@ -122,7 +122,7 @@ def _run_benchmark(
         "range_by_probe": lambda: q.range_by_probe(
             selection["region_chrom"], selection["region_start"], selection["region_end"]
         ),
-        "range": lambda: q.range(
+        "range_phewas": lambda: q.range_phewas(
             selection["region_chrom"], selection["region_start"], selection["region_end"]
         ),
         "phewas": lambda: q.phewas(selection["phewas_alid"]),
