@@ -7,6 +7,7 @@ import numpy as np
 import typer
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
+from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
 from opengwasdb.query import query_store
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
@@ -59,6 +60,39 @@ def build_dense_command(
         store_id=store_id,
         release_id=release_id,
         reference_assembly=reference_assembly,
+        overwrite=overwrite,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("build-dense-vcf")
+def build_dense_vcf_command(
+    manifest_path: Path,
+    output_path: Path,
+    store_id: str = typer.Option(...),
+    release_id: str = typer.Option(...),
+    overwrite: bool = typer.Option(False),
+) -> None:
+    """Build a Dense Observed-Only store from a manifest of GWAS-VCF files.
+
+    MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n.
+    VCF files must be in GRCh37/hg19 coordinates; liftover to hg38 is applied inline.
+    """
+
+    result = build_dense_from_vcf_manifest(
+        manifest_path,
+        output_path,
+        store_id=store_id,
+        release_id=release_id,
         overwrite=overwrite,
     )
     typer.echo(
