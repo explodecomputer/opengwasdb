@@ -218,7 +218,7 @@ class RaggedStoreQuery:
 
     def _resolve_analysis_id(self, analysis_id: str) -> int | None:
         row = self._db.execute(
-            "SELECT analysis_index FROM analyses WHERE probe_id = ? OR analysis_id = ? LIMIT 1",
+            "SELECT analysis_index FROM analyses WHERE trait_id = ? OR analysis_id = ? LIMIT 1",
             (analysis_id, analysis_id),
         ).fetchone()
         return None if row is None else int(row["analysis_index"])
@@ -264,7 +264,7 @@ class RaggedStoreQuery:
             "se": se_all[hit_positions].astype("float32"),
         }
 
-    def range_by_probe(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+    def range_by_analysis(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
         """All associations for analyses whose probe/TSS falls in [start, end]."""
         trait_records = self._traits_reader.range(chromosome, start, end)
         if not trait_records:

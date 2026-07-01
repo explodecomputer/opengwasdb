@@ -119,7 +119,7 @@ def _run_benchmark(
 
     query_specs: dict[str, object] = {
         "analysis": lambda: q.analysis(selection["analysis_probe_id"]),
-        "range_by_probe": lambda: q.range_by_probe(
+        "range_by_analysis": lambda: q.range_by_analysis(
             selection["region_chrom"], selection["region_start"], selection["region_end"]
         ),
         "range_phewas": lambda: q.range_phewas(
@@ -196,16 +196,16 @@ def _choose_queries(store_path: Path) -> dict:
     with sqlite3.connect(str(store_path / "index.sqlite")) as conn:
         conn.row_factory = sqlite3.Row
         probe_row = conn.execute(
-            "SELECT probe_id, probe_chr, probe_bp FROM analyses WHERE analysis_index = ?",
+            "SELECT trait_id, trait_chr, trait_bp FROM analyses WHERE analysis_index = ?",
             (best_analysis_idx,),
         ).fetchone()
         # Random analyses for lookup query
         all_probes = conn.execute("SELECT probe_id FROM analyses").fetchall()
 
-    analysis_probe_id = str(probe_row["probe_id"])
+    analysis_probe_id = str(probe_row["trait_id"])
     # Use probe chr/bp to define a 2 Mb region around it for range queries
-    region_chrom = str(probe_row["probe_chr"])
-    region_centre = int(probe_row["probe_bp"])
+    region_chrom = str(probe_row["trait_chr"])
+    region_centre = int(probe_row["trait_bp"])
     region_start = max(1, region_centre - 1_000_000)
     region_end = region_centre + 1_000_000
 

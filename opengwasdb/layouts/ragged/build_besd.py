@@ -174,10 +174,10 @@ def build_ragged_from_besd(
         trait_records.append(TraitRecord(
             analysis_index=probe.row_idx,
             analysis_id=analysis_id,
-            probe_id=probe.probe_id,
+            trait_id=probe.probe_id,
             n=None,
-            probe_chr=probe_chr,
-            probe_bp=probe.probe_bp if probe.probe_bp > 0 else None,
+            trait_chr=probe_chr,
+            trait_bp=probe.probe_bp if probe.probe_bp > 0 else None,
             gene_id=probe.probe_id if probe.probe_id.startswith("ENSG") else None,
             gene_name=probe.gene,
             tissue=tissue,
@@ -339,30 +339,30 @@ def _write_index_sqlite(out: Path, trait_records: list[TraitRecord]) -> None:
         CREATE TABLE analyses (
             analysis_index INTEGER PRIMARY KEY,
             analysis_id    TEXT NOT NULL,
-            probe_id       TEXT NOT NULL,
+            trait_id       TEXT NOT NULL,
             gene_id        TEXT,
             gene_name      TEXT,
             tissue         TEXT,
             context        TEXT,
-            probe_chr      TEXT,
-            probe_bp       INTEGER,
+            trait_chr      TEXT,
+            trait_bp       INTEGER,
             n              INTEGER
         )
     """)
-    cursor.execute("CREATE INDEX idx_analyses_probe_id ON analyses(probe_id)")
-    cursor.execute("CREATE INDEX idx_analyses_gene_id  ON analyses(gene_id)")
-    cursor.execute("CREATE INDEX idx_analyses_probe_loc ON analyses(probe_chr, probe_bp)")
+    cursor.execute("CREATE INDEX idx_analyses_trait_id  ON analyses(trait_id)")
+    cursor.execute("CREATE INDEX idx_analyses_gene_id   ON analyses(gene_id)")
+    cursor.execute("CREATE INDEX idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)")
 
     for rec in trait_records:
         cursor.execute("""
             INSERT INTO analyses
-              (analysis_index, analysis_id, probe_id, gene_id, gene_name,
-               tissue, context, probe_chr, probe_bp, n)
+              (analysis_index, analysis_id, trait_id, gene_id, gene_name,
+               tissue, context, trait_chr, trait_bp, n)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            rec.analysis_index, rec.analysis_id, rec.probe_id,
+            rec.analysis_index, rec.analysis_id, rec.trait_id,
             rec.gene_id, rec.gene_name, rec.tissue, rec.context,
-            rec.probe_chr, rec.probe_bp, rec.n,
+            rec.trait_chr, rec.trait_bp, rec.n,
         ))
 
     conn.commit()

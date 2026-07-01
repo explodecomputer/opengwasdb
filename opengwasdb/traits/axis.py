@@ -13,21 +13,27 @@ TRAITS_TABLE_FILENAME = "traits.tsv.gz"
 TRAITS_TABIX_FILENAME = "traits.tsv.gz.tbi"
 TRAITS_AXIS_FORMAT = "tabix_tsv_v1"
 TRAITS_HEADER = (
-    "#probe_chr\tprobe_bp\tanalysis_index\tanalysis_id\t"
-    "probe_id\tn\tgene_id\tgene_name\ttissue\tcontext\n"
+    "#trait_chr\ttrait_bp\tanalysis_index\tanalysis_id\t"
+    "trait_id\tn\tgene_id\tgene_name\ttissue\tcontext\n"
 )
 
 
 @dataclass(frozen=True)
 class TraitRecord(Mapping[str, Any]):
-    """One Store Traits Table row."""
+    """One Store Traits Table row.
+
+    trait_id  — the entity being measured (gene, CpG, protein, phenotype, …).
+    analysis_id — unique analysis identifier; may include a tissue/context
+                  qualifier (e.g. ``ENSG00000000003::Blood``).
+    trait_chr / trait_bp — genomic position of the trait (TSS, CpG site, …).
+    """
 
     analysis_index: int
     analysis_id: str
-    probe_id: str
+    trait_id: str
     n: int | None
-    probe_chr: str | None
-    probe_bp: int | None
+    trait_chr: str | None
+    trait_bp: int | None
     gene_id: str | None
     gene_name: str | None
     tissue: str | None
@@ -38,15 +44,15 @@ class TraitRecord(Mapping[str, Any]):
 
     def __iter__(self) -> Iterator[str]:
         return iter((
-            "analysis_index", "analysis_id", "probe_id", "n",
-            "probe_chr", "probe_bp", "gene_id", "gene_name", "tissue", "context",
+            "analysis_index", "analysis_id", "trait_id", "n",
+            "trait_chr", "trait_bp", "gene_id", "gene_name", "tissue", "context",
         ))
 
     def __len__(self) -> int:
         return 10
 
     def has_position(self) -> bool:
-        return self.probe_chr is not None and self.probe_bp is not None
+        return self.trait_chr is not None and self.trait_bp is not None
 
 
 def traits_table_path(store_path: str | Path) -> Path:
@@ -75,7 +81,7 @@ def write_traits_axis(
 ) -> None:
     """Write traits.tsv.gz and tabix index.
 
-    Records with probe_chr/probe_bp are sorted by position and tabix-indexed.
+    Records with trait_chr/trait_bp are sorted by position and tabix-indexed.
     Records without position are appended at the end (no tabix index created
     for the whole file if any record lacks coordinates).
     """
@@ -85,7 +91,7 @@ def write_traits_axis(
     has_positions = all(r.has_position() for r in records)
 
     if has_positions and records:
-        sorted_records = sorted(records, key=lambda r: (_chr_sort_key(r.probe_chr), r.probe_bp))
+        sorted_records = sorted(records, key=lambda r: (_chr_sort_key(r.trait_chr), r.trait_bp))
     else:
         sorted_records = list(records)
 
@@ -93,8 +99,8 @@ def write_traits_axis(
         handle.write(TRAITS_HEADER.encode("utf-8"))
         for rec in sorted_records:
             line = (
-                f"{_fmt(rec.probe_chr)}\t{_fmt(rec.probe_bp)}\t{rec.analysis_index}\t"
-                f"{rec.analysis_id}\t{rec.probe_id}\t{_fmt(rec.n)}\t"
+                f"{_fmt(rec.trait_chr)}\t{_fmt(rec.trait_bp)}\t{rec.analysis_index}\t"
+                f"{rec.analysis_id}\t{rec.trait_id}\t{_fmt(rec.n)}\t"
                 f"{_fmt(rec.gene_id)}\t{_fmt(rec.gene_name)}\t"
                 f"{_fmt(rec.tissue)}\t{_fmt(rec.context)}\n"
             )
@@ -126,13 +132,13 @@ def _parse_record(line: str) -> TraitRecord:
     fields = line.rstrip("\n").split("\t")
     if len(fields) != 10:
         raise ValueError(f"traits row has {len(fields)} fields, expected 10: {line!r}")
-    probe_chr, probe_bp, analysis_index, analysis_id, probe_id, n, gene_id, gene_name, tissue, context = fields
+    trait_chr, trait_bp, analysis_index, analysis_id, trait_id, n, gene_id, gene_name, tissue, context = fields
     return TraitRecord(
-        probe_chr=_parse_optional_str(probe_chr),
-        probe_bp=_parse_optional_int(probe_bp),
+        trait_chr=_parse_optional_str(trait_chr),
+        trait_bp=_parse_optional_int(trait_bp),
         analysis_index=int(analysis_index),
         analysis_id=analysis_id,
-        probe_id=probe_id,
+        trait_id=trait_id,
         n=_parse_optional_int(n),
         gene_id=_parse_optional_str(gene_id),
         gene_name=_parse_optional_str(gene_name),
@@ -163,7 +169,7 @@ class TraitsAxisReader:
         self.close()
 
     def range(self, chromosome: str, start: int, end: int) -> list[TraitRecord]:
-        """Return all analyses with probe position in [start, end] on chromosome."""
+        """Return all analyses with trait position in [start, end] on chromosome."""
         if self._tabix is None:
             return []
         try:
@@ -172,8 +178,8 @@ class TraitsAxisReader:
         except ValueError:
             return []
 
-    def by_probe_id(self, probe_id: str) -> list[TraitRecord]:
-        """Return all analyses matching probe_id (linear scan)."""
+    def by_trait_id(self, trait_id: str) -> list[TraitRecord]:
+        """Return all analyses matching trait_id (linear scan)."""
         results: list[TraitRecord] = []
         with pysam.BGZFile(str(self._table_path), "r") as handle:  # type: ignore[call-arg]
             for raw in handle:
@@ -181,7 +187,7 @@ class TraitsAxisReader:
                 if line.startswith("#"):
                     continue
                 rec = _parse_record(line)
-                if rec.probe_id == probe_id:
+                if rec.trait_id == trait_id:
                     results.append(rec)
         return results
 

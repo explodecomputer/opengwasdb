@@ -146,13 +146,13 @@ def test_traits_tsv_contents(tmp_path):
     reader = TraitsAxisReader(out)
     all_traits = list(reader.all())
     assert len(all_traits) == 3
-    probe_ids = {r.probe_id for r in all_traits}
+    probe_ids = {r.trait_id for r in all_traits}
     assert probe_ids == {"ENSG00000000001", "ENSG00000000002", "ENSG00000000003"}
 
     # regional query — chr1 probes
     chr1_probes = reader.range("1", 1_000_000, 1_200_000)
     assert len(chr1_probes) == 2
-    assert {r.probe_id for r in chr1_probes} == {"ENSG00000000001", "ENSG00000000002"}
+    assert {r.trait_id for r in chr1_probes} == {"ENSG00000000001", "ENSG00000000002"}
 
 
 def test_zarr_csr_associations(tmp_path):
