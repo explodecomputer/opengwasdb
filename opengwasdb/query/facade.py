@@ -334,16 +334,20 @@ class RaggedStoreQuery:
         se_all = self._csr._se[:]
 
         import math
-        # p = erfc(|z|/sqrt(2)) ≤ threshold  →  |z| ≥ sqrt(2)*erfinv(1-threshold)
-        # Avoid scipy: use erfinv approximation via inverse of erfc.
-        # erfinv(x) ≈ sign(p-0.5)*sqrt(-ln(min(p,1-p)*2)) for p near 0 or 1
-        # Simpler: use a per-element numpy erfc computation via math.erfc ufunc-style
-        z_f32 = z_all.astype("float32")
-        # Vectorised two-tailed p-value: p = erfc(|z|/sqrt2)
-        abs_z = np.abs(z_f32).astype(np.float64)
+        # p = erfc(|z|/sqrt2) ≤ threshold  →  |z| ≥ z_thresh
+        # Compute z_thresh once via binary search on erfc (avoids per-element Python loop).
         sqrt2 = math.sqrt(2.0)
-        p_values = np.array([math.erfc(float(v) / sqrt2) for v in abs_z], dtype=np.float64)
-        mask = p_values <= threshold
+        lo, hi = 0.0, 40.0
+        mid = 0.0
+        for _ in range(60):
+            mid = (lo + hi) / 2.0
+            if math.erfc(mid / sqrt2) > threshold:
+                lo = mid
+            else:
+                hi = mid
+        z_thresh = float(mid)
+        z_f32 = z_all.astype("float32")
+        mask = np.abs(z_f32) >= z_thresh
         hit_positions = np.where(mask)[0]
 
         if len(hit_positions) == 0:
