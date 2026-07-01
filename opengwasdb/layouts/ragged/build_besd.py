@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.layouts.ragged.besd_reader import BESDReader, read_epi, read_esi
+from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
 from opengwasdb.model.enums import (
     AssociationCoverage,
@@ -255,7 +256,11 @@ def build_ragged_from_besd(
     if skipped_probes:
         print(f"  {skipped_probes} probes had no valid associations after filtering")
 
-    # ── 7. Write manifest.json ───────────────────────────────────────────────
+    # ── 7. Build top-hit indexes ─────────────────────────────────────────────
+    print("Building top-hit indexes ...")
+    build_ragged_top_hit_indexes(out)
+
+    # ── 8. Write manifest.json ───────────────────────────────────────────────
     _write_manifest(
         out, store_id, release_id,
         n_variants=len(variants),

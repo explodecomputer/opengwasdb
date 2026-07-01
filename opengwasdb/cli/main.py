@@ -9,6 +9,7 @@ import typer
 from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
+from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.query import query_store
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
@@ -143,6 +144,13 @@ def build_ragged_besd_command(
             sort_keys=True,
         )
     )
+
+
+@app.command("build-ragged-top-hits")
+def build_ragged_top_hits_command(store_path: Path) -> None:
+    """Build (or rebuild) the top-hit index for a Ragged store."""
+    build_ragged_top_hit_indexes(store_path)
+    typer.echo("done")
 
 
 @app.command("query-phewas")

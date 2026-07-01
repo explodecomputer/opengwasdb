@@ -5,8 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import zarr
 
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
+from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants.axis import VariantAxis
@@ -185,6 +187,77 @@ def test_z_scores_computed_correctly(tmp_path):
     a1 = csr.get_analysis(1)
     assert len(a1.z) == 1
     assert abs(float(a1.z[0]) - 10.0) < 0.1  # float16 tolerance
+
+
+def test_top_hit_index_built_inline(tmp_path):
+    """build_ragged_from_besd auto-builds the top-hit index."""
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+    assert "top_hits" in root
+    # At least one threshold group must exist
+    assert len(list(root["top_hits"].keys())) > 0
+
+
+def test_top_hit_index_schema(tmp_path):
+    """Each threshold group has the expected arrays and attribute."""
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+    build_ragged_top_hit_indexes(out)  # idempotent rebuild
+
+    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+    for key in root["top_hits"]:
+        group = root["top_hits"][key]
+        for name in ("variant_index", "analysis_index", "abs_z", "z", "se", "p_value"):
+            assert name in group, f"missing {name} in {key}"
+        n = len(group["variant_index"])
+        for name in ("analysis_index", "abs_z", "z", "se", "p_value"):
+            assert len(group[name]) == n
+        assert "threshold" in group.attrs
+
+
+def test_top_hit_z_values_match_csr(tmp_path):
+    """Top-hit z values round-trip through the float16 CSR correctly."""
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    csr = RaggedCSRReader(out)
+    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+
+    # Use the loosest threshold to get all 5 hits
+    loosest_key = sorted(root["top_hits"].keys())[-1]
+    group = root["top_hits"][loosest_key]
+    vis = group["variant_index"][:].astype(int)
+    ais = group["analysis_index"][:].astype(int)
+    zs = group["z"][:].astype("float32")
+
+    offsets = csr._offsets[:]
+    vi_all = csr._variant_index[:]
+    z_all = csr._z[:]
+
+    for vi, ai, z_hit in zip(vis, ais, zs):
+        start, end = int(offsets[ai]), int(offsets[ai + 1])
+        pos = start + int(np.searchsorted(vi_all[start:end], vi))
+        assert pos < end and int(vi_all[pos]) == vi
+        assert np.isclose(float(z_all[pos]), float(z_hit), rtol=1e-2, atol=1e-2)
+
+
+def test_top_hits_query_uses_index(tmp_path):
+    """RaggedStoreQuery.top_hits reads from the precomputed index."""
+    from opengwasdb.query import query_store
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    q = query_store(out)
+    # Threshold 5e-4 should return all 5 associations (all have |z| > 3.48)
+    result = q.top_hits(threshold=5e-4)
+    assert len(result["z"]) == 5
+    assert "variant_index" in result and "analysis_index" in result
 
 
 def test_overwrite_flag(tmp_path):

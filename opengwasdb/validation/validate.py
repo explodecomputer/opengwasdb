@@ -17,6 +17,7 @@ from opengwasdb.model.enums import PrimaryStorageLayout, StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.traits.axis import traits_table_path, traits_tabix_path
+from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.variants import (
     VariantAxis,
     variant_alid_bytes_path,
@@ -154,9 +155,76 @@ def _validate_ragged_store(store_path: Path, errors: list[str]) -> ValidationRes
                         f"analyses table has {n_analyses_db} rows but "
                         f"zarr CSR offsets imply {n_analyses_csr} analyses"
                     )
+
+        data_root = zarr.open_group(str(data_path), mode="r")
+        if not errors and "top_hits" in data_root:
+            _validate_ragged_top_hits(store_path, data_root, errors)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"validation failed: {exc}")
     return ValidationResult(errors=errors)
+
+
+_TOP_HIT_SAMPLE_SIZE = 1000  # cross-validate this many sampled entries against the CSR
+
+
+def _validate_ragged_top_hits(
+    store_path: Path,
+    data_root: Any,
+    errors: list[str],
+) -> None:
+    """Validate the top-hit index groups in a ragged zarr store.
+
+    Structural checks (lengths, sort order) are exhaustive.
+    CSR cross-validation is sampled to keep validation O(1) for large stores.
+    """
+    top = data_root["top_hits"]
+    csr = RaggedCSRReader(store_path)
+    offsets = csr._offsets[:]
+    vi_all = csr._variant_index[:].astype(np.int32)
+    z_all = csr._z[:].astype(np.float32)
+
+    for key in top:
+        group = top[key]
+        threshold = float(group.attrs.get("threshold", 0))
+        vis = group["variant_index"][:].astype(np.int32)
+        ais = group["analysis_index"][:].astype(np.int32)
+        zs = group["z"][:].astype(np.float32)
+        abs_zs = group["abs_z"][:].astype(np.float32)
+
+        if not (len(vis) == len(ais) == len(zs) == len(abs_zs)):
+            errors.append(f"top-hit index {key} has inconsistent array lengths")
+            continue
+
+        # Exhaustive: check sort order is non-increasing |z|
+        if len(abs_zs) > 1 and np.any(np.diff(abs_zs) > 1e-4):
+            errors.append(f"top-hit index {key} is not ranked by descending |z|")
+
+        # Exhaustive: all abs_z must match |z|
+        if not np.allclose(abs_zs, np.abs(zs), rtol=1e-3, atol=1e-3):
+            errors.append(f"top-hit index {key} abs_z inconsistent with z")
+
+        # Sampled cross-validation against the CSR
+        n = len(vis)
+        if n == 0:
+            continue
+        rng = np.random.default_rng(0)
+        sample = rng.choice(n, size=min(_TOP_HIT_SAMPLE_SIZE, n), replace=False)
+        for idx in sample.tolist():
+            ai = int(ais[idx])
+            vi = int(vis[idx])
+            start = int(offsets[ai])
+            end = int(offsets[ai + 1])
+            pos = start + int(np.searchsorted(vi_all[start:end], vi))
+            if pos >= end or int(vi_all[pos]) != vi:
+                errors.append(f"top-hit index {key} references missing association")
+                break
+            stored_z = float(z_all[pos])
+            if not np.isclose(stored_z, float(zs[idx]), rtol=1e-3, atol=1e-3):
+                errors.append(f"top-hit index {key} z value inconsistent with CSR")
+                break
+            if p_value_from_z(stored_z) > threshold:
+                errors.append(f"top-hit index {key} contains association above threshold")
+                break
 
 
 def _load_manifest(store_path: Path, errors: list[str]) -> StoreManifest | None:

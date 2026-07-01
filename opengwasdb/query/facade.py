@@ -327,18 +327,33 @@ class RaggedStoreQuery:
         threshold: float = 5e-8,
         limit: int | None = None,
     ) -> dict[str, np.ndarray]:
-        """Associations passing a significance threshold (full scan)."""
+        """Associations passing a significance threshold.
+
+        Uses the precomputed top-hit index when available (fast path);
+        falls back to a full CSR scan otherwise.
+        """
+        key = threshold_key(threshold)
+        root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
+        path = f"top_hits/{key}"
+        if path in root:
+            group = root[path]
+            vi = group["variant_index"][:].astype("int32")
+            ai = group["analysis_index"][:].astype("int32")
+            z = group["z"][:].astype("float32")
+            se = group["se"][:].astype("float32")
+            if limit is not None:
+                vi, ai, z, se = vi[:limit], ai[:limit], z[:limit], se[:limit]
+            return {"variant_index": vi, "analysis_index": ai, "z": z, "se": se}
+
+        # Fallback: full scan
+        import math
         offsets = self._csr._offsets[:]
         vi_all = self._csr._variant_index[:]
         z_all = self._csr._z[:]
         se_all = self._csr._se[:]
 
-        import math
-        # p = erfc(|z|/sqrt2) ≤ threshold  →  |z| ≥ z_thresh
-        # Compute z_thresh once via binary search on erfc (avoids per-element Python loop).
         sqrt2 = math.sqrt(2.0)
-        lo, hi = 0.0, 40.0
-        mid = 0.0
+        lo, hi, mid = 0.0, 40.0, 0.0
         for _ in range(60):
             mid = (lo + hi) / 2.0
             if math.erfc(mid / sqrt2) > threshold:
@@ -353,7 +368,6 @@ class RaggedStoreQuery:
         if len(hit_positions) == 0:
             return _empty_result()
 
-        # Sort by descending |z|
         order = np.argsort(-np.abs(z_f32[hit_positions]))
         hit_positions = hit_positions[order]
         if limit is not None:
