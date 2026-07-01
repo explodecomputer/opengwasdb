@@ -13,9 +13,10 @@ import zarr
 
 from opengwasdb.index import connect, count_rows
 from opengwasdb.layouts.dense.top_hits import threshold_key
-from opengwasdb.model.enums import StoredEffectScale
+from opengwasdb.model.enums import PrimaryStorageLayout, StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
+from opengwasdb.traits.axis import traits_table_path, traits_tabix_path
 from opengwasdb.variants import (
     VariantAxis,
     variant_alid_bytes_path,
@@ -46,6 +47,13 @@ def validate_store(path: str | Path) -> ValidationResult:
     manifest = _load_manifest(store_path, errors)
     if manifest is None:
         return ValidationResult(errors=errors)
+
+    if manifest.primary_layout is PrimaryStorageLayout.RAGGED:
+        return _validate_ragged_store(store_path, errors)
+    return _validate_dense_store(store_path, errors)
+
+
+def _validate_dense_store(store_path: Path, errors: list[str]) -> ValidationResult:
     index_path = store_path / "index.sqlite"
     data_path = store_path / "data.zarr"
     variants_path = variant_table_path(store_path)
@@ -88,6 +96,65 @@ def validate_store(path: str | Path) -> ValidationResult:
             if not errors:
                 _validate_top_hits(root, errors)
     except Exception as exc:  # noqa: BLE001 - validators should report actionable failures
+        errors.append(f"validation failed: {exc}")
+    return ValidationResult(errors=errors)
+
+
+def _validate_ragged_store(store_path: Path, errors: list[str]) -> ValidationResult:
+    index_path = store_path / "index.sqlite"
+    data_path = store_path / "data.zarr"
+    ragged_path = data_path / "ragged"
+
+    for label, p in [
+        ("index.sqlite", index_path),
+        ("data.zarr", data_path),
+        ("data.zarr/ragged", ragged_path),
+        ("variants.tsv.gz", variant_table_path(store_path)),
+        ("variants.tsv.gz.tbi", variant_tabix_path(store_path)),
+        ("variant_alid_bytes.npy", variant_alid_bytes_path(store_path)),
+        ("variant_alid_rows.npy", variant_alid_rows_path(store_path)),
+        ("traits.tsv.gz", traits_table_path(store_path)),
+    ]:
+        if not p.exists():
+            errors.append(f"missing {label}")
+    if errors:
+        return ValidationResult(errors=errors)
+
+    try:
+        root = zarr.open_group(str(ragged_path), mode="r")
+        for name in ("offsets", "variant_index", "z", "se"):
+            if name not in root:
+                errors.append(f"missing data.zarr/ragged/{name}")
+        if errors:
+            return ValidationResult(errors=errors)
+
+        offsets = root["offsets"][:]
+        n_assoc = int(offsets[-1])
+        for name in ("variant_index", "z", "se"):
+            if len(root[name]) != n_assoc:
+                errors.append(
+                    f"data.zarr/ragged/{name} has {len(root[name])} entries "
+                    f"but offsets imply {n_assoc}"
+                )
+        se_vals = root["se"][:].astype("float32")
+        if np.any(np.isfinite(se_vals) & (se_vals < 0)):
+            errors.append("se contains negative finite values")
+
+        with sqlite3.connect(str(index_path)) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "analyses" not in tables:
+                errors.append("index.sqlite is missing the analyses table")
+            else:
+                n_analyses_db = conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
+                n_analyses_csr = len(offsets) - 1
+                if n_analyses_db != n_analyses_csr:
+                    errors.append(
+                        f"analyses table has {n_analyses_db} rows but "
+                        f"zarr CSR offsets imply {n_analyses_csr} analyses"
+                    )
+    except Exception as exc:  # noqa: BLE001
         errors.append(f"validation failed: {exc}")
     return ValidationResult(errors=errors)
 
