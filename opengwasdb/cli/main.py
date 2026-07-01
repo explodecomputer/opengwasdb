@@ -8,6 +8,7 @@ import typer
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
+from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.query import query_store
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
@@ -101,6 +102,41 @@ def build_dense_vcf_command(
                 "output_path": str(result.output_path),
                 "n_variants": result.n_variants,
                 "n_analyses": result.n_analyses,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("build-ragged-besd")
+def build_ragged_besd_command(
+    besd_prefix: Path,
+    output_path: Path,
+    store_id: str = typer.Option(...),
+    release_id: str = typer.Option(...),
+    tissue: str = typer.Option(None),
+    overwrite: bool = typer.Option(False),
+) -> None:
+    """Build a Ragged Observed-Only store from BESD files.
+
+    BESD_PREFIX is the path without extension (.esi, .epi, .besd are appended).
+    The BESD dataset must already be in GRCh38; no liftover is applied.
+    """
+    result = build_ragged_from_besd(
+        besd_prefix,
+        output_path,
+        store_id=store_id,
+        release_id=release_id,
+        tissue=tissue or None,
+        overwrite=overwrite,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_associations": result.n_associations,
             },
             sort_keys=True,
         )
