@@ -11,7 +11,7 @@ import zarr
 from opengwasdb.index import analysis_by_id, connect
 from opengwasdb.layouts.dense.top_hits import threshold_key
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
-from opengwasdb.model.enums import PrimaryStorageLayout
+from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.store.open import OpenGWASDBStore, open_store
 from opengwasdb.traits.axis import TraitsAxisReader
@@ -24,7 +24,15 @@ def _empty_result() -> dict[str, np.ndarray]:
         "analysis_index": np.empty(0, dtype="int32"),
         "z": np.empty(0, dtype="float32"),
         "se": np.empty(0, dtype="float32"),
+        "association_status": np.empty(0, dtype=object),
     }
+
+
+def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray) -> np.ndarray:
+    """Derive association_status strings from imputed mask and z values."""
+    out = np.where(imputed_flags == 1, "imputed", "observed").astype(object)
+    out[~np.isfinite(z_vals)] = "missing"
+    return out
 
 
 class StoreQuery:
@@ -80,11 +88,13 @@ class StoreQuery:
         se_col = self._root["se"][:, col].astype("float32")
         mask = np.isfinite(z_col) & np.isfinite(se_col)
         rows = np.where(mask)[0].astype("int32")
+        n = len(rows)
         return {
             "variant_index": rows,
-            "analysis_index": np.full(len(rows), col, dtype="int32"),
+            "analysis_index": np.full(n, col, dtype="int32"),
             "z": z_col[mask],
             "se": se_col[mask],
+            "association_status": np.full(n, "observed", dtype=object),
         }
 
     def phewas(self, identifier: str) -> dict[str, np.ndarray]:
@@ -97,11 +107,13 @@ class StoreQuery:
         se_row = self._root["se"][row, :].astype("float32")
         mask = np.isfinite(z_row) & np.isfinite(se_row)
         cols = np.where(mask)[0].astype("int32")
+        n = len(cols)
         return {
-            "variant_index": np.full(len(cols), row, dtype="int32"),
+            "variant_index": np.full(n, row, dtype="int32"),
             "analysis_index": cols,
             "z": z_row[mask],
             "se": se_row[mask],
+            "association_status": np.full(n, "observed", dtype=object),
         }
 
     def range_phewas(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
@@ -113,11 +125,13 @@ class StoreQuery:
         se_block = self._root["se"].oindex[row_indices, :].astype("float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols = np.where(mask)
+        n = len(rows_rel)
         return {
             "variant_index": row_indices[rows_rel],
             "analysis_index": cols.astype("int32"),
             "z": z_block[mask],
             "se": se_block[mask],
+            "association_status": np.full(n, "observed", dtype=object),
         }
 
     def lookup(
@@ -144,11 +158,13 @@ class StoreQuery:
         se_block = self._root["se"].oindex[row_indices, :][:, col_indices].astype("float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols_rel = np.where(mask)
+        n = len(rows_rel)
         return {
             "variant_index": np.array([row_indices[r] for r in rows_rel], dtype="int32"),
             "analysis_index": np.array([col_indices[c] for c in cols_rel], dtype="int32"),
             "z": z_block[mask],
             "se": se_block[mask],
+            "association_status": np.full(n, "observed", dtype=object),
         }
 
     def top_hits(
@@ -189,6 +205,7 @@ class StoreQuery:
             "analysis_index": analysis_indices,
             "z": z_values,
             "se": se_values,
+            "association_status": np.full(len(variant_indices), "observed", dtype=object),
         }
 
 
@@ -204,6 +221,19 @@ class RaggedStoreQuery:
             str(store.path / "index.sqlite")
         )
         self._db.row_factory = sqlite3.Row
+        self._is_completed = (
+            store.manifest.completion_state is CompletionState.REFERENCE_COMPLETED
+        )
+        # Load imputed mask when present (reference-completed stores).
+        ragged_path = store.path / "data.zarr" / "ragged"
+        self._imputed: zarr.Array | None = None
+        if self._is_completed:
+            try:
+                _root = zarr.open_group(str(ragged_path), mode="r")
+                if "imputed" in _root:
+                    self._imputed = _root["imputed"]
+            except Exception:  # noqa: BLE001
+                pass
 
     def close(self) -> None:
         self._variant_axis.close()
@@ -223,20 +253,45 @@ class RaggedStoreQuery:
         ).fetchone()
         return None if row is None else int(row["analysis_index"])
 
-    def analysis(self, analysis_id: str) -> dict[str, np.ndarray]:
+    def _get_imputed_slice(self, start: int, end: int) -> np.ndarray:
+        """Return imputed mask slice [start:end]; all-zeros if not a completed store."""
+        if self._imputed is not None:
+            return self._imputed[start:end].astype(np.uint8)
+        return np.zeros(end - start, dtype=np.uint8)
+
+    def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """All associations for one analysis (probe_id or analysis_id lookup)."""
         idx = self._resolve_analysis_id(analysis_id)
         if idx is None:
             return _empty_result()
-        assoc = self._csr.get_analysis(idx)
+        offsets = self._csr._offsets[idx: idx + 2]
+        start, end = int(offsets[0]), int(offsets[1])
+        if start == end:
+            return _empty_result()
+        vi = self._csr._variant_index[start:end].astype("int32")
+        z = self._csr._z[start:end].astype("float32")
+        se = self._csr._se[start:end].astype("float32")
+        imp = self._get_imputed_slice(start, end)
+        if observed_only:
+            mask = imp == 0
+            vi, z, se, imp = vi[mask], z[mask], se[mask], imp[mask]
+        status = _status_array(imp, z)
         return {
-            "variant_index": assoc.variant_index.astype("int32"),
-            "analysis_index": np.full(len(assoc.z), idx, dtype="int32"),
-            "z": assoc.z.astype("float32"),
-            "se": assoc.se.astype("float32"),
+            "variant_index": vi,
+            "analysis_index": np.full(len(z), idx, dtype="int32"),
+            "z": z,
+            "se": se,
+            "association_status": status,
         }
 
-    def range_phewas(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+    def range_phewas(
+        self,
+        chromosome: str,
+        start: int,
+        end: int,
+        *,
+        observed_only: bool = False,
+    ) -> dict[str, np.ndarray]:
         """All associations where the variant falls in [start, end] (regional PheWAS)."""
         variant_set = set(
             self._variant_axis.range_indices(chromosome, start, end).tolist()
@@ -254,17 +309,36 @@ class RaggedStoreQuery:
         if len(hit_positions) == 0:
             return _empty_result()
 
-        # Derive analysis_index for each hit via searchsorted on offsets
         analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
+        imp = (
+            self._imputed[hit_positions].astype(np.uint8)
+            if self._imputed is not None
+            else np.zeros(len(hit_positions), dtype=np.uint8)
+        )
+        if observed_only:
+            keep = imp == 0
+            hit_positions = hit_positions[keep]
+            analysis_indices = analysis_indices[keep]
+            imp = imp[keep]
 
+        z_out = z_all[hit_positions].astype("float32")
+        se_out = se_all[hit_positions].astype("float32")
         return {
             "variant_index": vi_all[hit_positions].astype("int32"),
             "analysis_index": analysis_indices,
-            "z": z_all[hit_positions].astype("float32"),
-            "se": se_all[hit_positions].astype("float32"),
+            "z": z_out,
+            "se": se_out,
+            "association_status": _status_array(imp, z_out),
         }
 
-    def range_by_analysis(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+    def range_by_analysis(
+        self,
+        chromosome: str,
+        start: int,
+        end: int,
+        *,
+        observed_only: bool = False,
+    ) -> dict[str, np.ndarray]:
         """All associations for analyses whose probe/TSS falls in [start, end]."""
         trait_records = self._traits_reader.range(chromosome, start, end)
         if not trait_records:
@@ -274,15 +348,28 @@ class RaggedStoreQuery:
         all_ai: list[np.ndarray] = []
         all_z: list[np.ndarray] = []
         all_se: list[np.ndarray] = []
+        all_status: list[np.ndarray] = []
 
         for rec in trait_records:
-            assoc = self._csr.get_analysis(rec.analysis_index)
-            if len(assoc.z) == 0:
+            ai = rec.analysis_index
+            offsets = self._csr._offsets[ai: ai + 2]
+            s, e = int(offsets[0]), int(offsets[1])
+            if s == e:
                 continue
-            all_vi.append(assoc.variant_index.astype("int32"))
-            all_ai.append(np.full(len(assoc.z), rec.analysis_index, dtype="int32"))
-            all_z.append(assoc.z.astype("float32"))
-            all_se.append(assoc.se.astype("float32"))
+            vi = self._csr._variant_index[s:e].astype("int32")
+            z = self._csr._z[s:e].astype("float32")
+            se = self._csr._se[s:e].astype("float32")
+            imp = self._get_imputed_slice(s, e)
+            if observed_only:
+                keep = imp == 0
+                vi, z, se, imp = vi[keep], z[keep], se[keep], imp[keep]
+            if len(z) == 0:
+                continue
+            all_vi.append(vi)
+            all_ai.append(np.full(len(z), ai, dtype="int32"))
+            all_z.append(z)
+            all_se.append(se)
+            all_status.append(_status_array(imp, z))
 
         if not all_vi:
             return _empty_result()
@@ -291,9 +378,10 @@ class RaggedStoreQuery:
             "analysis_index": np.concatenate(all_ai),
             "z": np.concatenate(all_z),
             "se": np.concatenate(all_se),
+            "association_status": np.concatenate(all_status),
         }
 
-    def phewas(self, identifier: str) -> dict[str, np.ndarray]:
+    def phewas(self, identifier: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """All analyses that have an association for a given variant identifier.
 
         O(n_total_associations) scan — acceptable for exploratory use; add a
@@ -314,11 +402,25 @@ class RaggedStoreQuery:
             return _empty_result()
 
         analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
+        imp = (
+            self._imputed[hit_positions].astype(np.uint8)
+            if self._imputed is not None
+            else np.zeros(len(hit_positions), dtype=np.uint8)
+        )
+        if observed_only:
+            keep = imp == 0
+            hit_positions = hit_positions[keep]
+            analysis_indices = analysis_indices[keep]
+            imp = imp[keep]
+
+        z_out = z_all[hit_positions].astype("float32")
+        se_out = se_all[hit_positions].astype("float32")
         return {
             "variant_index": np.full(len(hit_positions), target_vi, dtype="int32"),
             "analysis_index": analysis_indices,
-            "z": z_all[hit_positions].astype("float32"),
-            "se": se_all[hit_positions].astype("float32"),
+            "z": z_out,
+            "se": se_out,
+            "association_status": _status_array(imp, z_out),
         }
 
     def top_hits(
@@ -326,24 +428,31 @@ class RaggedStoreQuery:
         *,
         threshold: float = 5e-8,
         limit: int | None = None,
+        observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """Associations passing a significance threshold.
 
         Uses the precomputed top-hit index when available (fast path);
         falls back to a full CSR scan otherwise.
+        observed_only=True forces a full scan to exclude imputed associations.
         """
         key = threshold_key(threshold)
         root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
         path = f"top_hits/{key}"
-        if path in root:
+        if path in root and not observed_only:
             group = root[path]
             vi = group["variant_index"][:].astype("int32")
             ai = group["analysis_index"][:].astype("int32")
             z = group["z"][:].astype("float32")
             se = group["se"][:].astype("float32")
+            imp = np.zeros(len(vi), dtype=np.uint8)
             if limit is not None:
                 vi, ai, z, se = vi[:limit], ai[:limit], z[:limit], se[:limit]
-            return {"variant_index": vi, "analysis_index": ai, "z": z, "se": se}
+                imp = imp[:limit]
+            return {
+                "variant_index": vi, "analysis_index": ai, "z": z, "se": se,
+                "association_status": _status_array(imp, z),
+            }
 
         # Fallback: full scan
         import math
@@ -374,17 +483,33 @@ class RaggedStoreQuery:
             hit_positions = hit_positions[:limit]
 
         analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
+        imp_all = (
+            self._imputed[:].astype(np.uint8) if self._imputed is not None
+            else np.zeros(len(vi_all), dtype=np.uint8)
+        )
+        imp_hits = imp_all[hit_positions]
+        if observed_only:
+            keep = imp_hits == 0
+            hit_positions = hit_positions[keep]
+            analysis_indices = analysis_indices[keep]
+            imp_hits = imp_hits[keep]
+
+        z_out = z_f32[hit_positions]
+        se_out = se_all[hit_positions].astype("float32")
         return {
             "variant_index": vi_all[hit_positions].astype("int32"),
             "analysis_index": analysis_indices,
-            "z": z_f32[hit_positions],
-            "se": se_all[hit_positions].astype("float32"),
+            "z": z_out,
+            "se": se_out,
+            "association_status": _status_array(imp_hits, z_out),
         }
 
     def lookup(
         self,
         identifiers: list[str],
         analysis_ids: list[str],
+        *,
+        observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """Associations for a specific variant × analysis set."""
         variants = [
@@ -396,22 +521,34 @@ class RaggedStoreQuery:
             return _empty_result()
 
         target_vi = {v.variant_index for v in variants}
-        all_vi, all_ai, all_z, all_se = [], [], [], []
+        all_vi, all_ai, all_z, all_se, all_status = [], [], [], [], []
 
         for aid in analysis_ids:
             idx = self._resolve_analysis_id(aid)
             if idx is None:
                 continue
-            assoc = self._csr.get_analysis(idx)
-            if len(assoc.variant_index) == 0:
+            offsets_pair = self._csr._offsets[idx: idx + 2]
+            s, e = int(offsets_pair[0]), int(offsets_pair[1])
+            if s == e:
                 continue
-            sub_mask = np.isin(assoc.variant_index, np.array(sorted(target_vi), dtype=np.int32))
+            vi = self._csr._variant_index[s:e].astype("int32")
+            z = self._csr._z[s:e].astype("float32")
+            se = self._csr._se[s:e].astype("float32")
+            imp = self._get_imputed_slice(s, e)
+            sub_mask = np.isin(vi, np.array(sorted(target_vi), dtype=np.int32))
             if not sub_mask.any():
                 continue
-            all_vi.append(assoc.variant_index[sub_mask].astype("int32"))
-            all_ai.append(np.full(sub_mask.sum(), idx, dtype="int32"))
-            all_z.append(assoc.z[sub_mask].astype("float32"))
-            all_se.append(assoc.se[sub_mask].astype("float32"))
+            vi, z, se, imp = vi[sub_mask], z[sub_mask], se[sub_mask], imp[sub_mask]
+            if observed_only:
+                keep = imp == 0
+                vi, z, se, imp = vi[keep], z[keep], se[keep], imp[keep]
+            if len(z) == 0:
+                continue
+            all_vi.append(vi)
+            all_ai.append(np.full(len(z), idx, dtype="int32"))
+            all_z.append(z)
+            all_se.append(se)
+            all_status.append(_status_array(imp, z))
 
         if not all_vi:
             return _empty_result()
@@ -420,6 +557,7 @@ class RaggedStoreQuery:
             "analysis_index": np.concatenate(all_ai),
             "z": np.concatenate(all_z),
             "se": np.concatenate(all_se),
+            "association_status": np.concatenate(all_status),
         }
 
 

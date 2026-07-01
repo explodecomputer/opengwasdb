@@ -13,7 +13,7 @@ import zarr
 
 from opengwasdb.index import connect, count_rows
 from opengwasdb.layouts.dense.top_hits import threshold_key
-from opengwasdb.model.enums import PrimaryStorageLayout, StoredEffectScale
+from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout, StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.traits.axis import traits_table_path, traits_tabix_path
@@ -50,7 +50,7 @@ def validate_store(path: str | Path) -> ValidationResult:
         return ValidationResult(errors=errors)
 
     if manifest.primary_layout is PrimaryStorageLayout.RAGGED:
-        return _validate_ragged_store(store_path, errors)
+        return _validate_ragged_store(store_path, manifest, errors)
     return _validate_dense_store(store_path, errors)
 
 
@@ -101,7 +101,11 @@ def _validate_dense_store(store_path: Path, errors: list[str]) -> ValidationResu
     return ValidationResult(errors=errors)
 
 
-def _validate_ragged_store(store_path: Path, errors: list[str]) -> ValidationResult:
+def _validate_ragged_store(
+    store_path: Path,
+    manifest: StoreManifest,
+    errors: list[str],
+) -> ValidationResult:
     index_path = store_path / "index.sqlite"
     data_path = store_path / "data.zarr"
     ragged_path = data_path / "ragged"
@@ -157,11 +161,71 @@ def _validate_ragged_store(store_path: Path, errors: list[str]) -> ValidationRes
                     )
 
         data_root = zarr.open_group(str(data_path), mode="r")
+
+        # Reference-completed stores: validate imputed array and quality table.
+        if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
+            _validate_ragged_completion(ragged_path, index_path, n_assoc, errors)
+
         if not errors and "top_hits" in data_root:
             _validate_ragged_top_hits(store_path, data_root, errors)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"validation failed: {exc}")
     return ValidationResult(errors=errors)
+
+
+def _validate_ragged_completion(
+    ragged_path: Path,
+    index_path: Path,
+    n_assoc: int,
+    errors: list[str],
+) -> None:
+    """Validate the imputed mask and completion_quality table in a Reference-Completed store."""
+    root = zarr.open_group(str(ragged_path), mode="r")
+    if "imputed" not in root:
+        errors.append("reference-completed store is missing data.zarr/ragged/imputed")
+        return
+
+    imp = root["imputed"][:]
+    if len(imp) != n_assoc:
+        errors.append(
+            f"data.zarr/ragged/imputed has {len(imp)} entries but offsets imply {n_assoc}"
+        )
+        return
+
+    # imputed values must be 0 or 1
+    if not np.all((imp == 0) | (imp == 1)):
+        errors.append("data.zarr/ragged/imputed contains values other than 0 and 1")
+
+    # Where imputed=1: z and se must both be finite
+    z_vals = root["z"][:].astype("float32")
+    se_vals = root["se"][:].astype("float32")
+    imp_mask = imp == 1
+    if imp_mask.any():
+        if not np.all(np.isfinite(z_vals[imp_mask])):
+            errors.append("imputed=1 rows have NaN z-scores")
+        if not np.all(np.isfinite(se_vals[imp_mask])):
+            errors.append("imputed=1 rows have NaN se values")
+
+    # Where z is NaN: se must also be NaN and imputed must be 0
+    nan_z = ~np.isfinite(z_vals)
+    if nan_z.any():
+        if not np.all(~np.isfinite(se_vals[nan_z])):
+            errors.append("NaN z rows have finite se values (inconsistent missingness)")
+        if np.any(imp[nan_z] == 1):
+            errors.append("NaN z rows have imputed=1 (inconsistent)")
+
+    with sqlite3.connect(str(index_path)) as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "completion_quality" not in tables:
+            errors.append("index.sqlite is missing the completion_quality table for a reference-completed store")
+        else:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(completion_quality)").fetchall()}
+            required = {"analysis_index", "block_id", "pearson_r", "n_imputed", "n_missing"}
+            missing_cols = required - cols
+            if missing_cols:
+                errors.append(f"completion_quality table is missing columns: {', '.join(sorted(missing_cols))}")
 
 
 _TOP_HIT_SAMPLE_SIZE = 1000  # cross-validate this many sampled entries against the CSR

@@ -9,6 +9,7 @@ import typer
 from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
+from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.query import query_store
 from opengwasdb.store import open_store
@@ -140,6 +141,47 @@ def build_ragged_besd_command(
                 "n_variants": result.n_variants,
                 "n_analyses": result.n_analyses,
                 "n_associations": result.n_associations,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("complete-ragged")
+def complete_ragged_command(
+    source_path: Path,
+    dest_path: Path,
+    ld_panel: Path = typer.Option(..., help="Root of LD panel (ld_dir/{ancestry}/{chr}/...)"),
+    ancestry: str = typer.Option("EUR"),
+    cis_window_bp: int = typer.Option(1_000_000),
+    min_cor: float = typer.Option(0.7),
+    release_id: str = typer.Option(None),
+    overwrite: bool = typer.Option(False),
+) -> None:
+    """Produce a Reference-Completed ragged store from an observed-only store."""
+    import time
+    t0 = time.time()
+    result = complete_ragged_store(
+        source_path,
+        dest_path,
+        ld_panel,
+        ancestry=ancestry,
+        cis_window_bp=cis_window_bp,
+        min_cor=min_cor,
+        release_id=release_id or None,
+        overwrite=overwrite,
+    )
+    elapsed = time.time() - t0
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_associations": result.n_associations,
+                "n_imputed": result.n_imputed,
+                "n_missing": result.n_missing,
+                "elapsed_s": round(elapsed, 1),
             },
             sort_keys=True,
         )
