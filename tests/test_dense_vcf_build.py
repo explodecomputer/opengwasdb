@@ -197,6 +197,61 @@ def test_liftover_failure_above_threshold_raises(tmp_path):
         )
 
 
+class TestParallel:
+    def test_two_workers_matches_serial(self, tmp_path):
+        vcf1 = _make_vcf(
+            tmp_path,
+            "trait_a",
+            [
+                f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",
+                f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n",
+                f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n",
+            ],
+        )
+        vcf2 = _make_vcf(
+            tmp_path,
+            "trait_b",
+            [
+                f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t6.0:0.5\n",
+                f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t1.2:0.3\n",
+            ],
+            study_type="CaseControl",
+        )
+        manifest = _make_manifest(
+            tmp_path,
+            [("trait_a", vcf1, "Trait A"), ("trait_b", vcf2, "Trait B")],
+        )
+
+        serial_path = tmp_path / "serial.opengwasdb"
+        build_dense_from_vcf_manifest(
+            manifest, serial_path, store_id="s", release_id="r", n_workers=1
+        )
+        parallel_path = tmp_path / "parallel.opengwasdb"
+        build_dense_from_vcf_manifest(
+            manifest, parallel_path, store_id="s", release_id="r", n_workers=2
+        )
+
+        assert validate_store(parallel_path).ok
+
+        import zarr
+
+        serial_root = zarr.open_group(str(serial_path / "data.zarr"), mode="r")
+        parallel_root = zarr.open_group(str(parallel_path / "data.zarr"), mode="r")
+        serial_z = serial_root["z"][:]
+        parallel_z = parallel_root["z"][:]
+        serial_se = serial_root["se"][:]
+        parallel_se = parallel_root["se"][:]
+
+        assert serial_z.shape == parallel_z.shape
+        np.testing.assert_array_equal(np.isnan(serial_z), np.isnan(parallel_z))
+        np.testing.assert_allclose(
+            serial_z[~np.isnan(serial_z)], parallel_z[~np.isnan(parallel_z)]
+        )
+        np.testing.assert_allclose(
+            serial_se[~np.isnan(serial_se)], parallel_se[~np.isnan(parallel_se)]
+        )
+
+
 def test_ez_preferred_over_es_se(tmp_path):
     """When EZ is present and finite, it is used instead of ES/SE."""
     vcf = _make_vcf(

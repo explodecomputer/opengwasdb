@@ -12,7 +12,6 @@ from opengwasdb.index import analysis_by_id, connect
 from opengwasdb.layouts.dense.top_hits import threshold_key
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
-from opengwasdb.stats import p_value_from_z
 from opengwasdb.store.open import OpenGWASDBStore, open_store
 from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants import VariantAxis
@@ -43,6 +42,18 @@ class StoreQuery:
         self._connection = connect(store.index_path)
         self._root = zarr.open_group(str(store.data_path), mode="r")
         self._variant_axis = VariantAxis(store.path, self._connection)
+        self._is_completed = (
+            store.manifest.completion_state is CompletionState.REFERENCE_COMPLETED
+        )
+        self._imputed: zarr.Array | None = (
+            self._root["imputed"] if self._is_completed and "imputed" in self._root else None
+        )
+
+    def _imputed_pairs(self, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        """Imputed flags for elementwise (row, col) pairs; all-zeros when not a completed store."""
+        if self._imputed is None or len(rows) == 0:
+            return np.zeros(len(rows), dtype=np.uint8)
+        return self._imputed.vindex[rows, cols].astype(np.uint8)
 
     def close(self) -> None:
         self._variant_axis.close()
@@ -78,7 +89,7 @@ class StoreQuery:
             for row in rows
         }
 
-    def analysis(self, analysis_id: str) -> dict[str, np.ndarray]:
+    def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """Return all finite associations for one analysis."""
         analysis = analysis_by_id(self._connection, analysis_id)
         if analysis is None:
@@ -88,16 +99,24 @@ class StoreQuery:
         se_col = self._root["se"][:, col].astype("float32")
         mask = np.isfinite(z_col) & np.isfinite(se_col)
         rows = np.where(mask)[0].astype("int32")
-        n = len(rows)
+        cols = np.full(len(rows), col, dtype="int32")
+        z_vals = z_col[mask]
+        se_vals = se_col[mask]
+        imp = self._imputed_pairs(rows, cols)
+        if observed_only:
+            keep = imp == 0
+            rows, cols, z_vals, se_vals, imp = (
+                rows[keep], cols[keep], z_vals[keep], se_vals[keep], imp[keep]
+            )
         return {
             "variant_index": rows,
-            "analysis_index": np.full(n, col, dtype="int32"),
-            "z": z_col[mask],
-            "se": se_col[mask],
-            "association_status": np.full(n, "observed", dtype=object),
+            "analysis_index": cols,
+            "z": z_vals,
+            "se": se_vals,
+            "association_status": _status_array(imp, z_vals),
         }
 
-    def phewas(self, identifier: str) -> dict[str, np.ndarray]:
+    def phewas(self, identifier: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """Return one variant across all analyses."""
         variant = self._variant_axis.by_identifier(identifier)
         if variant is None:
@@ -107,16 +126,26 @@ class StoreQuery:
         se_row = self._root["se"][row, :].astype("float32")
         mask = np.isfinite(z_row) & np.isfinite(se_row)
         cols = np.where(mask)[0].astype("int32")
-        n = len(cols)
+        rows = np.full(len(cols), row, dtype="int32")
+        z_vals = z_row[mask]
+        se_vals = se_row[mask]
+        imp = self._imputed_pairs(rows, cols)
+        if observed_only:
+            keep = imp == 0
+            rows, cols, z_vals, se_vals, imp = (
+                rows[keep], cols[keep], z_vals[keep], se_vals[keep], imp[keep]
+            )
         return {
-            "variant_index": np.full(n, row, dtype="int32"),
+            "variant_index": rows,
             "analysis_index": cols,
-            "z": z_row[mask],
-            "se": se_row[mask],
-            "association_status": np.full(n, "observed", dtype=object),
+            "z": z_vals,
+            "se": se_vals,
+            "association_status": _status_array(imp, z_vals),
         }
 
-    def range_phewas(self, chromosome: str, start: int, end: int) -> dict[str, np.ndarray]:
+    def range_phewas(
+        self, chromosome: str, start: int, end: int, *, observed_only: bool = False
+    ) -> dict[str, np.ndarray]:
         """Return finite associations for all variants in a genomic range (regional PheWAS)."""
         row_indices = self._variant_axis.range_indices(chromosome, start, end)
         if len(row_indices) == 0:
@@ -125,19 +154,30 @@ class StoreQuery:
         se_block = self._root["se"].oindex[row_indices, :].astype("float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols = np.where(mask)
-        n = len(rows_rel)
+        rows = row_indices[rows_rel].astype("int32")
+        cols = cols.astype("int32")
+        z_vals = z_block[mask]
+        se_vals = se_block[mask]
+        imp = self._imputed_pairs(rows, cols)
+        if observed_only:
+            keep = imp == 0
+            rows, cols, z_vals, se_vals, imp = (
+                rows[keep], cols[keep], z_vals[keep], se_vals[keep], imp[keep]
+            )
         return {
-            "variant_index": row_indices[rows_rel],
-            "analysis_index": cols.astype("int32"),
-            "z": z_block[mask],
-            "se": se_block[mask],
-            "association_status": np.full(n, "observed", dtype=object),
+            "variant_index": rows,
+            "analysis_index": cols,
+            "z": z_vals,
+            "se": se_vals,
+            "association_status": _status_array(imp, z_vals),
         }
 
     def lookup(
         self,
         identifiers: list[str],
         analysis_ids: list[str],
+        *,
+        observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """Return finite associations for a specific variant × analysis set."""
         variants = [
@@ -158,13 +198,22 @@ class StoreQuery:
         se_block = self._root["se"].oindex[row_indices, :][:, col_indices].astype("float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols_rel = np.where(mask)
-        n = len(rows_rel)
+        rows = np.array([row_indices[r] for r in rows_rel], dtype="int32")
+        cols = np.array([col_indices[c] for c in cols_rel], dtype="int32")
+        z_vals = z_block[mask]
+        se_vals = se_block[mask]
+        imp = self._imputed_pairs(rows, cols)
+        if observed_only:
+            keep = imp == 0
+            rows, cols, z_vals, se_vals, imp = (
+                rows[keep], cols[keep], z_vals[keep], se_vals[keep], imp[keep]
+            )
         return {
-            "variant_index": np.array([row_indices[r] for r in rows_rel], dtype="int32"),
-            "analysis_index": np.array([col_indices[c] for c in cols_rel], dtype="int32"),
-            "z": z_block[mask],
-            "se": se_block[mask],
-            "association_status": np.full(n, "observed", dtype=object),
+            "variant_index": rows,
+            "analysis_index": cols,
+            "z": z_vals,
+            "se": se_vals,
+            "association_status": _status_array(imp, z_vals),
         }
 
     def top_hits(
@@ -172,6 +221,7 @@ class StoreQuery:
         *,
         threshold: float = 5e-8,
         limit: int | None = None,
+        observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """Return ranked top-hit associations using the dense top-hit index."""
         key = threshold_key(threshold)
@@ -195,17 +245,25 @@ class StoreQuery:
                 ],
                 dtype="float32",
             )
+        imp = self._imputed_pairs(variant_indices, analysis_indices)
+        if observed_only:
+            keep = imp == 0
+            variant_indices, analysis_indices, z_values, se_values, imp = (
+                variant_indices[keep], analysis_indices[keep],
+                z_values[keep], se_values[keep], imp[keep],
+            )
         if limit is not None:
             variant_indices = variant_indices[:limit]
             analysis_indices = analysis_indices[:limit]
             z_values = z_values[:limit]
             se_values = se_values[:limit]
+            imp = imp[:limit]
         return {
             "variant_index": variant_indices,
             "analysis_index": analysis_indices,
             "z": z_values,
             "se": se_values,
-            "association_status": np.full(len(variant_indices), "observed", dtype=object),
+            "association_status": _status_array(imp, z_values),
         }
 
 

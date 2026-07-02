@@ -1,6 +1,7 @@
 """OpenGWASDB command line interface."""
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -8,12 +9,22 @@ import typer
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
+from opengwasdb.layouts.dense.complete import (
+    complete_dense_store,
+    resume_dense_completion,
+)
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.query import query_store
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -84,6 +95,7 @@ def build_dense_vcf_command(
     store_id: str = typer.Option(...),
     release_id: str = typer.Option(...),
     overwrite: bool = typer.Option(False),
+    n_workers: int = typer.Option(1, help="Fork-based process pool size for Pass 1 and Pass 2"),
 ) -> None:
     """Build a Dense Observed-Only store from a manifest of GWAS-VCF files.
 
@@ -97,6 +109,7 @@ def build_dense_vcf_command(
         store_id=store_id,
         release_id=release_id,
         overwrite=overwrite,
+        n_workers=n_workers,
     )
     typer.echo(
         json.dumps(
@@ -181,6 +194,79 @@ def complete_ragged_command(
                 "n_associations": result.n_associations,
                 "n_imputed": result.n_imputed,
                 "n_missing": result.n_missing,
+                "elapsed_s": round(elapsed, 1),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("complete-dense")
+def complete_dense_command(
+    source_path: Path,
+    dest_path: Path,
+    ld_panel: Path = typer.Option(..., help="Root of LD panel (ld_dir/{ancestry}/{chr}/...)"),
+    ancestry: str = typer.Option("EUR"),
+    min_cor: float = typer.Option(0.7),
+    thresh: float = typer.Option(0.9),
+    release_id: str = typer.Option(None),
+    n_workers: int = typer.Option(1, help="LD-block process-pool size"),
+    overwrite: bool = typer.Option(False),
+) -> None:
+    """Produce a Reference-Completed Dense store from a Full Coverage observed-only store."""
+    import time
+    t0 = time.time()
+    result = complete_dense_store(
+        source_path,
+        dest_path,
+        ld_panel,
+        ancestry=ancestry,
+        min_cor=min_cor,
+        thresh=thresh,
+        release_id=release_id or None,
+        n_workers=n_workers,
+        overwrite=overwrite,
+    )
+    elapsed = time.time() - t0
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_imputed": result.n_imputed,
+                "n_missing_off_panel": result.n_missing_off_panel,
+                "n_missing_imputation_failed": result.n_missing_imputation_failed,
+                "elapsed_s": round(elapsed, 1),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("complete-dense-resume")
+def complete_dense_resume_command(
+    checkpoint_dir: Path,
+    n_workers: int = typer.Option(1, help="LD-block process-pool size"),
+) -> None:
+    """Resume an interrupted complete-dense run from its checkpoint directory.
+
+    Takes only the checkpoint directory path; all other build parameters are
+    loaded from the build_params.json written by the original run.
+    """
+    import time
+    t0 = time.time()
+    result = resume_dense_completion(checkpoint_dir, n_workers=n_workers)
+    elapsed = time.time() - t0
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_imputed": result.n_imputed,
+                "n_missing_off_panel": result.n_missing_off_panel,
+                "n_missing_imputation_failed": result.n_missing_imputation_failed,
                 "elapsed_s": round(elapsed, 1),
             },
             sort_keys=True,

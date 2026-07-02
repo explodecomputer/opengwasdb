@@ -23,16 +23,13 @@ The version of the OpenGWASDB storage contract required to interpret a Store Rel
 The main physical organisation of associations within a Store. Dense and Ragged are alternative primary layouts behind the same metadata, identity, validation, and query concepts.
 
 **Dense Layout**:
-A Primary Storage Layout in which Analyses share a variant axis and associations occupy cells in a variant-by-Analysis matrix. For Reference-Completed Dense stores, the dense variant axis is the **Reference Variant Set** and observed off-panel variants are retained in **Ragged Overflow**.
+A Primary Storage Layout in which Analyses share a variant axis and associations occupy cells in a variant-by-Analysis matrix. For Reference-Completed Dense stores, the dense variant axis is the union of source-observed variants and **Reference Variant Set** variants; source variants outside the Reference Variant Set remain in the dense matrix as observed or missing, and are never imputed.
 
 **Ragged Layout**:
 A Primary Storage Layout in which each Analysis has its own sequence of retained associations referencing a Store-wide variant table. In Reference-Completed Ragged stores, observed, imputed, and missing reference variants for a completed region belong to the same Analysis association sequence.
 
-**Ragged Overflow**:
-An optional ragged component of a Dense Reference-Completed Store Release that preserves observed associations outside the **Reference Variant Set**. The dense component remains the primary query grid.
-
 **Query Component**:
-The part of a multi-component Store Release from which a returned association was read, such as Dense Grid or Ragged Overflow. Off-panel observed variants inside a Ragged primary layout's completed region are ordinary observed associations, not a separate Query Component.
+The part of a Store Release from which a returned association was read. For Dense stores there is a single query component (the dense matrix). For Ragged stores, observed, imputed, and missing associations for a completed region are ordinary rows in the same Analysis association sequence.
 
 **Association Coverage**:
 The guarantee a Store Release makes about which source associations it retains, independently of Primary Storage Layout. Full Coverage retains every usable source association after normalisation and quality control; Cis-and-Signals Coverage retains complete cis regions plus selected significant and suggestive trans associations.
@@ -56,7 +53,7 @@ A genomic interval within which a Ragged Cis-and-Signals Store attempts referenc
 The release-level algorithm and parameters used to infer imputed Z and SE values from observed associations and the LD Reference Panel. It is recorded as provenance for a Reference-Completed release rather than repeated per association.
 
 **Reference Completion Quality**:
-A quality summary for imputed associations at LD-block-by-Analysis granularity. It describes confidence in a block of imputed values rather than attaching quality metadata to every association.
+A quality summary for imputed associations at LD-block-by-Analysis granularity: Pearson correlation of the imputation fit, number of imputed associations, and n_missing_imputation_failed (reference-panel variants where the quality gate rejected imputation). For Ragged stores this n_missing is the complete missing count, since every variant in a completed region is on the reference panel. For Dense stores, off-panel source variants have no LD structure and so cannot belong to any LD block; their missing count, `n_missing_off_panel`, is instead a per-Analysis figure recorded independently of LD-block granularity.
 
 **Observed Association**:
 An association whose statistics come from the source dataset after OpenGWASDB normalisation. Observed associations are the authoritative basis for a Store Release.
@@ -71,7 +68,7 @@ The origin state of an association in a Reference-Completed Store Release: Missi
 A query mode that excludes Imputed Associations and returns only source-observed results. Reference-Completed releases include imputed associations by default, but callers may request observed-only results.
 
 **Top-Hit Query**:
-A query that returns associations ranked by statistical significance. Dense, Ragged, Ragged Overflow, observed, and imputed results have equal priority; ranking is determined by significance, not by storage component or association status.
+A query that returns associations ranked by statistical significance. Dense and Ragged, observed and imputed results have equal priority; ranking is determined by significance, not by storage component or association status.
 
 **Top-Hit Index**:
 A layout-specific acceleration structure that supports Top-Hit Queries using the Store's shared significance thresholds and result contract. Dense and Ragged components may encode the index differently but expose the same query semantics.

@@ -13,11 +13,11 @@ import zarr
 
 from opengwasdb.index import connect, count_rows
 from opengwasdb.layouts.dense.top_hits import threshold_key
+from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout, StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
-from opengwasdb.traits.axis import traits_table_path, traits_tabix_path
-from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+from opengwasdb.traits.axis import traits_table_path
 from opengwasdb.variants import (
     VariantAxis,
     variant_alid_bytes_path,
@@ -51,10 +51,12 @@ def validate_store(path: str | Path) -> ValidationResult:
 
     if manifest.primary_layout is PrimaryStorageLayout.RAGGED:
         return _validate_ragged_store(store_path, manifest, errors)
-    return _validate_dense_store(store_path, errors)
+    return _validate_dense_store(store_path, manifest, errors)
 
 
-def _validate_dense_store(store_path: Path, errors: list[str]) -> ValidationResult:
+def _validate_dense_store(
+    store_path: Path, manifest: StoreManifest, errors: list[str]
+) -> ValidationResult:
     index_path = store_path / "index.sqlite"
     data_path = store_path / "data.zarr"
     variants_path = variant_table_path(store_path)
@@ -94,11 +96,82 @@ def _validate_dense_store(store_path: Path, errors: list[str]) -> ValidationResu
             n_analyses = count_rows(connection, "analyses")
             root = zarr.open_group(str(data_path), mode="r")
             _validate_dense_arrays(root, n_variants, n_analyses, errors)
+            if not errors and manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
+                _validate_dense_completion(root, connection, n_variants, n_analyses, errors)
             if not errors:
                 _validate_top_hits(root, errors)
     except Exception as exc:  # noqa: BLE001 - validators should report actionable failures
         errors.append(f"validation failed: {exc}")
     return ValidationResult(errors=errors)
+
+
+def _validate_dense_completion(
+    root: Any,
+    connection: sqlite3.Connection,
+    n_variants: int,
+    n_analyses: int,
+    errors: list[str],
+) -> None:
+    """Validate the imputed/on_panel arrays and completion metadata for a
+    Reference-Completed Dense store."""
+    for name in ("imputed", "on_panel"):
+        if name not in root:
+            errors.append(f"reference-completed store is missing data.zarr/{name}")
+    if errors:
+        return
+
+    imp = root["imputed"][:]
+    expected_shape = (n_variants, n_analyses)
+    if tuple(imp.shape) != expected_shape:
+        errors.append(f"data.zarr/imputed shape {tuple(imp.shape)} does not match {expected_shape}")
+    if not np.all((imp == 0) | (imp == 1)):
+        errors.append("data.zarr/imputed contains values other than 0 and 1")
+
+    on_panel = root["on_panel"][:]
+    if len(on_panel) != n_variants:
+        errors.append(f"data.zarr/on_panel has {len(on_panel)} entries but expected {n_variants}")
+    if not np.all((on_panel == 0) | (on_panel == 1)):
+        errors.append("data.zarr/on_panel contains values other than 0 and 1")
+
+    z_vals = root["z"][:].astype("float32")
+    se_vals = root["se"][:].astype("float32")
+    imp_mask = imp == 1
+    if imp_mask.any():
+        if not np.all(np.isfinite(z_vals[imp_mask])):
+            errors.append("imputed=1 cells have NaN z-scores")
+        if not np.all(np.isfinite(se_vals[imp_mask])):
+            errors.append("imputed=1 cells have NaN se values")
+
+    # Off-panel rows can never be imputed (no LD structure).
+    off_panel_mask = on_panel == 0
+    if off_panel_mask.any() and np.any(imp[off_panel_mask] == 1):
+        errors.append(
+            "off-panel (on_panel=0) rows have imputed=1 cells — off-panel is never imputable"
+        )
+
+    tables = {r[0] for r in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "completion_quality" not in tables:
+        errors.append(
+            "index.sqlite is missing the completion_quality table for a reference-completed store"
+        )
+    else:
+        cols = {
+            r[1] for r in connection.execute("PRAGMA table_info(completion_quality)").fetchall()
+        }
+        required = {"analysis_index", "block_id", "pearson_r", "n_imputed", "n_missing"}
+        missing_cols = required - cols
+        if missing_cols:
+            errors.append(
+                f"completion_quality table is missing columns: {', '.join(sorted(missing_cols))}"
+            )
+
+    analyses_cols = {r[1] for r in connection.execute("PRAGMA table_info(analyses)").fetchall()}
+    if "n_missing_off_panel" not in analyses_cols:
+        errors.append(
+            "analyses table is missing n_missing_off_panel for a reference-completed store"
+        )
 
 
 def _validate_ragged_store(

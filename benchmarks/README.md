@@ -24,14 +24,15 @@ besdq repo at `/home/gh13047/repo/besdq/`.
 | `besdq_ukb_chr1_benchmark.json` | besdq baseline (copied from besdq repo) |
 | `opengwasdb_vcf_ukb_chr1_benchmark.qmd` | Per-run standalone QMD |
 
-**Usage:**
+**Usage** (run from the repo root — uses this repo's own `uv`-managed environment,
+no separate conda env required):
 
 ```bash
 # First run — build the store and benchmark (takes ~10 min)
-conda run -n snakemake python benchmarks/benchmark_vcf_ukb_chr1_dense.py --rebuild --reps 10
+uv run python benchmarks/benchmark_vcf_ukb_chr1_dense.py --rebuild --reps 10
 
 # Subsequent runs — reuse existing store, re-benchmark only
-conda run -n snakemake python benchmarks/benchmark_vcf_ukb_chr1_dense.py --reps 10
+uv run python benchmarks/benchmark_vcf_ukb_chr1_dense.py --reps 10
 ```
 
 The `--row-baseline` flag accepts a path to an earlier JSON to show speedup ratios:
@@ -57,17 +58,17 @@ Defaults to the pre-built eqtlgen-cis store.
 | `opengwasdb_eqtlgen_ragged_benchmark.json` | Query timings + storage comparison |
 | `opengwasdb_eqtlgen_ragged_benchmark.qmd` | Self-contained Quarto report (rendered to HTML) |
 
-**Usage:**
+**Usage** (run from the repo root):
 
 ```bash
 # Benchmark existing store (no rebuild)
-conda run -n snakemake python benchmarks/benchmark_ragged_besd.py --reps 5
+uv run python benchmarks/benchmark_ragged_besd.py --reps 5
 
 # Force a full rebuild then benchmark
-conda run -n snakemake python benchmarks/benchmark_ragged_besd.py --rebuild --reps 5
+uv run python benchmarks/benchmark_ragged_besd.py --rebuild --reps 5
 
 # Use a different BESD source (e.g. hg19 with liftover)
-conda run -n snakemake python benchmarks/benchmark_ragged_besd.py \
+uv run python benchmarks/benchmark_ragged_besd.py \
     --besd /path/to/prefix \
     --store /path/to/out.opengwasdb \
     --source-build hg19 \
@@ -75,6 +76,13 @@ conda run -n snakemake python benchmarks/benchmark_ragged_besd.py \
 ```
 
 **Render the QMD:**
+
+> **Broken as of 2026-07** — neither the `quarto` CLI nor a Jupyter kernel
+> (`jupyter`/`ipykernel`) exist anywhere on this machine anymore (checked: not
+> on `PATH`, not in the `base` conda env, not in this repo's `.venv`). The
+> `snakemake` conda env these commands used to point at is gone entirely, and
+> it's not just a path fix this time — quarto itself needs reinstalling. Ask
+> for that to be set up if you need to render these reports again.
 
 ```bash
 cd docs/benchmark-output
@@ -98,6 +106,9 @@ QUARTO_PYTHON=/home/gh13047/miniforge3/envs/snakemake/bin/python \
 ## Comparison document
 
 After all JSONs are present in `docs/benchmark-output/`, render the comparison report:
+
+> **Broken as of 2026-07** — same gap as above: `quarto` and a Jupyter kernel
+> aren't installed anywhere on this machine right now.
 
 ```bash
 QUARTO_PYTHON=/home/gh13047/miniforge3/envs/snakemake/bin/python \

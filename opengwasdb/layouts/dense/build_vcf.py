@@ -5,7 +5,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import multiprocessing
 import shutil
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +49,69 @@ class _ManifestRow:
     n: int
 
 
+# Pass 2 read-only lookups, set in the parent process immediately before the
+# process pool is created. Forked workers (fork start method — see
+# _fork_pool()) inherit these via copy-on-write, so the ~n_variants-entry
+# dicts are never pickled or sent over IPC to any of the n_workers processes.
+_pass2_hg19_lookup: dict[tuple[str, int, str, str], str] | None = None
+_pass2_variant_index: dict[str, int] | None = None
+
+
+def _fork_pool(n_workers: int) -> ProcessPoolExecutor:
+    """A ProcessPoolExecutor pinned to fork start — required for _pass2_worker
+    to see _pass2_hg19_lookup/_pass2_variant_index without re-pickling them
+    per task. Only correct on platforms with fork (Linux); would silently
+    hand workers empty lookups under spawn/forkserver."""
+    fork_ctx = multiprocessing.get_context("fork")
+    return ProcessPoolExecutor(max_workers=n_workers, mp_context=fork_ctx)
+
+
+def _pass1_worker(file_path: str) -> set[tuple[str, int, str, str]]:
+    return set(stream_vcf_variants(file_path))
+
+
+def _pass2_worker(file_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stream one VCF's associations and resolve them against the (forked,
+    read-only) hg19->hg38 lookup and variant index. Returns
+    (row_indices, z_values, se_values) for this file only — the caller
+    assigns them into its own column of the shared z/se matrices.
+
+    Deduplicates by row_idx, keeping the last occurrence — matches the
+    overwrite semantics of the sequential loop this replaces, and keeps the
+    caller's z_mat[row_indices, col_idx] = ... assignment free of duplicate
+    indices (numpy doesn't guarantee a winner order for those).
+    """
+    assert _pass2_hg19_lookup is not None and _pass2_variant_index is not None
+    last_by_row: dict[int, tuple[float, float]] = {}
+    for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(file_path):
+        hg38_alid = _pass2_hg19_lookup.get((chrom, pos, ref, alt))
+        if hg38_alid is None:
+            continue
+        row_idx = _pass2_variant_index.get(hg38_alid)
+        if row_idx is None:
+            continue
+        last_by_row[row_idx] = (z, se)
+
+    n = len(last_by_row)
+    row_indices = np.fromiter(last_by_row.keys(), dtype=np.int64, count=n)
+    zs = np.fromiter((v[0] for v in last_by_row.values()), dtype=np.float32, count=n)
+    ses = np.fromiter((v[1] for v in last_by_row.values()), dtype=np.float32, count=n)
+    return row_indices, zs, ses
+
+
+def _log_progress(
+    label: str, completed: int, total: int, start_time: float, extra: str, every: int
+) -> None:
+    if completed % every != 0 and completed != total:
+        return
+    elapsed = time.monotonic() - start_time
+    eta = (elapsed / completed) * (total - completed) if completed else 0.0
+    log.info(
+        "%s: %d/%d done (%s) — elapsed %s, ETA %s",
+        label, completed, total, extra, _fmt_duration(elapsed), _fmt_duration(eta),
+    )
+
+
 def build_dense_from_vcf_manifest(
     manifest_path: str | Path,
     output_path: str | Path,
@@ -57,6 +123,7 @@ def build_dense_from_vcf_manifest(
     chunk_shape: tuple[int, int] = DEFAULT_CHUNK_SHAPE,
     dtype: str = DEFAULT_DTYPE,
     overwrite: bool = False,
+    n_workers: int = 1,
 ) -> DenseBuildResult:
     """Build a Dense Observed-Only Store from a manifest of GWAS-VCF files.
 
@@ -67,6 +134,11 @@ def build_dense_from_vcf_manifest(
     Two-pass streaming: Pass 1 collects the union variant set and runs liftover
     once.  Pass 2 fills zarr columns one analysis at a time.  The full
     association list is never materialised in memory.
+
+    Both passes process one file per analysis and are independent across
+    files, so n_workers > 1 parallelises with a fork-based process pool —
+    each analysis column is disjoint, so results merge back with no
+    coordination beyond the final array assignment.
 
     Parameters
     ----------
@@ -82,6 +154,9 @@ def build_dense_from_vcf_manifest(
     liftover_failure_threshold:
         Maximum fraction of variants allowed to fail liftover (default 0.01).
         Raises ``LiftoverFailureError`` if exceeded.
+    n_workers:
+        Process pool size for Pass 1 and Pass 2. 1 (default) runs both passes
+        as a plain sequential loop. Requires the fork start method (Linux).
     """
     manifest_rows = _read_manifest(manifest_path)
     if not manifest_rows:
@@ -97,11 +172,29 @@ def build_dense_from_vcf_manifest(
     # ------------------------------------------------------------------
     # Pass 1: collect union variant set across all VCFs
     # ------------------------------------------------------------------
-    log.info("Pass 1: collecting union variant set from %d VCFs", len(manifest_rows))
+    log.info(
+        "Pass 1: collecting union variant set from %d VCFs (n_workers=%d)",
+        len(manifest_rows), n_workers,
+    )
     hg19_tuples: set[tuple[str, int, str, str]] = set()
-    for row in manifest_rows:
-        for variant in stream_vcf_variants(row.file_path):
-            hg19_tuples.add(variant)
+    pass1_start = time.monotonic()
+    n_rows = len(manifest_rows)
+    if n_workers <= 1:
+        for i, row in enumerate(manifest_rows):
+            hg19_tuples.update(stream_vcf_variants(row.file_path))
+            _log_progress(
+                "Pass 1", i + 1, n_rows, pass1_start,
+                f"{len(hg19_tuples)} unique variants so far", every=250,
+            )
+    else:
+        with _fork_pool(n_workers) as pool:
+            futures = [pool.submit(_pass1_worker, row.file_path) for row in manifest_rows]
+            for i, fut in enumerate(as_completed(futures)):
+                hg19_tuples |= fut.result()
+                _log_progress(
+                    "Pass 1", i + 1, n_rows, pass1_start,
+                    f"{len(hg19_tuples)} unique variants so far", every=250,
+                )
     log.info("Pass 1 complete: %d unique hg19 variants", len(hg19_tuples))
 
     # ------------------------------------------------------------------
@@ -165,19 +258,47 @@ def build_dense_from_vcf_manifest(
     # ------------------------------------------------------------------
     # Pass 2: fill zarr columns one analysis at a time
     # ------------------------------------------------------------------
-    log.info("Pass 2: filling %d × %d association matrix", n_variants, n_analyses)
-    for row in manifest_rows:
-        col_idx = analysis_index[row.trait_id]
-        for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(row.file_path):
-            hg38_alid = hg19_lookup.get((chrom, pos, ref, alt))
-            if hg38_alid is None:
-                continue
-            row_idx = variant_index.get(hg38_alid)
-            if row_idx is None:
-                continue
-            z_mat[row_idx, col_idx] = z
-            se_mat[row_idx, col_idx] = se
-        log.debug("Pass 2: filled column %d (%s)", col_idx, row.trait_id)
+    log.info(
+        "Pass 2: filling %d × %d association matrix (n_workers=%d)",
+        n_variants, n_analyses, n_workers,
+    )
+    pass2_start = time.monotonic()
+    if n_workers <= 1:
+        for i, row in enumerate(manifest_rows):
+            col_idx = analysis_index[row.trait_id]
+            for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(row.file_path):
+                hg38_alid = hg19_lookup.get((chrom, pos, ref, alt))
+                if hg38_alid is None:
+                    continue
+                row_idx = variant_index.get(hg38_alid)
+                if row_idx is None:
+                    continue
+                z_mat[row_idx, col_idx] = z
+                se_mat[row_idx, col_idx] = se
+            _log_progress(
+                "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
+            )
+    else:
+        global _pass2_hg19_lookup, _pass2_variant_index
+        _pass2_hg19_lookup = hg19_lookup
+        _pass2_variant_index = variant_index
+        try:
+            with _fork_pool(n_workers) as pool:
+                futures = {
+                    pool.submit(_pass2_worker, row.file_path): row for row in manifest_rows
+                }
+                for i, fut in enumerate(as_completed(futures)):
+                    row = futures[fut]
+                    col_idx = analysis_index[row.trait_id]
+                    row_indices, zs, ses = fut.result()
+                    z_mat[row_indices, col_idx] = zs
+                    se_mat[row_indices, col_idx] = ses
+                    _log_progress(
+                        "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
+                    )
+        finally:
+            _pass2_hg19_lookup = None
+            _pass2_variant_index = None
 
     # ------------------------------------------------------------------
     # Write zarr + manifest + top-hit indexes
@@ -189,6 +310,17 @@ def build_dense_from_vcf_manifest(
     build_top_hit_indexes(out)
 
     return DenseBuildResult(output_path=out, n_variants=n_variants, n_analyses=n_analyses)
+
+
+def _fmt_duration(seconds: float) -> str:
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
 
 
 def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:

@@ -48,14 +48,29 @@ print(f'Wrote {len(rows)-1} rows')
 EOF
 ```
 
-To run the full build:
+To run the full build, ideally inside a persistent tmux/screen session so a
+dropped connection can't silently kill it:
 
 ```bash
-bash data/ukb-b/build.sh
+tmux new-session -d -s ukb-b-build -c /home/gh13047/repo/opengwasdb "bash data/ukb-b/build.sh"
+tmux attach -t ukb-b-build   # detach with Ctrl-b d
 ```
 
-Expected build time: ~17 hours single-threaded (same two-pass pipeline as the
-100-trait chr1 benchmark, scaled to ~9.8M variants × 2514 analyses).
+Or directly: `bash data/ukb-b/build.sh`. This runs through the repo's own
+`uv`-managed environment (no separate conda env required).
+
+Expected build time: unknown precisely. Pass 1 (union variant set + liftover
+across all 2514 VCFs) took ~4h15m on the first attempt. Pass 2 (filling the
+association matrix) is a pure-Python loop over every association in every
+file; scaling from the chr1×1000 benchmark (80 min for 762K variants × 1000
+analyses) suggests 30–40+ hours for Pass 2 alone — well past the original
+~17h estimate this replaces, which undercounted genome-wide scale. Pass 2
+logs progress every 25 analyses (elapsed + ETA) to `build.log` — tail it to
+see real progress rather than guessing:
+
+```bash
+tail -f data/ukb-b/build.log
+```
 
 Expected store size: ~86 GB. The store has ~1.15 GB of fixed overhead (variant
 axis files, rsid alias index) plus zarr arrays that scale linearly with n_analyses.
@@ -81,6 +96,6 @@ for full-genome; consider whether that pattern is required before optimising.
 After the build completes:
 
 ```bash
-conda run -n snakemake opengwasdb validate \
+uv run --project /home/gh13047/repo/opengwasdb opengwasdb validate \
   /local-scratch/data/opengwas/opengwasdb/ukb-b.opengwasdb
 ```

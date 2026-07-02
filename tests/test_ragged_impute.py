@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from opengwasdb.layouts.ragged.impute import (
+from opengwasdb.completion.impute import (
     elastic_net_impute,
     impute_z_block,
     ld_pca,

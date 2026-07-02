@@ -18,8 +18,8 @@ import numpy as np
 import zarr
 from numcodecs import Blosc
 
-from opengwasdb.layouts.ragged.impute import impute_z_block, scalar_n_se
-from opengwasdb.layouts.ragged.ld_panel import (
+from opengwasdb.completion.impute import impute_z_block, scalar_n_se
+from opengwasdb.completion.ld_panel import (
     LDBlock,
     find_blocks,
     load_ld_eigenvectors,

@@ -1,4 +1,4 @@
-"""Read-only interface for the LD reference panel used in Ragged Reference Completion.
+"""Read-only interface for the LD reference panel used in Reference Completion.
 
 Panel layout (flat/production):
     ld_dir/{ancestry}/{chr}/{block_name}.tsv
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.layouts.ragged.impute import ld_pca
+from opengwasdb.completion.impute import ld_pca
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +63,39 @@ def _read_block_tsv(tsv_path: Path) -> tuple[list[str], np.ndarray, int, int]:
     return snp_ids, eaf_arr, min_bp, max_bp
 
 
+def load_block(tsv_path: Path) -> LDBlock | None:
+    """Load one LD block from its TSV path. Returns None if unreadable/incomplete.
+
+    chrom is taken from the parent directory name, matching the panel's
+    ld_dir/{ancestry}/{chr}/{block_name}.tsv layout.
+    """
+    tsv_path = Path(tsv_path)
+    ld_path = tsv_path.with_suffix(".unphased.vcor1.gz")
+    if not ld_path.exists():
+        return None
+
+    try:
+        snp_ids, eaf, blk_start, blk_end = _read_block_tsv(tsv_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not read %s: %s — skipping", tsv_path, exc)
+        return None
+
+    chrom = tsv_path.parent.name
+    npz_path = tsv_path.with_suffix(".ldeig.npz")
+    return LDBlock(
+        block_id=f"{chrom}/{tsv_path.stem}",
+        chrom=chrom,
+        start_bp=blk_start,
+        end_bp=blk_end,
+        tsv_path=tsv_path,
+        ld_path=ld_path,
+        ldeig_npz_path=npz_path if npz_path.exists() else None,
+        n_ld_snps=len(snp_ids),
+        snp_ids=snp_ids,
+        eaf=eaf,
+    )
+
+
 def find_blocks(
     ld_dir: str | Path,
     ancestry: str,
@@ -71,40 +104,40 @@ def find_blocks(
     end_bp: int,
 ) -> list[LDBlock]:
     """Return all LD blocks whose genomic extent intersects [start_bp, end_bp]."""
+    blocks: list[LDBlock] = []
+    for block in list_all_blocks(ld_dir, ancestry, chrom):
+        if block.end_bp < start_bp or block.start_bp > end_bp:
+            continue
+        blocks.append(block)
+    return blocks
+
+
+def list_chromosomes(ld_dir: str | Path, ancestry: str) -> list[str]:
+    """Return the chromosome names present in the panel for *ancestry*."""
+    ancestry_dir = Path(ld_dir) / ancestry
+    if not ancestry_dir.is_dir():
+        return []
+    return sorted(
+        (p.name for p in ancestry_dir.iterdir() if p.is_dir()),
+        key=lambda c: (len(c), c),
+    )
+
+
+def list_all_blocks(ld_dir: str | Path, ancestry: str, chrom: str) -> list[LDBlock]:
+    """Return every LD block for one chromosome, genome-wide (no region filter).
+
+    Used for Full Coverage Dense completion, where the block set is the
+    reference panel's entire block list rather than a per-analysis cis window.
+    """
     panel_dir = Path(ld_dir) / ancestry / chrom
     if not panel_dir.is_dir():
         return []
 
     blocks: list[LDBlock] = []
     for tsv_path in sorted(panel_dir.glob("*.tsv")):
-        block_name = tsv_path.stem
-        ld_path = tsv_path.with_suffix(".unphased.vcor1.gz")
-        if not ld_path.exists():
-            continue
-
-        try:
-            snp_ids, eaf, blk_start, blk_end = _read_block_tsv(tsv_path)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Could not read %s: %s — skipping", tsv_path, exc)
-            continue
-
-        if blk_end < start_bp or blk_start > end_bp:
-            continue
-
-        npz_path = tsv_path.with_suffix(".ldeig.npz")
-        blocks.append(LDBlock(
-            block_id=f"{chrom}/{block_name}",
-            chrom=chrom,
-            start_bp=blk_start,
-            end_bp=blk_end,
-            tsv_path=tsv_path,
-            ld_path=ld_path,
-            ldeig_npz_path=npz_path if npz_path.exists() else None,
-            n_ld_snps=len(snp_ids),
-            snp_ids=snp_ids,
-            eaf=eaf,
-        ))
-
+        block = load_block(tsv_path)
+        if block is not None:
+            blocks.append(block)
     return blocks
 
 
