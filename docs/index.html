@@ -49,30 +49,84 @@
       <h2>Rendered reports</h2>
       <ul>
         <li>
+          <a href="benchmark-output/opengwasdb_vs_besdq_comparison.html">
+            OpenGWASDB vs besdq — Performance Comparison
+          </a>
+          <br>
+          Storage and query performance comparison: chr1 × 100 UKB analyses, Dense observed-only store vs besdq baseline.
+        </li>
+        <li>
+          <a href="benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.html">
+            UKB chr1 Dense Store — Array Query API Benchmark
+          </a>
+          <br>
+          Query latency and storage for sparse array return contract (chr1 × 100 analyses).
+        </li>
+        <li>
+          <a href="benchmark-output/opengwasdb_vcf_ukb_chr1_array_benchmark.html">
+            UKB chr1 Dense Store — Array Query API Benchmark (pre-fix baseline)
+          </a>
+          <br>
+          Baseline timings before query optimization fixes.
+        </li>
+        <li>
+          <a href="benchmark-output/opengwasdb_vcf_ukb_chr1_bcftools_benchmark.html">
+            UKB chr1 Dense Store — bcftools Build Time Benchmark
+          </a>
+          <br>
+          Build time comparison: bcftools (subprocess) vs cyvcf2 VCF reader.
+        </li>
+        <li>
+          <a href="benchmark-output/opengwasdb_eqtlgen_ragged_benchmark.html">
+            eQTLGen Ragged Store — Performance and Storage Benchmark
+          </a>
+          <br>
+          Query latency and compression ratio for Ragged (CSR) layout with eQTLGen cis-eQTL source.
+        </li>
+        <li>
           <a href="opengwasdb-dense-ebi-input-benchmark.html">
             OpenGWASDB Dense Benchmark — EBI Full GWAS-SSF Inputs
           </a>
           <br>
-          Dense benchmark using the three full GWAS-SSF files in <code>besdq/data/ebi_input</code>.
+          Dense benchmark using three full GWAS-SSF files (EBI format).
         </li>
       </ul>
     </section>
 
     <section>
-      <h2>Report sources</h2>
+      <h2>Report sources (Quarto)</h2>
       <ul>
-        <li>
-          <a href="opengwasdb-dense-ebi-input-benchmark.qmd">
-            EBI input benchmark Quarto source
-          </a>
-        </li>
+        <li><a href="benchmark-output/opengwasdb_vs_besdq_comparison.qmd">opengwasdb_vs_besdq_comparison.qmd</a></li>
+        <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.qmd">opengwasdb_vcf_ukb_chr1_benchmark.qmd</a></li>
+        <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_array_benchmark.qmd">opengwasdb_vcf_ukb_chr1_array_benchmark.qmd</a></li>
+        <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_bcftools_benchmark.qmd">opengwasdb_vcf_ukb_chr1_bcftools_benchmark.qmd</a></li>
+        <li><a href="benchmark-output/opengwasdb_eqtlgen_ragged_benchmark.qmd">opengwasdb_eqtlgen_ragged_benchmark.qmd</a></li>
+        <li><a href="opengwasdb-dense-ebi-input-benchmark.qmd">opengwasdb-dense-ebi-input-benchmark.qmd</a></li>
+        <li><a href="opengwasdb-dense-38714679-benchmark.qmd">opengwasdb-dense-38714679-benchmark.qmd</a></li>
       </ul>
     </section>
 
     <section>
-      <h2>Specifications and reviews</h2>
+      <h2>Architecture & Design</h2>
       <ul>
-        <li><a href="spec/store-format.md">Store format specification</a></li>
+        <li><a href="adr/0001-store-envelope.md">ADR-0001: Store envelope (manifest, zarr, sqlite)</a></li>
+        <li><a href="adr/0002-canonical-variant-format.md">ADR-0002: Canonical variant ALID format</a></li>
+        <li><a href="adr/0005-store-statistics-z-se.md">ADR-0005: Store z and se, not beta (scale-agnostic)</a></li>
+        <li><a href="adr/0013-top-hit-indexes.md">ADR-0013: Pre-computed top-hit indexes</a></li>
+        <li><a href="adr/0014-ragged-reference-completed-regions.md">ADR-0014: Ragged reference-completed region bounds</a></li>
+        <li><a href="adr/0017-completion-quality-schema.md">ADR-0017: Reference completion quality tracking</a></li>
+        <li><a href="adr/0020-sparse-array-query-contract.md">ADR-0020: Sparse array query return contract</a></li>
+        <li><a href="adr/0021-zarr-chunk-shape-clipping.md">ADR-0021: Zarr chunk shape clipping to array bounds</a></li>
+        <li><a href="adr/0022-dense-completion-elastic-net.md">ADR-0022: Dense completion via elastic-net imputation</a></li>
+        <li><a href="adr/0023-dense-completion-block-parallel-build.md">ADR-0023: Dense completion process-pool parallelization</a></li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Specifications and format documentation</h2>
+      <ul>
+        <li><a href="spec/store-format.md">Store format specification</a> — full schema (manifest, zarr layout, sqlite tables, sidecar files)</li>
+        <li><a href="../CONTEXT.md">CONTEXT.md</a> — domain glossary and key concepts</li>
         <li><a href="reviews/v0.1-compatibility.md">v0.1 compatibility review</a></li>
       </ul>
     </section>
