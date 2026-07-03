@@ -7,6 +7,7 @@ import json
 import logging
 import multiprocessing
 import shutil
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -49,39 +50,45 @@ class _ManifestRow:
     n: int
 
 
-# Pass 2 read-only lookups, set in the parent process immediately before the
-# process pool is created. Forked workers (fork start method — see
-# _fork_pool()) inherit these via copy-on-write, so the ~n_variants-entry
-# dicts are never pickled or sent over IPC to any of the n_workers processes.
+# Pass 2 read-only lookups + spill dir, set in the parent process immediately
+# before the process pool is created. Forked workers (fork start method — see
+# _fork_pool()) inherit these via copy-on-write, so the ~n_variants-entry dicts
+# are never pickled or sent over IPC to any of the n_workers processes.
+#
+# Why disk-spill and not return arrays: an earlier design returned each file's
+# result over IPC. At genome-wide scale (~9.85M rows/file × thousands of files)
+# that pipe traffic deadlocked the pool. Workers now write a compact per-file
+# .npz to _pass2_spill_dir and return only the tiny path string, so no large
+# object ever crosses the process boundary.
 _pass2_hg19_lookup: dict[tuple[str, int, str, str], str] | None = None
 _pass2_variant_index: dict[str, int] | None = None
+_pass2_spill_dir: Path | None = None
 
 
 def _fork_pool(n_workers: int) -> ProcessPoolExecutor:
     """A ProcessPoolExecutor pinned to fork start — required for _pass2_worker
-    to see _pass2_hg19_lookup/_pass2_variant_index without re-pickling them
-    per task. Only correct on platforms with fork (Linux); would silently
-    hand workers empty lookups under spawn/forkserver."""
+    to see the read-only lookups without re-pickling them per task. Only correct
+    on platforms with fork (Linux); would silently hand workers empty lookups
+    under spawn/forkserver."""
     fork_ctx = multiprocessing.get_context("fork")
     return ProcessPoolExecutor(max_workers=n_workers, mp_context=fork_ctx)
 
 
-def _pass1_worker(file_path: str) -> set[tuple[str, int, str, str]]:
-    return set(stream_vcf_variants(file_path))
-
-
-def _pass2_worker(file_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Stream one VCF's associations and resolve them against the (forked,
-    read-only) hg19->hg38 lookup and variant index. Returns
-    (row_indices, z_values, se_values) for this file only — the caller
-    assigns them into its own column of the shared z/se matrices.
+def _pass2_worker(task: tuple[int, str]) -> int:
+    """Stream one VCF's associations, resolve them against the (forked,
+    read-only) hg19->hg38 lookup and variant index, and spill the resolved
+    (row_index, z, se) triples to ``{spill_dir}/{col_idx}.npz``. Returns
+    ``col_idx`` only — the compact result stays on disk, never in a pipe.
 
     Deduplicates by row_idx, keeping the last occurrence — matches the
-    overwrite semantics of the sequential loop this replaces, and keeps the
-    caller's z_mat[row_indices, col_idx] = ... assignment free of duplicate
-    indices (numpy doesn't guarantee a winner order for those).
+    overwrite semantics of the sequential loop, and keeps the caller's
+    ``z_mat[rows, col_idx] = ...`` assignment free of duplicate indices
+    (numpy doesn't guarantee a winner order for those).
     """
-    assert _pass2_hg19_lookup is not None and _pass2_variant_index is not None
+    assert _pass2_hg19_lookup is not None
+    assert _pass2_variant_index is not None
+    assert _pass2_spill_dir is not None
+    col_idx, file_path = task
     last_by_row: dict[int, tuple[float, float]] = {}
     for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(file_path):
         hg38_alid = _pass2_hg19_lookup.get((chrom, pos, ref, alt))
@@ -93,10 +100,19 @@ def _pass2_worker(file_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         last_by_row[row_idx] = (z, se)
 
     n = len(last_by_row)
-    row_indices = np.fromiter(last_by_row.keys(), dtype=np.int64, count=n)
+    rows = np.fromiter(last_by_row.keys(), dtype=np.int64, count=n)
     zs = np.fromiter((v[0] for v in last_by_row.values()), dtype=np.float32, count=n)
     ses = np.fromiter((v[1] for v in last_by_row.values()), dtype=np.float32, count=n)
-    return row_indices, zs, ses
+
+    # Atomic spill: write to a temp path then rename, so a crashed worker never
+    # leaves a half-written .npz that the parent would try to load. Both names
+    # end in .npz because np.savez appends that suffix unless it is already
+    # present — a .tmp suffix would be silently rewritten to .tmp.npz.
+    final = _pass2_spill_dir / f"{col_idx}.npz"
+    tmp = _pass2_spill_dir / f"{col_idx}.tmp.npz"
+    np.savez(tmp, rows=rows, z=zs, se=ses)
+    tmp.replace(final)
+    return col_idx
 
 
 def _log_progress(
@@ -172,29 +188,25 @@ def build_dense_from_vcf_manifest(
     # ------------------------------------------------------------------
     # Pass 1: collect union variant set across all VCFs
     # ------------------------------------------------------------------
+    # Pass 1 is intentionally serial. It streams each VCF's variants into one
+    # growing union set; parallelising it would force each worker to ship its
+    # whole variant set back over IPC, and since same-cohort VCFs share nearly
+    # identical variant lists the union converges almost immediately — so the
+    # parallel version pays a large IPC cost for no real speedup (and deadlocked
+    # at genome-wide scale). The expensive, parallelised work is Pass 2.
     log.info(
-        "Pass 1: collecting union variant set from %d VCFs (n_workers=%d)",
-        len(manifest_rows), n_workers,
+        "Pass 1: collecting union variant set from %d VCFs (serial)",
+        len(manifest_rows),
     )
     hg19_tuples: set[tuple[str, int, str, str]] = set()
     pass1_start = time.monotonic()
     n_rows = len(manifest_rows)
-    if n_workers <= 1:
-        for i, row in enumerate(manifest_rows):
-            hg19_tuples.update(stream_vcf_variants(row.file_path))
-            _log_progress(
-                "Pass 1", i + 1, n_rows, pass1_start,
-                f"{len(hg19_tuples)} unique variants so far", every=250,
-            )
-    else:
-        with _fork_pool(n_workers) as pool:
-            futures = [pool.submit(_pass1_worker, row.file_path) for row in manifest_rows]
-            for i, fut in enumerate(as_completed(futures)):
-                hg19_tuples |= fut.result()
-                _log_progress(
-                    "Pass 1", i + 1, n_rows, pass1_start,
-                    f"{len(hg19_tuples)} unique variants so far", every=250,
-                )
+    for i, row in enumerate(manifest_rows):
+        hg19_tuples.update(stream_vcf_variants(row.file_path))
+        _log_progress(
+            "Pass 1", i + 1, n_rows, pass1_start,
+            f"{len(hg19_tuples)} unique variants so far", every=250,
+        )
     log.info("Pass 1 complete: %d unique hg19 variants", len(hg19_tuples))
 
     # ------------------------------------------------------------------
@@ -279,26 +291,34 @@ def build_dense_from_vcf_manifest(
                 "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
             )
     else:
-        global _pass2_hg19_lookup, _pass2_variant_index
+        global _pass2_hg19_lookup, _pass2_variant_index, _pass2_spill_dir
         _pass2_hg19_lookup = hg19_lookup
         _pass2_variant_index = variant_index
+        spill_dir = Path(tempfile.mkdtemp(prefix=f".{out.name}.pass2spill.", dir=out.parent))
+        _pass2_spill_dir = spill_dir
+        id_by_col = {analysis_index[row.trait_id]: row.trait_id for row in manifest_rows}
         try:
             with _fork_pool(n_workers) as pool:
-                futures = {
-                    pool.submit(_pass2_worker, row.file_path): row for row in manifest_rows
-                }
+                tasks = [
+                    (analysis_index[row.trait_id], row.file_path) for row in manifest_rows
+                ]
+                futures = [pool.submit(_pass2_worker, t) for t in tasks]
                 for i, fut in enumerate(as_completed(futures)):
-                    row = futures[fut]
-                    col_idx = analysis_index[row.trait_id]
-                    row_indices, zs, ses = fut.result()
-                    z_mat[row_indices, col_idx] = zs
-                    se_mat[row_indices, col_idx] = ses
+                    col_idx = fut.result()
+                    spill = spill_dir / f"{col_idx}.npz"
+                    with np.load(spill) as data:
+                        z_mat[data["rows"], col_idx] = data["z"]
+                        se_mat[data["rows"], col_idx] = data["se"]
+                    spill.unlink()
                     _log_progress(
-                        "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
+                        "Pass 2", i + 1, n_analyses, pass2_start,
+                        f"last: {id_by_col[col_idx]}", every=25,
                     )
         finally:
             _pass2_hg19_lookup = None
             _pass2_variant_index = None
+            _pass2_spill_dir = None
+            shutil.rmtree(spill_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Write zarr + manifest + top-hit indexes
