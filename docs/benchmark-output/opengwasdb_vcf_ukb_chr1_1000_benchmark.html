@@ -8,7 +8,7 @@
 
 <meta name="dcterms.date" content="2026-07-03">
 
-<title>OpenGWASDB vs besdq — Performance Comparison</title>
+<title>UKB chr1 Dense Store — 1000-Analysis Benchmark</title>
 <style>
 
 code{white-space: pre-wrap;}
@@ -2175,21 +2175,9 @@ vertical-align: -.125em;
   <ul>
   <li><a href="#overview" id="toc-overview" class="nav-link active" data-scroll-target="#overview">Overview</a></li>
   <li><a href="#dataset" id="toc-dataset" class="nav-link" data-scroll-target="#dataset">Dataset</a></li>
-  <li><a href="#build" id="toc-build" class="nav-link" data-scroll-target="#build">Build</a></li>
   <li><a href="#storage" id="toc-storage" class="nav-link" data-scroll-target="#storage">Storage</a></li>
-  <li><a href="#query-timings" id="toc-query-timings" class="nav-link" data-scroll-target="#query-timings">Query timings</a>
-  <ul class="collapse">
-  <li><a href="#current-post-optimisation" id="toc-current-post-optimisation" class="nav-link" data-scroll-target="#current-post-optimisation">Current (post-optimisation)</a></li>
-  <li><a href="#before-optimisations-baseline" id="toc-before-optimisations-baseline" class="nav-link" data-scroll-target="#before-optimisations-baseline">Before optimisations (baseline)</a></li>
-  <li><a href="#improvement-from-optimisations" id="toc-improvement-from-optimisations" class="nav-link" data-scroll-target="#improvement-from-optimisations">Improvement from optimisations</a></li>
-  </ul></li>
-  <li><a href="#query-pattern-definitions" id="toc-query-pattern-definitions" class="nav-link" data-scroll-target="#query-pattern-definitions">Query pattern definitions</a>
-  <ul class="collapse">
-  <li><a href="#comparability-notes" id="toc-comparability-notes" class="nav-link" data-scroll-target="#comparability-notes">Comparability notes</a></li>
-  </ul></li>
-  <li><a href="#root-cause-summary" id="toc-root-cause-summary" class="nav-link" data-scroll-target="#root-cause-summary">Root-cause summary</a></li>
-  <li><a href="#what-opengwasdb-adds-beyond-besdq" id="toc-what-opengwasdb-adds-beyond-besdq" class="nav-link" data-scroll-target="#what-opengwasdb-adds-beyond-besdq">What OpenGWASDB adds beyond besdq</a></li>
-  <li><a href="#scalability-100-1000-analyses" id="toc-scalability-100-1000-analyses" class="nav-link" data-scroll-target="#scalability-100-1000-analyses">Scalability: 100 → 1000 analyses</a></li>
+  <li><a href="#query-timings" id="toc-query-timings" class="nav-link" data-scroll-target="#query-timings">Query timings</a></li>
+  <li><a href="#scaling-100-1000-analyses" id="toc-scaling-100-1000-analyses" class="nav-link" data-scroll-target="#scaling-100-1000-analyses">Scaling: 100 → 1000 analyses</a></li>
   <li><a href="#provenance" id="toc-provenance" class="nav-link" data-scroll-target="#provenance">Provenance</a></li>
   </ul>
 </nav>
@@ -2198,8 +2186,8 @@ vertical-align: -.125em;
 
 <header id="title-block-header" class="quarto-title-block default">
 <div class="quarto-title">
-<h1 class="title">OpenGWASDB vs besdq — Performance Comparison</h1>
-<p class="subtitle lead">chr1 × 100 UKB analyses · dense observed-only store</p>
+<h1 class="title">UKB chr1 Dense Store — 1000-Analysis Benchmark</h1>
+<p class="subtitle lead">chr1 × 1000 UKB analyses · Dense Observed-Only store</p>
 </div>
 
 
@@ -2224,512 +2212,184 @@ vertical-align: -.125em;
 
 <section id="overview" class="level2">
 <h2 class="anchored" data-anchor-id="overview">Overview</h2>
-<p>This document compares query and storage performance between <strong>OpenGWASDB</strong> (this project) and <strong>besdq</strong> (the prototype it is intended to replace) on the same source dataset: 100 UKB GWAS-VCF analyses covering chromosome 1 (~762 K variants, hg38).</p>
-<p>Both systems store float16 z-scores and betas in zarr arrays with zstd+bitshuffle compression. Key architectural differences are noted where they affect comparability.</p>
+<p>This benchmark measures a <strong>Dense Observed-Only Store</strong> built from <strong>1000 UK Biobank GWAS-VCF analyses</strong> covering chromosome 1. It is the large-scale companion to the 100-analysis benchmark (<code>opengwasdb_vcf_ukb_chr1_benchmark.qmd</code>): the same 762,080 variants and the same source VCFs, with 10× the number of analyses. Its purpose is to show how build time, storage, and query latency scale with analysis count.</p>
 <hr>
 </section>
 <section id="dataset" class="level2">
 <h2 class="anchored" data-anchor-id="dataset">Dataset</h2>
 <table class="caption-top table">
+<colgroup>
+<col style="width: 42%">
+<col style="width: 57%">
+</colgroup>
 <thead>
 <tr class="header">
-<th>Property</th>
-<th>OpenGWASDB</th>
-<th>besdq</th>
+<th>Field</th>
+<th style="text-align: right;">Value</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td>Source</td>
-<td>100 × UKB GWAS-VCF (hg19)</td>
-<td>same VCFs</td>
+<td>Variants (hg38)</td>
+<td style="text-align: right;">762,080</td>
 </tr>
 <tr class="even">
-<td>Reference assembly</td>
-<td>GRCh38 (hg38)</td>
-<td>GRCh38 (hg38)</td>
-</tr>
-<tr class="odd">
-<td>Variants retained</td>
-<td>762,080</td>
-<td>762,488</td>
-</tr>
-<tr class="even">
-<td>Variant difference</td>
-<td>−408 (liftover failures, 0.05%)</td>
-<td>—</td>
-</tr>
-<tr class="odd">
 <td>Analyses</td>
-<td>100</td>
-<td>100</td>
+<td style="text-align: right;">1,000</td>
 </tr>
-</tbody>
-</table>
-<hr>
-</section>
-<section id="build" class="level2">
-<h2 class="anchored" data-anchor-id="build">Build</h2>
-<table class="caption-top table">
-<thead>
-<tr class="header">
-<th>Property</th>
-<th>OpenGWASDB</th>
-<th>besdq</th>
-</tr>
-</thead>
-<tbody>
 <tr class="odd">
+<td>Store size</td>
+<td style="text-align: right;">1,773.7 MB</td>
+</tr>
+<tr class="even">
 <td>Build time</td>
-<td>not measured</td>
-<td>not measured</td>
-</tr>
-<tr class="even">
-<td>VCF reader</td>
-<td>bcftools (subprocess)</td>
-<td>cyvcf2</td>
+<td style="text-align: right;">80.3 min (4,821 s)</td>
 </tr>
 <tr class="odd">
-<td>Liftover</td>
-<td>hg19→hg38 inline (pyliftover)</td>
-<td>pre-lifted source</td>
+<td>Source assembly</td>
+<td style="text-align: right;">GRCh37 / hg19 (inline liftover to hg38)</td>
 </tr>
 <tr class="even">
-<td>Build strategy</td>
-<td>two-pass (variant union then fill)</td>
-<td>one-pass</td>
+<td>Layout</td>
+<td style="text-align: right;">Dense Observed-Only (<code>z</code>, <code>se</code> float16 zarr)</td>
+</tr>
+<tr class="odd">
+<td>Store path</td>
+<td style="text-align: right;"><code>/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_1000_dense.opengwasdb</code></td>
 </tr>
 </tbody>
 </table>
-<p>OpenGWASDB’s build time includes the hg19→hg38 liftover pass on all 100 VCFs and writes a tabix-indexed variant axis alongside the zarr arrays. besdq assumes pre-lifted input and does not write a tabix index.</p>
 <hr>
 </section>
 <section id="storage" class="level2">
 <h2 class="anchored" data-anchor-id="storage">Storage</h2>
 <table class="caption-top table">
-<colgroup>
-<col style="width: 20%">
-<col style="width: 20%">
-<col style="width: 20%">
-<col style="width: 20%">
-<col style="width: 20%">
-</colgroup>
 <thead>
 <tr class="header">
-<th>Store</th>
-<th>Size</th>
-<th>Arrays stored</th>
-<th>Chunk shape</th>
-<th>dtype</th>
+<th>Form</th>
+<th style="text-align: right;">Size</th>
+<th style="text-align: right;">vs raw</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td>OpenGWASDB</td>
-<td><strong>309 MB</strong></td>
-<td><code>z</code>, <code>se</code>, top-hit index, ALID index</td>
-<td>(n_analyses, 1000)</td>
-<td>float16</td>
+<td>Raw source VCF (.vcf.gz)</td>
+<td style="text-align: right;">12,632.9 MB</td>
+<td style="text-align: right;">1.00×</td>
 </tr>
 <tr class="even">
-<td>besdq zstd+bitshuffle</td>
-<td>233 MB</td>
-<td><code>beta</code>, <code>zscore</code>, sig indices</td>
-<td>(1000, n_analyses)</td>
-<td>float16</td>
-</tr>
-<tr class="odd">
-<td>besdq raw float16</td>
-<td>310 MB</td>
-<td>same</td>
-<td>(1000, n_analyses)</td>
-<td>float16</td>
+<td>OpenGWASDB Dense store</td>
+<td style="text-align: right;"><strong>1,773.7 MB</strong></td>
+<td style="text-align: right;"><strong>7.12× smaller</strong></td>
 </tr>
 </tbody>
 </table>
-<p>OpenGWASDB stores two effect arrays (<code>z</code> and <code>se</code>) plus a pre-computed top-hit sparse index and an mmap’d ALID search index. besdq stores <code>beta</code> and <code>zscore</code> plus pre-computed significance offset arrays. Chunk shape is clipped to actual array dimensions at build time (ADR-0021), so both stores have effective chunks of (1000, 100) for this dataset.</p>
+<p>The Dense store is <strong>7.1× smaller</strong> than the raw bgzipped source VCFs it was built from. The store holds two float16 statistic arrays (<code>z</code>, <code>se</code>) plus a tabix variant axis, an mmap’d ALID search index, and a pre-computed top-hit index.</p>
 <hr>
 </section>
 <section id="query-timings" class="level2">
 <h2 class="anchored" data-anchor-id="query-timings">Query timings</h2>
-<p>All OpenGWASDB timings are median over 10 repetitions after one warm-up call. besdq timings are from <code>ukb-chr1_zarr_benchmark.json</code> (same methodology). Times in milliseconds.</p>
-<section id="current-post-optimisation" class="level3">
-<h3 class="anchored" data-anchor-id="current-post-optimisation">Current (post-optimisation)</h3>
-<p>Fixes applied: zarr chunk shape clipping (ADR-0021), <code>range_indices()</code> (issue 028), mmap’d ALID sidecar (issues 029–030).</p>
+<p>All timings are the median over 10 repetitions after one warm-up call. <code>bulk</code> and <code>random_lookup</code> deliberately stress the two worst-case access patterns (a full single-analysis scan and scattered random cell reads).</p>
 <table class="caption-top table">
 <colgroup>
-<col style="width: 20%">
-<col style="width: 20%">
-<col style="width: 20%">
-<col style="width: 20%">
-<col style="width: 20%">
+<col style="width: 15%">
+<col style="width: 21%">
+<col style="width: 21%">
+<col style="width: 21%">
+<col style="width: 21%">
 </colgroup>
 <thead>
 <tr class="header">
 <th>Pattern</th>
-<th>OpenGWASDB</th>
-<th>besdq zstd</th>
-<th>besdq raw</th>
-<th>ODB / besdq</th>
+<th style="text-align: right;">Median ms</th>
+<th style="text-align: right;">p95 ms</th>
+<th style="text-align: right;">Result cells</th>
+<th style="text-align: right;">What it reads</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
 <td>regional</td>
-<td>16.01 ms</td>
-<td>4.99 ms</td>
-<td>2.72 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">3.21×</span></td>
+<td style="text-align: right;">129.8</td>
+<td style="text-align: right;">163.1</td>
+<td style="text-align: right;">1,488,379</td>
+<td style="text-align: right;">All finite associations in a 1 Mb genomic window, all analyses</td>
 </tr>
 <tr class="even">
 <td>phewas</td>
-<td>1.82 ms</td>
-<td>0.91 ms</td>
-<td>0.33 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.01×</span></td>
+<td style="text-align: right;">7.8</td>
+<td style="text-align: right;">11.0</td>
+<td style="text-align: right;">1,000</td>
+<td style="text-align: right;">One variant × all 1000 analyses</td>
 </tr>
 <tr class="odd">
 <td>tophits</td>
-<td>1.44 ms</td>
-<td>0.69 ms</td>
-<td>0.70 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.10×</span></td>
+<td style="text-align: right;">8.9</td>
+<td style="text-align: right;">11.6</td>
+<td style="text-align: right;">182,843</td>
+<td style="text-align: right;">All GW-significant (p &lt; 5×10⁻⁸) associations for one analysis</td>
 </tr>
 <tr class="even">
 <td>bulk</td>
-<td>854.42 ms</td>
-<td>490.52 ms</td>
-<td>251.37 ms</td>
-<td><span style="color:#27ae60">1.74×</span></td>
+<td style="text-align: right;">5,546.6</td>
+<td style="text-align: right;">6,936.7</td>
+<td style="text-align: right;">762,080</td>
+<td style="text-align: right;">All finite associations for one analysis (~762 K variants)</td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
-<td>126.32 ms</td>
-<td>30.42 ms</td>
-<td>7.27 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">4.15×</span></td>
+<td style="text-align: right;">649.6</td>
+<td style="text-align: right;">768.2</td>
+<td style="text-align: right;">587</td>
+<td style="text-align: right;">100 random variants × 10 random analyses</td>
 </tr>
 </tbody>
 </table>
-</section>
-<section id="before-optimisations-baseline" class="level3">
-<h3 class="anchored" data-anchor-id="before-optimisations-baseline">Before optimisations (baseline)</h3>
-<table class="caption-top table">
-<colgroup>
-<col style="width: 25%">
-<col style="width: 25%">
-<col style="width: 25%">
-<col style="width: 25%">
-</colgroup>
-<thead>
-<tr class="header">
-<th>Pattern</th>
-<th>OpenGWASDB (pre-fix)</th>
-<th>besdq zstd</th>
-<th>ODB / besdq</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>regional</td>
-<td>97.61 ms</td>
-<td>4.99 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">19.57×</span></td>
-</tr>
-<tr class="even">
-<td>phewas</td>
-<td>2.65 ms</td>
-<td>0.91 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.92×</span></td>
-</tr>
-<tr class="odd">
-<td>tophits</td>
-<td>1.30 ms</td>
-<td>0.69 ms</td>
-<td><span style="color:#27ae60">1.89×</span></td>
-</tr>
-<tr class="even">
-<td>bulk</td>
-<td>1764.18 ms</td>
-<td>490.52 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">3.60×</span></td>
-</tr>
-<tr class="odd">
-<td>random_lookup</td>
-<td>224.24 ms</td>
-<td>30.42 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">7.37×</span></td>
-</tr>
-</tbody>
-</table>
-</section>
-<section id="improvement-from-optimisations" class="level3">
-<h3 class="anchored" data-anchor-id="improvement-from-optimisations">Improvement from optimisations</h3>
-<table class="caption-top table">
-<colgroup>
-<col style="width: 25%">
-<col style="width: 25%">
-<col style="width: 25%">
-<col style="width: 25%">
-</colgroup>
-<thead>
-<tr class="header">
-<th>Pattern</th>
-<th>Before</th>
-<th>After</th>
-<th>Speedup</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>regional</td>
-<td>97.61 ms</td>
-<td>16.01 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">6.1×</span></td>
-</tr>
-<tr class="even">
-<td>phewas</td>
-<td>2.65 ms</td>
-<td>1.82 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">1.5×</span></td>
-</tr>
-<tr class="odd">
-<td>tophits</td>
-<td>1.30 ms</td>
-<td>1.44 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">0.9×</span></td>
-</tr>
-<tr class="even">
-<td>bulk</td>
-<td>1764.18 ms</td>
-<td>854.42 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">2.1×</span></td>
-</tr>
-<tr class="odd">
-<td>random_lookup</td>
-<td>224.24 ms</td>
-<td>126.32 ms</td>
-<td><span style="color:#2980b9;font-weight:bold">1.8×</span></td>
-</tr>
-</tbody>
-</table>
+<p>Latency-sensitive point queries (<code>phewas</code>, <code>tophits</code>) stay in single-digit milliseconds even at 1000 analyses, because the zarr read per row is amortised across more columns per chunk. The <code>bulk</code> pattern is <code>O(n_variants)</code> and reads all 762 K rows for one analysis, so it dominates at several seconds; it is the pattern to design around rather than optimise blindly.</p>
 <hr>
 </section>
-</section>
-<section id="query-pattern-definitions" class="level2">
-<h2 class="anchored" data-anchor-id="query-pattern-definitions">Query pattern definitions</h2>
-<table class="caption-top table">
-<colgroup>
-<col style="width: 33%">
-<col style="width: 33%">
-<col style="width: 33%">
-</colgroup>
-<thead>
-<tr class="header">
-<th>Pattern</th>
-<th>What it reads</th>
-<th>Result contract</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td><strong>regional</strong></td>
-<td>All finite associations in a 1 Mb genomic window, all analyses</td>
-<td>sparse dict</td>
-</tr>
-<tr class="even">
-<td><strong>phewas</strong></td>
-<td>One variant × all 100 analyses</td>
-<td>sparse dict</td>
-</tr>
-<tr class="odd">
-<td><strong>tophits</strong></td>
-<td>All GW-significant (p &lt; 5×10⁻⁸) associations for one analysis</td>
-<td>sparse dict</td>
-</tr>
-<tr class="even">
-<td><strong>bulk</strong></td>
-<td>All finite associations for one analysis (~762 K variants)</td>
-<td>sparse dict</td>
-</tr>
-<tr class="odd">
-<td><strong>random_lookup</strong></td>
-<td>100 random variants × 10 random analyses</td>
-<td>sparse dict</td>
-</tr>
-</tbody>
-</table>
-<section id="comparability-notes" class="level3">
-<h3 class="anchored" data-anchor-id="comparability-notes">Comparability notes</h3>
-<p><strong>(a) Regional — same window, different variant counts.</strong> Both benchmarks use chr1:100–101 Mb. OpenGWASDB’s store has fewer variants in this window due to hg19→hg38 liftover losses (0.05% of variants fail liftover). besdq’s store was built from pre-lifted hg38 input so retains more variants.</p>
-<p>OpenGWASDB window: ~1,546 variants (~154,615 finite cells); besdq window: ~2,751 variants. The remaining gap reflects the sparse result construction (isfinite mask + dict allocation) vs besdq’s dense summary return.</p>
-<p><strong>(b) Bulk — both systems read two arrays.</strong> besdq’s <code>query_bulk</code> reads <code>beta</code> + <code>zscore</code> (2 zarr columns); OpenGWASDB reads <code>z</code> + <code>se</code> (2 zarr columns) and applies an <code>np.isfinite</code> mask. The gap is not explained by array count; it likely reflects I/O timing variance between benchmark runs.</p>
-<p><strong>(c) Random lookup — inherent two-array cost.</strong> besdq’s <code>query_random_lookup</code> reads one array (<code>beta</code>); OpenGWASDB reads two (<code>z</code> and <code>se</code>) per the sparse array contract (ADR-0020). A ~2× gap is therefore expected. The mmap’d ALID index eliminates sequential tabix fetch overhead (~15 ms previously).</p>
-<hr>
-</section>
-</section>
-<section id="root-cause-summary" class="level2">
-<h2 class="anchored" data-anchor-id="root-cause-summary">Root-cause summary</h2>
-<table class="caption-top table">
-<colgroup>
-<col style="width: 16%">
-<col style="width: 16%">
-<col style="width: 16%">
-<col style="width: 16%">
-<col style="width: 16%">
-<col style="width: 16%">
-</colgroup>
-<thead>
-<tr class="header">
-<th>Pattern</th>
-<th>Before</th>
-<th>vs besdq (before)</th>
-<th>After</th>
-<th>vs besdq (after)</th>
-<th>Change</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>regional</td>
-<td>97.61 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">19.57×</span></td>
-<td>16.01 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">3.21×</span></td>
-<td><strong>6.1× faster</strong></td>
-</tr>
-<tr class="even">
-<td>phewas</td>
-<td>2.65 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.92×</span></td>
-<td>1.82 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.01×</span></td>
-<td><strong>1.5× faster</strong></td>
-</tr>
-<tr class="odd">
-<td>tophits</td>
-<td>1.30 ms</td>
-<td><span style="color:#27ae60">1.89×</span></td>
-<td>1.44 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">2.10×</span></td>
-<td>—</td>
-</tr>
-<tr class="even">
-<td>bulk</td>
-<td>1764.18 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">3.60×</span></td>
-<td>854.42 ms</td>
-<td><span style="color:#27ae60">1.74×</span></td>
-<td><strong>2.1× faster</strong></td>
-</tr>
-<tr class="odd">
-<td>random_lookup</td>
-<td>224.24 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">7.37×</span></td>
-<td>126.32 ms</td>
-<td><span style="color:#c0392b;font-weight:bold">4.15×</span></td>
-<td><strong>1.8× faster</strong></td>
-</tr>
-</tbody>
-</table>
-<hr>
-</section>
-<section id="what-opengwasdb-adds-beyond-besdq" class="level2">
-<h2 class="anchored" data-anchor-id="what-opengwasdb-adds-beyond-besdq">What OpenGWASDB adds beyond besdq</h2>
-<table class="caption-top table">
-<colgroup>
-<col style="width: 33%">
-<col style="width: 33%">
-<col style="width: 33%">
-</colgroup>
-<thead>
-<tr class="header">
-<th>Feature</th>
-<th>OpenGWASDB</th>
-<th>besdq</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>Reference assembly liftover</td>
-<td>hg19→hg38 inline at build time</td>
-<td>requires pre-lifted input</td>
-</tr>
-<tr class="even">
-<td>Variant axis</td>
-<td>tabix-indexed TSV (range queries, rsid aliases)</td>
-<td>numpy key array (position lookup only)</td>
-</tr>
-<tr class="odd">
-<td>ALID index</td>
-<td>mmap’d sorted binary search, O(log n), ~0 startup</td>
-<td>in-memory dict, O(1), ~1.5 GB at 12 M variants</td>
-</tr>
-<tr class="even">
-<td>Effect statistics</td>
-<td>z + se (both stored and returned)</td>
-<td>beta + zscore (both stored)</td>
-</tr>
-<tr class="odd">
-<td>Query result contract</td>
-<td>sparse <code>dict[str, np.ndarray]</code> (finite cells only)</td>
-<td>dense numpy arrays (NaN for absent)</td>
-</tr>
-<tr class="even">
-<td>Top-hit index</td>
-<td>pre-computed, threshold-parameterised, includes se</td>
-<td>pre-computed z/beta, no se</td>
-</tr>
-<tr class="odd">
-<td>Store validation</td>
-<td>full format check at open time</td>
-<td>none</td>
-</tr>
-<tr class="even">
-<td>CLI</td>
-<td>yes</td>
-<td>no</td>
-</tr>
-</tbody>
-</table>
-<hr>
-</section>
-<section id="scalability-100-1000-analyses" class="level2">
-<h2 class="anchored" data-anchor-id="scalability-100-1000-analyses">Scalability: 100 → 1000 analyses</h2>
-<p>Same variants (762,080), same chr1 source VCFs, 10× the number of analyses. Measures how build time, storage, and query latency scale with analysis count.</p>
+<section id="scaling-100-1000-analyses" class="level2">
+<h2 class="anchored" data-anchor-id="scaling-100-1000-analyses">Scaling: 100 → 1000 analyses</h2>
+<p>Same 762,080 variants, same chr1 source VCFs, 10× the analyses.</p>
 <table class="caption-top table">
 <thead>
 <tr class="header">
 <th></th>
-<th>100 analyses</th>
-<th>1000 analyses</th>
-<th>Ratio</th>
+<th style="text-align: right;">100 analyses</th>
+<th style="text-align: right;">1000 analyses</th>
+<th style="text-align: right;">Ratio</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
 <td>Analyses</td>
-<td>100</td>
-<td>1000</td>
-<td>10×</td>
+<td style="text-align: right;">100</td>
+<td style="text-align: right;">1,000</td>
+<td style="text-align: right;">10×</td>
 </tr>
 <tr class="even">
-<td>Build time</td>
-<td>n/a</td>
-<td>4821s</td>
-<td>n/a</td>
+<td>Raw source VCF</td>
+<td style="text-align: right;">1,308 MB</td>
+<td style="text-align: right;">12,633 MB</td>
+<td style="text-align: right;">9.7×</td>
 </tr>
 <tr class="odd">
 <td>Store size</td>
-<td>309 MB</td>
-<td>1774 MB</td>
-<td>5.7×</td>
+<td style="text-align: right;">309 MB</td>
+<td style="text-align: right;">1,774 MB</td>
+<td style="text-align: right;">5.7×</td>
+</tr>
+<tr class="even">
+<td>Build time</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">80.3 min</td>
+<td style="text-align: right;">n/a</td>
 </tr>
 </tbody>
 </table>
 <table class="caption-top table">
 <colgroup>
-<col style="width: 14%">
+<col style="width: 11%">
 <col style="width: 14%">
 <col style="width: 14%">
 <col style="width: 14%">
@@ -2740,73 +2400,72 @@ vertical-align: -.125em;
 <thead>
 <tr class="header">
 <th>Pattern</th>
-<th>100 analyses</th>
-<th>1000 analyses</th>
-<th>Time ratio</th>
-<th>Cells (100)</th>
-<th>Cells (1000)</th>
-<th>Cell ratio</th>
+<th style="text-align: right;">100 (ms)</th>
+<th style="text-align: right;">1000 (ms)</th>
+<th style="text-align: right;">Time ratio</th>
+<th style="text-align: right;">Cells (100)</th>
+<th style="text-align: right;">Cells (1000)</th>
+<th style="text-align: right;">Cell ratio</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
 <td>regional</td>
-<td>16.01 ms</td>
-<td>129.84 ms</td>
-<td>8.1×</td>
-<td>154,615</td>
-<td>1,488,379</td>
-<td>9.6×</td>
+<td style="text-align: right;">16.0</td>
+<td style="text-align: right;">129.8</td>
+<td style="text-align: right;">8.1×</td>
+<td style="text-align: right;">154,615</td>
+<td style="text-align: right;">1,488,379</td>
+<td style="text-align: right;">9.6×</td>
 </tr>
 <tr class="even">
 <td>phewas</td>
-<td>1.82 ms</td>
-<td>7.75 ms</td>
-<td>4.2×</td>
-<td>100</td>
-<td>1,000</td>
-<td>10.0×</td>
+<td style="text-align: right;">1.8</td>
+<td style="text-align: right;">7.8</td>
+<td style="text-align: right;">4.2×</td>
+<td style="text-align: right;">100</td>
+<td style="text-align: right;">1,000</td>
+<td style="text-align: right;">10.0×</td>
 </tr>
 <tr class="odd">
 <td>tophits</td>
-<td>1.44 ms</td>
-<td>8.90 ms</td>
-<td>6.2×</td>
-<td>14,557</td>
-<td>182,843</td>
-<td>12.6×</td>
+<td style="text-align: right;">1.4</td>
+<td style="text-align: right;">8.9</td>
+<td style="text-align: right;">6.2×</td>
+<td style="text-align: right;">14,557</td>
+<td style="text-align: right;">182,843</td>
+<td style="text-align: right;">12.6×</td>
 </tr>
 <tr class="even">
 <td>bulk</td>
-<td>854.42 ms</td>
-<td>5546.56 ms</td>
-<td>6.5×</td>
-<td>762,080</td>
-<td>762,080</td>
-<td>1.0×</td>
+<td style="text-align: right;">854.4</td>
+<td style="text-align: right;">5,546.6</td>
+<td style="text-align: right;">6.5×</td>
+<td style="text-align: right;">762,080</td>
+<td style="text-align: right;">762,080</td>
+<td style="text-align: right;">1.0×</td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
-<td>126.32 ms</td>
-<td>649.58 ms</td>
-<td>5.1×</td>
-<td>598</td>
-<td>587</td>
-<td>1.0×</td>
+<td style="text-align: right;">126.3</td>
+<td style="text-align: right;">649.6</td>
+<td style="text-align: right;">5.1×</td>
+<td style="text-align: right;">598</td>
+<td style="text-align: right;">587</td>
+<td style="text-align: right;">1.0×</td>
 </tr>
 </tbody>
 </table>
-<p>Build time and store size scale sub-linearly (8.8× and 5.7× respectively for 10× analyses). Query time generally scales with result set size: regional and bulk read more cells so scale closer to linearly; phewas and tophits scale better because the zarr read per row is amortised across more columns per chunk.</p>
+<p>Storage and build time both scale <strong>sub-linearly</strong> with analysis count — the variant axis, tabix index, and ALID index are fixed overhead paid once and amortised across every additional analysis column. Query latency scales with the result-set size: <code>regional</code> and <code>bulk</code> read more cells so grow closer to linearly, while <code>phewas</code> and <code>tophits</code> scale better because each per-row zarr read serves more columns per chunk.</p>
 <hr>
 </section>
 <section id="provenance" class="level2">
 <h2 class="anchored" data-anchor-id="provenance">Provenance</h2>
 <ul>
-<li>OpenGWASDB post-fix timings: <code>opengwasdb_vcf_ukb_chr1_benchmark.json</code> (built existing store, 762,080 variants × 100 analyses)</li>
-<li>OpenGWASDB 1000-analysis timings: <code>opengwasdb_vcf_ukb_chr1_1000_benchmark.json</code> (built 4821s, 762,080 variants × 1000 analyses)</li>
-<li>OpenGWASDB pre-fix timings: <code>opengwasdb_vcf_ukb_chr1_array_benchmark.json</code></li>
-<li>besdq timings: <code>besdq_ukb_chr1_benchmark.json</code> (copied from besdq repo by <code>benchmarks/README.md</code> step)</li>
-<li>besdq store: <code>ukb-chr1-zstd.besdz</code> (zstd+bitshuffle), <code>ukb-chr1.besdz</code> (raw float16)</li>
+<li>1000-analysis timings: <code>opengwasdb_vcf_ukb_chr1_1000_benchmark.json</code> (built in 4,821s, 762,080 variants × 1,000 analyses)</li>
+<li>100-analysis timings (scaling comparison): <code>opengwasdb_vcf_ukb_chr1_benchmark.json</code></li>
+<li>Raw VCF sizes: <code>du -sb</code> on source manifests <code>besdq/data/vcf-ukb{,-1000}/*.vcf.gz</code> (see <code>benchmarks/README.md</code>)</li>
+<li>Benchmark script: <code>benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py</code></li>
 </ul>
 </section>
 

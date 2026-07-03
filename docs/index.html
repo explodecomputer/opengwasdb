@@ -46,6 +46,21 @@
     <p class="lede">Rendered reports and key design documents for this repo.</p>
 
     <section>
+      <h2>Format explainer</h2>
+      <ul>
+        <li>
+          <a href="opengwasdb-storage-format.html">
+            OpenGWASDB Storage Format — Internals
+          </a>
+          <br>
+          Visual walkthrough of the storage format end to end: source fields → canonical
+          <code>z</code>/<code>se</code> condensation → Dense vs Ragged layout → Observed vs
+          Reference-Completed → acceleration indexes → real storage and query benchmarks.
+        </li>
+      </ul>
+    </section>
+
+    <section>
       <h2>Rendered reports</h2>
       <ul>
         <li>
@@ -61,6 +76,14 @@
           </a>
           <br>
           Query latency and storage for sparse array return contract (chr1 × 100 analyses).
+        </li>
+        <li>
+          <a href="benchmark-output/opengwasdb_vcf_ukb_chr1_1000_benchmark.html">
+            UKB chr1 Dense Store — 1000-Analysis Benchmark
+          </a>
+          <br>
+          Large-scale companion to the 100-analysis run: same 762,080 variants, 10× the analyses.
+          Storage, build time, and query-latency scaling (chr1 × 1000 analyses).
         </li>
         <li>
           <a href="benchmark-output/opengwasdb_vcf_ukb_chr1_array_benchmark.html">
@@ -98,6 +121,7 @@
       <ul>
         <li><a href="benchmark-output/opengwasdb_vs_besdq_comparison.qmd">opengwasdb_vs_besdq_comparison.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.qmd">opengwasdb_vcf_ukb_chr1_benchmark.qmd</a></li>
+        <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_1000_benchmark.qmd">opengwasdb_vcf_ukb_chr1_1000_benchmark.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_array_benchmark.qmd">opengwasdb_vcf_ukb_chr1_array_benchmark.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_bcftools_benchmark.qmd">opengwasdb_vcf_ukb_chr1_bcftools_benchmark.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_eqtlgen_ragged_benchmark.qmd">opengwasdb_eqtlgen_ragged_benchmark.qmd</a></li>
@@ -107,18 +131,31 @@
     </section>
 
     <section>
-      <h2>Architecture & Design</h2>
+      <h2>Architecture Decision Records</h2>
       <ul>
-        <li><a href="adr/0001-store-envelope.md">ADR-0001: Store envelope (manifest, zarr, sqlite)</a></li>
-        <li><a href="adr/0002-canonical-variant-format.md">ADR-0002: Canonical variant ALID format</a></li>
-        <li><a href="adr/0005-store-statistics-z-se.md">ADR-0005: Store z and se, not beta (scale-agnostic)</a></li>
-        <li><a href="adr/0013-top-hit-indexes.md">ADR-0013: Pre-computed top-hit indexes</a></li>
-        <li><a href="adr/0014-ragged-reference-completed-regions.md">ADR-0014: Ragged reference-completed region bounds</a></li>
-        <li><a href="adr/0017-completion-quality-schema.md">ADR-0017: Reference completion quality tracking</a></li>
-        <li><a href="adr/0020-sparse-array-query-contract.md">ADR-0020: Sparse array query return contract</a></li>
-        <li><a href="adr/0021-zarr-chunk-shape-clipping.md">ADR-0021: Zarr chunk shape clipping to array bounds</a></li>
-        <li><a href="adr/0022-dense-completion-elastic-net.md">ADR-0022: Dense completion via elastic-net imputation</a></li>
-        <li><a href="adr/0023-dense-completion-block-parallel-build.md">ADR-0023: Dense completion process-pool parallelization</a></li>
+        <li><a href="adr/0001-hybrid-sqlite-zarr-store-envelope.md">ADR-0001: Use a hybrid SQLite, tabix, and Zarr store envelope</a></li>
+        <li><a href="adr/0002-store-local-variant-indices.md">ADR-0002: Use store-local variant indices</a></li>
+        <li><a href="adr/0003-one-reference-assembly-per-store-release.md">ADR-0003: Use one reference assembly per Store Release</a></li>
+        <li><a href="adr/0004-controlled-stored-effect-scale.md">ADR-0004: Controlled stored effect scale, loose original scale</a></li>
+        <li><a href="adr/0005-store-z-and-se-as-canonical-statistics.md">ADR-0005: Store Z and SE as canonical association statistics</a></li>
+        <li><a href="adr/0006-layout-independent-query-engine.md">ADR-0006: Use a layout-independent query engine</a></li>
+        <li><a href="adr/0007-layout-independent-build-pipeline.md">ADR-0007: Use a layout-independent build pipeline</a></li>
+        <li><a href="adr/0008-implement-dense-observed-only-first.md">ADR-0008: Implement Dense Observed-Only first</a></li>
+        <li><a href="adr/0009-separate-layout-coverage-completion.md">ADR-0009: Separate layout, coverage, and completion</a></li>
+        <li><a href="adr/0010-model-eaf-and-info-scope.md">ADR-0010: Model EAF and INFO scope explicitly</a></li>
+        <li><a href="adr/0011-reference-completion-release-enhancement.md">ADR-0011: Reference completion as optional release enhancement</a></li>
+        <li><a href="adr/0012-reference-completed-query-semantics.md">ADR-0012: Include imputed associations by default in queries</a></li>
+        <li><a href="adr/0013-association-status-nan-plus-imputed-mask.md">ADR-0013: Encode association status with NaN and imputed mask</a></li>
+        <li><a href="adr/0014-ragged-reference-completed-regions.md">ADR-0014: Complete ragged regions within retained boundaries</a></li>
+        <li><a href="adr/0015-dense-reference-completed-overflow.md">ADR-0015: Ragged overflow for off-panel dense observations</a></li>
+        <li><a href="adr/0016-sample-size-kind-and-scope.md">ADR-0016: Factor sample-size kind and scope</a></li>
+        <li><a href="adr/0017-long-allele-normalisation-and-hashing.md">ADR-0017: Retain full normalised long alleles</a></li>
+        <li><a href="adr/0018-local-path-cli-and-external-catalogue.md">ADR-0018: Explicit local store paths, external catalogues</a></li>
+        <li><a href="adr/0019-two-pass-vcf-build-with-inline-liftover.md">ADR-0019: Two-pass VCF build with inline liftover</a></li>
+        <li><a href="adr/0020-sparse-array-query-contract.md">ADR-0020: Sparse flat array query contract</a></li>
+        <li><a href="adr/0021-clip-zarr-chunk-shape-to-array-dimensions.md">ADR-0021: Clip zarr chunk shape to array dimensions</a></li>
+        <li><a href="adr/0022-dense-completed-axis-is-source-union-panel.md">ADR-0022: Dense completed axis is source ∪ reference panel</a></li>
+        <li><a href="adr/0023-dense-completion-block-parallel-build.md">ADR-0023: Dense completion process pool over LD blocks</a></li>
       </ul>
     </section>
 
