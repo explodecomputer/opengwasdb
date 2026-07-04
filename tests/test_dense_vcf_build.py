@@ -308,6 +308,96 @@ class TestTopHitHarvest:
         assert sorted(harvested[5e-4].tolist()) == [-12.0, -5.0, -4.0]
 
 
+class TestBandStreaming:
+    def _three_trait_manifest(self, tmp_path):
+        rows = [
+            f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",
+            f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n",
+            f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n",
+        ]
+        entries = []
+        for k in range(3):
+            vcf = _make_vcf(tmp_path, f"trait_{k}", rows)
+            entries.append((f"trait_{k}", vcf, f"Trait {k}"))
+        return _make_manifest(tmp_path, entries)
+
+    def test_short_final_band_matches_single_band(self, tmp_path):
+        """A 2-wide analysis chunk over 3 analyses (bands [0:2],[2:3]) must equal
+        a single-band build byte-for-byte — exercises the short final band."""
+        import zarr
+
+        manifest = self._three_trait_manifest(tmp_path)
+
+        single = tmp_path / "single.opengwasdb"
+        build_dense_from_vcf_manifest(
+            manifest, single, store_id="s", release_id="r", n_workers=2,
+            chunk_shape=(1000, 1000),
+        )
+        banded = tmp_path / "banded.opengwasdb"
+        build_dense_from_vcf_manifest(
+            manifest, banded, store_id="s", release_id="r", n_workers=2,
+            chunk_shape=(1000, 2),
+        )
+
+        assert validate_store(banded).ok
+        rs = zarr.open_group(str(single / "data.zarr"), mode="r")
+        rb = zarr.open_group(str(banded / "data.zarr"), mode="r")
+        for name in ("z", "se"):
+            a, b = rs[name][:], rb[name][:]
+            np.testing.assert_array_equal(np.isnan(a), np.isnan(b))
+            np.testing.assert_array_equal(a[~np.isnan(a)], b[~np.isnan(b)])
+        # banded store really used a 2-wide analysis chunk
+        assert rb["z"].chunks[1] == 2
+
+
+class TestForkSafeLookup:
+    def test_last_wins_dedup_on_collision(self, tmp_path):
+        """Two source variants mapping to the same row (as a liftover collision
+        would) resolve to one row, keeping the last stream occurrence."""
+        from opengwasdb.layouts.dense.build_vcf import (
+            _build_variant_key_index,
+            _resolve_column,
+        )
+
+        # Both hg19 keys map to the same hg38 ALID → same row 0.
+        hg19_lookup = {("1", 100, "A", "G"): "1:100:A:G", ("1", 200, "A", "G"): "1:100:A:G"}
+        keys, rows = _build_variant_key_index(hg19_lookup, {"1:100:A:G": 0})
+
+        vcf = _make_vcf(
+            tmp_path,
+            "t",
+            [
+                "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n",  # z=2.0, flip → -2.0
+                "1\t200\t.\tA\tG\t.\tPASS\t.\tES:SE\t3.0:0.5\n",  # z=6.0, flip → -6.0 (later)
+            ],
+        )
+        r, z, _se = _resolve_column(str(vcf), keys, rows)
+        assert r.tolist() == [0]
+        assert z[0] == pytest.approx(-6.0, rel=5e-3)  # last occurrence wins
+
+    def test_absent_variant_not_mismapped(self, tmp_path):
+        """A variant not in the panel must be dropped, not snapped to a neighbour."""
+        from opengwasdb.layouts.dense.build_vcf import (
+            _build_variant_key_index,
+            _resolve_column,
+        )
+
+        hg19_lookup = {("1", 100, "A", "G"): "1:100:A:G", ("1", 300, "A", "G"): "1:300:A:G"}
+        keys, rows = _build_variant_key_index(
+            hg19_lookup, {"1:100:A:G": 0, "1:300:A:G": 1}
+        )
+        vcf = _make_vcf(
+            tmp_path,
+            "t",
+            [
+                "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n",  # in panel → row 0
+                "1\t200\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",  # ABSENT → dropped
+            ],
+        )
+        r, _z, _se = _resolve_column(str(vcf), keys, rows)
+        assert r.tolist() == [0]  # only the in-panel variant, no mis-map to row 1
+
+
 def test_ez_preferred_over_es_se(tmp_path):
     """When EZ is present and finite, it is used instead of ES/SE."""
     vcf = _make_vcf(

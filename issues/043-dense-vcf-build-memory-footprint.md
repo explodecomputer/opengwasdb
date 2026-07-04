@@ -35,19 +35,22 @@ Two fork-related effects inflate the footprint, neither of which is fundamental:
 
 Both fixes are independent and can land separately.
 
-- [x] **Keep `z_mat`/`se_mat` out of the workers' inherited COW space.** Done: the
-      matrices are now backed by MAP_SHARED memory-mapped files (temp files next
-      to the output store) instead of anonymous RAM. MAP_SHARED pages are never
-      copied on write, so the parent's scatter writes stay a single physical copy
-      in page cache regardless of fork timing — the ~99 GB doubling is gone, and
-      the arrays move from AnonPages to reclaimable page cache. Output is
-      byte-identical (`test_two_workers_matches_serial`, `test_harvest_matches_full_scan`).
-- [ ] **Represent the Pass 2 lookups as fork-safe structures** so reading them in a
-      worker doesn't trigger refcount-COW. Options: pack `variant_index` as sorted
-      numpy arrays + binary search (no per-element Python objects → no per-element
-      refcounts), and/or resolve `(chrom,pos,ref,alt) → row` via the existing ALID
-      byte index rather than a Python dict. More involved (~100+ GB). Still open —
-      this is the remaining balloon after the COW-doubling fix.
+- [x] **Keep `z_mat`/`se_mat` out of the workers' inherited COW space.** Done, then
+      superseded: an interim MAP_SHARED memmap removed the COW-doubling; the final
+      design (below) removes the full matrix entirely. The build now **band-streams
+      the zarr** — Pass 2 spills each analysis column to disk and holds no matrix;
+      a post-Pass-2 band-write phase fills the zarr in chunk-column bands (peak =
+      one band ≈ `n_variants × chunk-analysis-width`, ~40 GB at ukb-b scale), so the
+      99 GB matrix is never resident alongside the workers and COW-doubling is moot.
+      (`_create_dense_zarr` + `_write_dense_bands` in `build_vcf.py`.)
+- [x] **Represent the Pass 2 lookups as fork-safe structures.** Done: the two dicts
+      are composed into a single sorted numpy byte-key array (`chrom:pos:ref:alt`)
+      + int32 `rows`, binary-searched in workers (`_build_variant_key_index` /
+      `_resolve_column`). Numpy buffers have no per-element refcounts, so forked
+      workers reading them don't refcount-COW — the ~100 GB per-worker dict
+      duplication is gone. Output byte-identical
+      (`test_two_workers_matches_serial`, `test_short_final_band_matches_single_band`,
+      `test_last_wins_dedup_on_collision`, `test_absent_variant_not_mismapped`).
 
 ## Acceptance criteria
 
