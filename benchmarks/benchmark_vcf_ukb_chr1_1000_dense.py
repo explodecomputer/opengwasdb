@@ -32,7 +32,7 @@ from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
 
 DEFAULT_MANIFEST = Path("/home/gh13047/repo/besdq/data/vcf-ukb-1000/manifest.tsv")
-DEFAULT_STORE = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_1000_dense.opengwasdb")
+DEFAULT_STORE = Path("/local-scratch/data/opengwas/opengwasdb/vcf_ukb_chr1_1000_dense.opengwasdb")
 DEFAULT_OUTPUT = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_1000_benchmark.json")
 SLOWDOWN_FLAG_THRESHOLD = 2.0
 

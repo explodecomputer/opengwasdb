@@ -33,7 +33,7 @@ from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
 
 DEFAULT_MANIFEST = Path("/home/gh13047/repo/besdq/data/vcf-ukb/manifest.tsv")
-DEFAULT_STORE = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/vcf_ukb_chr1_dense.opengwasdb")
+DEFAULT_STORE = Path("/local-scratch/data/opengwas/opengwasdb/vcf_ukb_chr1_dense.opengwasdb")
 DEFAULT_OUTPUT = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.json")
 DEFAULT_QMD = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.qmd")
 BESDQ_BASELINE = Path("/home/gh13047/repo/besdq/data/ukb-chr1_zarr_benchmark.json")

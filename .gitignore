@@ -10,3 +10,10 @@ dist/
 .DS_Store
 docs/benchmark-output/*.opengwasdb/
 docs/benchmark-output/*_combined_source.tsv.gz
+
+# transient build logs (build.sh writes + rotates these)
+data/**/build.log
+data/**/build.log.*
+# local Claude Code state (not shared)
+.claude/settings.local.json
+.claude/*.lock
