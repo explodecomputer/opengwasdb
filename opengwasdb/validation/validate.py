@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +11,7 @@ import numpy as np
 import zarr
 
 from opengwasdb.index import connect, count_rows
-from opengwasdb.layouts.dense.top_hits import threshold_key
+from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout, StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
@@ -292,13 +291,19 @@ def _validate_ragged_completion(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
         if "completion_quality" not in tables:
-            errors.append("index.sqlite is missing the completion_quality table for a reference-completed store")
+            errors.append(
+                "index.sqlite is missing the completion_quality table "
+                "for a reference-completed store"
+            )
         else:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(completion_quality)").fetchall()}
             required = {"analysis_index", "block_id", "pearson_r", "n_imputed", "n_missing"}
             missing_cols = required - cols
             if missing_cols:
-                errors.append(f"completion_quality table is missing columns: {', '.join(sorted(missing_cols))}")
+                errors.append(
+                    "completion_quality table is missing columns: "
+                    f"{', '.join(sorted(missing_cols))}"
+                )
 
 
 _TOP_HIT_SAMPLE_SIZE = 1000  # cross-validate this many sampled entries against the CSR
@@ -460,6 +465,11 @@ def _representative_variant_indices(n_variants: int) -> list[int]:
     return sorted(index for index in anchors if 0 <= index < n_variants)
 
 
+# Row-band height for streaming the dense matrix during validation, so no check
+# ever materialises the full (n_variants × n_analyses) array (issue 045).
+_VALIDATE_BAND_ROWS = 250_000
+
+
 def _validate_dense_arrays(
     root: Any,
     n_variants: int,
@@ -471,16 +481,33 @@ def _validate_dense_arrays(
             errors.append(f"missing data.zarr/{name}")
     if errors:
         return
-    z = root["z"][:].astype("float32")
-    se = root["se"][:].astype("float32")
+    z_arr = root["z"]
+    se_arr = root["se"]
     expected_shape = (n_variants, n_analyses)
-    if tuple(z.shape) != expected_shape:
-        errors.append(f"z shape {tuple(z.shape)} does not match {expected_shape}")
-    if tuple(se.shape) != expected_shape:
-        errors.append(f"se shape {tuple(se.shape)} does not match {expected_shape}")
-    if np.any(np.isfinite(se) & (se < 0)):
+    if tuple(z_arr.shape) != expected_shape:
+        errors.append(f"z shape {tuple(z_arr.shape)} does not match {expected_shape}")
+    if tuple(se_arr.shape) != expected_shape:
+        errors.append(f"se shape {tuple(se_arr.shape)} does not match {expected_shape}")
+    if errors:
+        return
+
+    # Stream in row-bands; the finite/sign checks work on float16 directly, so
+    # there is no full-matrix load and no float32 upcast.
+    neg_se = False
+    missingness = False
+    for r0 in range(0, n_variants, _VALIDATE_BAND_ROWS):
+        r1 = min(r0 + _VALIDATE_BAND_ROWS, n_variants)
+        z = z_arr[r0:r1]
+        se = se_arr[r0:r1]
+        if not neg_se and np.any(np.isfinite(se) & (se < 0)):
+            neg_se = True
+        if not missingness and np.any(np.isnan(z) != np.isnan(se)):
+            missingness = True
+        if neg_se and missingness:
+            break
+    if neg_se:
         errors.append("se contains negative finite values")
-    if np.any(np.isnan(z) != np.isnan(se)):
+    if missingness:
         errors.append("z and se missingness is inconsistent")
 
 
@@ -488,39 +515,68 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
     if "top_hits" not in root:
         return
     top = root["top_hits"]
-    z_matrix = root["z"][:].astype("float32")
+    z_arr = root["z"]
+    n_variants, n_analyses = int(z_arr.shape[0]), int(z_arr.shape[1])
+
+    # Load each threshold group's (comparatively small) index arrays and run the
+    # checks that don't need the matrix: array-length consistency, descending-|z|
+    # ranking, and cell uniqueness. Keep the survivors for the streamed matrix pass.
+    groups: dict[str, dict[str, Any]] = {}
     for key in top:
         group = top[key]
         threshold = float(group.attrs.get("threshold", key.replace("p_", "").replace("_", "-")))
-        rows = group["variant_index"][:]
-        cols = group["analysis_index"][:]
+        rows = group["variant_index"][:].astype(np.int64)
+        cols = group["analysis_index"][:].astype(np.int64)
         z_values = group["z"][:].astype("float32")
         abs_z = group["abs_z"][:].astype("float32")
-        observed = set()
         if len(rows) != len(cols) or len(rows) != len(z_values) or len(rows) != len(abs_z):
             errors.append(f"top-hit index {key} has inconsistent array lengths")
             continue
-        previous_abs = math.inf
-        for row, col, z, indexed_abs in zip(rows, cols, z_values, abs_z, strict=True):
-            stored_z = float(z_matrix[int(row), int(col)])
-            z_matches = np.isclose(stored_z, float(z), rtol=1e-3, atol=1e-3)
-            if not math.isfinite(stored_z) or not z_matches:
-                errors.append(f"top-hit index {key} contains z value inconsistent with z array")
-                break
-            if p_value_from_z(stored_z) > threshold:
-                errors.append(f"top-hit index {key} contains association above threshold")
-                break
-            if float(indexed_abs) > previous_abs:
-                errors.append(f"top-hit index {key} is not ranked by descending significance")
-                break
-            previous_abs = float(indexed_abs)
-            observed.add((int(row), int(col)))
-        expected = {
-            (int(row), int(col))
-            for row, col in zip(*np.where(np.isfinite(z_matrix)), strict=True)
-            if p_value_from_z(float(z_matrix[int(row), int(col)])) <= threshold
+        if len(abs_z) > 1 and np.any(abs_z[:-1] < abs_z[1:]):
+            errors.append(f"top-hit index {key} is not ranked by descending significance")
+            continue
+        if len(rows):
+            flat = rows * n_analyses + cols
+            if len(np.unique(flat)) != len(flat):
+                errors.append(f"top-hit index {key} does not match stored z values")
+                continue
+        groups[key] = {
+            "z_crit": z_critical(threshold),
+            "rows": rows,
+            "cols": cols,
+            "z_values": z_values,
+            "n": len(rows),
+            "pass_count": 0,
+            "consistent": True,
         }
-        if observed != expected:
+    if not groups:
+        return
+
+    # Single streamed pass over the matrix in row-bands: per band, count cells that
+    # pass each threshold (completeness) and verify every index cell in that band
+    # (matrix z finite, matches the stored index z, and itself clears the cutoff).
+    for r0 in range(0, n_variants, _VALIDATE_BAND_ROWS):
+        r1 = min(r0 + _VALIDATE_BAND_ROWS, n_variants)
+        z_band = z_arr[r0:r1].astype("float32")
+        abs_band = np.abs(z_band)
+        for g in groups.values():
+            g["pass_count"] += int(np.count_nonzero(abs_band >= g["z_crit"]))
+            in_band = (g["rows"] >= r0) & (g["rows"] < r1)
+            if not np.any(in_band):
+                continue
+            gathered = z_band[g["rows"][in_band] - r0, g["cols"][in_band]]
+            matches = np.isclose(gathered, g["z_values"][in_band], rtol=1e-3, atol=1e-3)
+            if not (
+                np.all(np.isfinite(gathered))
+                and np.all(matches)
+                and np.all(np.abs(gathered) >= g["z_crit"])
+            ):
+                g["consistent"] = False
+
+    for key, g in groups.items():
+        if not g["consistent"]:
+            errors.append(f"top-hit index {key} contains z value inconsistent with z array")
+        elif g["n"] != g["pass_count"]:
             errors.append(f"top-hit index {key} does not match stored z values")
 
 
