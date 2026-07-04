@@ -397,6 +397,40 @@ class TestForkSafeLookup:
         r, _z, _se = _resolve_column(str(vcf), keys, rows)
         assert r.tolist() == [0]  # only the in-panel variant, no mis-map to row 1
 
+    def test_batched_matches_whole_file(self, tmp_path, monkeypatch):
+        """A tiny batch size (many batches + a cross-batch collision) resolves to
+        the same column as processing the whole file at once."""
+        import opengwasdb.layouts.dense.build_vcf as bv
+
+        # pos 100 and 200 collide onto row 0; pos 300 -> row 1.
+        hg19_lookup = {
+            ("1", 100, "A", "G"): "1:100:A:G",
+            ("1", 200, "A", "G"): "1:100:A:G",
+            ("1", 300, "C", "T"): "1:300:C:T",
+        }
+        keys, rows = bv._build_variant_key_index(
+            hg19_lookup, {"1:100:A:G": 0, "1:300:C:T": 1}
+        )
+        vcf = _make_vcf(
+            tmp_path,
+            "t",
+            [
+                "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n",  # row 0
+                "1\t300\t.\tC\tT\t.\tPASS\t.\tES:SE\t2.0:0.5\n",  # row 1
+                "1\t200\t.\tA\tG\t.\tPASS\t.\tES:SE\t3.0:0.5\n",  # row 0 again, last wins
+            ],
+        )
+        whole = bv._resolve_column(str(vcf), keys, rows)
+        monkeypatch.setattr(bv, "_RESOLVE_BATCH", 1)  # one association per batch
+        batched = bv._resolve_column(str(vcf), keys, rows)
+
+        for a, b in zip(whole, batched, strict=True):
+            np.testing.assert_array_equal(a, b)
+        r, z, _se = batched
+        assert sorted(r.tolist()) == [0, 1]
+        # row 0 kept the later (pos 200) occurrence: z=6.0 flipped to -6.0
+        assert z[r.tolist().index(0)] == pytest.approx(-6.0, rel=5e-3)
+
 
 def test_ez_preferred_over_es_se(tmp_path):
     """When EZ is present and finite, it is used instead of ES/SE."""

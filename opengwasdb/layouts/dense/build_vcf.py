@@ -133,35 +133,24 @@ def _build_variant_key_index(
     return keys[order], rows_arr[order]
 
 
-def _resolve_column(
-    file_path: str, keys_sorted: np.ndarray, rows_sorted: np.ndarray
+# Streamed in fixed-size batches so a worker never materialises a whole
+# (genome-wide) VCF as Python lists at once — peak per-worker memory is one batch
+# of columns plus the accumulated matched rows, not the entire file (issue 043).
+_RESOLVE_BATCH = 250_000
+
+
+def _match_batch(
+    chroms: list[str],
+    poss: list[int],
+    refs: list[str],
+    alts: list[str],
+    zs: list[float],
+    ses: list[float],
+    keys_sorted: np.ndarray,
+    rows_sorted: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Stream one VCF, resolve each association's variant to a row via the sorted
-    key lookup, and return deduped ``(rows int64, z f32, se f32)`` for the column.
-
-    Last-wins dedup by row matches the original per-file ``last_by_row`` dict:
-    when two source variants lift to the same row, the later stream occurrence
-    wins, so the scattered matrix cell is deterministic.
-    """
-    chroms: list[str] = []
-    poss: list[int] = []
-    refs: list[str] = []
-    alts: list[str] = []
-    zs: list[float] = []
-    ses: list[float] = []
-    for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(file_path):
-        chroms.append(chrom)
-        poss.append(pos)
-        refs.append(ref)
-        alts.append(alt)
-        zs.append(z)
-        ses.append(se)
-
-    if not zs:
-        empty_i = np.empty(0, dtype=np.int64)
-        empty_f = np.empty(0, dtype=np.float32)
-        return empty_i, empty_f, empty_f
-
+    """Resolve one batch of associations to (rows, z, se) for cells whose variant
+    is present in the panel (exact key match). Order-preserving."""
     query = _encode_variant_keys(chroms, poss, refs, alts)
     idx = np.searchsorted(keys_sorted, query)
     idx_clip = np.minimum(idx, len(keys_sorted) - 1)
@@ -169,6 +158,65 @@ def _resolve_column(
     rows = rows_sorted[idx_clip[matched]].astype(np.int64)
     z_arr = np.array(zs, dtype=np.float32)[matched]
     se_arr = np.array(ses, dtype=np.float32)[matched]
+    return rows, z_arr, se_arr
+
+
+def _resolve_column(
+    file_path: str, keys_sorted: np.ndarray, rows_sorted: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stream one VCF, resolve each association's variant to a row via the sorted
+    key lookup, and return deduped ``(rows int64, z f32, se f32)`` for the column.
+
+    The stream is processed in ``_RESOLVE_BATCH``-sized batches (vectorised
+    searchsorted per batch), so worker peak memory is bounded by one batch rather
+    than the whole file. Batches are matched in stream order and concatenated, so
+    the final last-wins dedup by row is identical to processing the whole file at
+    once: when two source variants lift to the same row, the later stream
+    occurrence wins, making the scattered matrix cell deterministic.
+    """
+    rows_parts: list[np.ndarray] = []
+    z_parts: list[np.ndarray] = []
+    se_parts: list[np.ndarray] = []
+    chroms: list[str] = []
+    poss: list[int] = []
+    refs: list[str] = []
+    alts: list[str] = []
+    zs: list[float] = []
+    ses: list[float] = []
+
+    def _flush() -> None:
+        if not zs:
+            return
+        r, z, se = _match_batch(chroms, poss, refs, alts, zs, ses, keys_sorted, rows_sorted)
+        rows_parts.append(r)
+        z_parts.append(z)
+        se_parts.append(se)
+        chroms.clear()
+        poss.clear()
+        refs.clear()
+        alts.clear()
+        zs.clear()
+        ses.clear()
+
+    for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(file_path):
+        chroms.append(chrom)
+        poss.append(pos)
+        refs.append(ref)
+        alts.append(alt)
+        zs.append(z)
+        ses.append(se)
+        if len(zs) >= _RESOLVE_BATCH:
+            _flush()
+    _flush()
+
+    if not rows_parts:
+        empty_i = np.empty(0, dtype=np.int64)
+        empty_f = np.empty(0, dtype=np.float32)
+        return empty_i, empty_f, empty_f
+
+    rows = np.concatenate(rows_parts)
+    z_arr = np.concatenate(z_parts)
+    se_arr = np.concatenate(se_parts)
 
     if len(rows):
         # last-wins dedup by row: unique on the reversed rows returns the first
