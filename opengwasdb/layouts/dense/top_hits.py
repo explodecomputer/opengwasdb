@@ -105,19 +105,46 @@ def build_top_hit_indexes(
     store_path: str | Path,
     thresholds: tuple[float, ...] = TOP_HIT_THRESHOLDS,
 ) -> None:
-    """Build ranked top-hit arrays by scanning the full dense matrix.
+    """(Re)build ranked top-hit arrays by scanning the stored dense matrix.
 
-    Used by build paths that do not harvest hits inline (the VCF builder
-    harvests during its fill pass instead — see ``build_dense_from_vcf_manifest``
-    and ``write_top_hit_indexes``). Collects only the candidate cells
-    (``|z| >= z_critical(loosest)``) so it never materialises a p-value for
-    every finite cell.
+    Used by build paths that do not harvest hits inline, and to rebuild the index
+    on an existing store. Scans ``z`` in row-bands (never the full matrix in RAM)
+    and thresholds on the **stored** values, so the index matches exactly what a
+    query reads back from ``z`` (issue 046). Collects only candidate cells
+    (``|z| >= z_critical(loosest)``).
     """
 
     root = zarr.open_group(str(Path(store_path) / "data.zarr"), mode="r")
-    z = root["z"][:]
-    se = root["se"][:]
+    z_arr = root["z"]
+    se_arr = root["se"]
+    n_variants = int(z_arr.shape[0])
     loosest = z_critical(max(thresholds))
-    mask = np.isfinite(z) & (np.abs(z) >= loosest)
-    rows, cols = np.where(mask)
-    write_top_hit_indexes(store_path, rows, cols, z[rows, cols], se[rows, cols], thresholds)
+    band_rows = max(int(z_arr.chunks[0]), 250_000)
+
+    rows_parts: list[np.ndarray] = []
+    cols_parts: list[np.ndarray] = []
+    z_parts: list[np.ndarray] = []
+    se_parts: list[np.ndarray] = []
+    for r0 in range(0, n_variants, band_rows):
+        r1 = min(r0 + band_rows, n_variants)
+        z_band = z_arr[r0:r1]
+        mask = np.abs(z_band.astype("float32")) >= loosest  # NaN compares False
+        br, bc = np.where(mask)
+        if len(br):
+            se_band = se_arr[r0:r1]
+            rows_parts.append(br.astype(np.int64) + r0)
+            cols_parts.append(bc.astype(np.int64))
+            z_parts.append(z_band[br, bc].astype("float32"))
+            se_parts.append(se_band[br, bc].astype("float32"))
+
+    if rows_parts:
+        rows = np.concatenate(rows_parts)
+        cols = np.concatenate(cols_parts)
+        z = np.concatenate(z_parts)
+        se = np.concatenate(se_parts)
+    else:
+        rows = np.empty(0, dtype=np.int64)
+        cols = np.empty(0, dtype=np.int64)
+        z = np.empty(0, dtype=np.float32)
+        se = np.empty(0, dtype=np.float32)
+    write_top_hit_indexes(store_path, rows, cols, z, se, thresholds)

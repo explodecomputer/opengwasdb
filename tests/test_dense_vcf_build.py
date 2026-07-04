@@ -307,6 +307,39 @@ class TestTopHitHarvest:
         # (z = -12, -5, -4); the z=3.0 cell is below the 3.4808 cutoff.
         assert sorted(harvested[5e-4].tolist()) == [-12.0, -5.0, -4.0]
 
+    def test_index_z_equals_stored_matrix(self, tmp_path):
+        """Issue 046: the top-hit index z must equal the stored (float16) matrix
+        value exactly, so the index agrees with what a query reads from `z`, and
+        the store validates cleanly."""
+        import zarr
+
+        from opengwasdb.layouts.dense.top_hits import threshold_key
+
+        vcf = _make_vcf(
+            tmp_path,
+            "trait_a",
+            [
+                f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",  # z=4.0
+                f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n",  # z=5.0
+                f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n",  # z=3.0
+            ],
+        )
+        manifest = _make_manifest(tmp_path, [("trait_a", vcf, "Trait A")])
+        store = tmp_path / "store.opengwasdb"
+        build_dense_from_vcf_manifest(manifest, store, store_id="s", release_id="r", n_workers=2)
+
+        assert validate_store(store).ok
+
+        root = zarr.open_group(str(store / "data.zarr"), mode="r")
+        z_matrix = root["z"][:]
+        for t in (5e-4, 5e-6, 5e-8):
+            g = root[f"top_hits/{threshold_key(t)}"]
+            rows = g["variant_index"][:]
+            cols = g["analysis_index"][:]
+            index_z = g["z"][:]
+            gathered = z_matrix[rows, cols].astype("float32")
+            np.testing.assert_array_equal(index_z, gathered)
+
 
 class TestBandStreaming:
     def _three_trait_manifest(self, tmp_path):

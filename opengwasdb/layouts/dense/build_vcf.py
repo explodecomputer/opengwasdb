@@ -230,13 +230,16 @@ def _resolve_column(
 def _spill_column(
     spill_dir: Path, col_idx: int, rows: np.ndarray, z: np.ndarray, se: np.ndarray
 ) -> None:
-    """Atomically spill one resolved column (+ its harvested top hits) to
-    ``{spill_dir}/{col_idx}.npz`` (temp-then-rename; both names end in .npz because
-    np.savez appends that suffix unless already present)."""
-    hit = np.abs(z) >= _TOP_HIT_Z_CRIT
+    """Atomically spill one resolved column to ``{spill_dir}/{col_idx}.npz``
+    (temp-then-rename; both names end in .npz because np.savez appends that suffix
+    unless already present).
+
+    Top hits are NOT harvested here — they are harvested during the band-write
+    phase from the *stored* float16 values, so the index matches exactly what a
+    query reads back from the ``z`` array (issue 046)."""
     final = spill_dir / f"{col_idx}.npz"
     tmp = spill_dir / f"{col_idx}.tmp.npz"
-    np.savez(tmp, rows=rows, z=z, se=se, hit_rows=rows[hit], hit_z=z[hit], hit_se=se[hit])
+    np.savez(tmp, rows=rows, z=z, se=se)
     tmp.replace(final)
 
 
@@ -642,12 +645,16 @@ def _write_dense_bands(
                 rows = data["rows"]
                 z_band[rows, local] = data["z"]
                 se_band[rows, local] = data["se"]
-                hr = data["hit_rows"]
-                if len(hr):
-                    hit_rows_parts.append(hr)
-                    hit_cols_parts.append(np.full(len(hr), c, dtype=np.int64))
-                    hit_z_parts.append(data["hit_z"])
-                    hit_se_parts.append(data["hit_se"])
+                # Harvest top hits from the *stored* (float16) values just written,
+                # so the index matches exactly what a query reads from `z` (046).
+                zc = z_band[rows, local]
+                sec = se_band[rows, local]
+                hit = np.abs(zc.astype(np.float32)) >= _TOP_HIT_Z_CRIT
+                if np.any(hit):
+                    hit_rows_parts.append(rows[hit])
+                    hit_cols_parts.append(np.full(int(np.count_nonzero(hit)), c, dtype=np.int64))
+                    hit_z_parts.append(zc[hit].astype(np.float32))
+                    hit_se_parts.append(sec[hit].astype(np.float32))
             (spill_dir / f"{c}.npz").unlink()
         z_arr[:, c0:c1] = z_band[:, :w]
         se_arr[:, c0:c1] = se_band[:, :w]
