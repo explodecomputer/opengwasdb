@@ -614,52 +614,62 @@ def _write_dense_bands(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Stream the retained per-column spills into the zarr in chunk-column bands.
 
-    For each band of ``band_cols`` (= chunk analysis-width) analyses: reset a
-    reusable ``(n_variants × band_cols)`` NaN buffer, scatter each column's spill
-    into it (and accumulate that column's harvested top-hit candidates), then
-    write the band to ``z``/``se`` as whole chunk-columns (no read-modify-write).
-    Peak memory is one band, never the full matrix. Returns the concatenated
-    top-hit candidate arrays ``(rows, cols, z, se)`` for the index build.
+    ``z`` and ``se`` are written in two separate passes over a **single reused**
+    ``(n_variants × band_cols)`` buffer, so only one band is ever resident —
+    halving the band-write peak versus holding z and se together. The top-hit
+    harvest runs in the z-pass and reads each hit's ``se`` straight from the spill
+    (rounded to the stored dtype), so the se-band is never needed for it. Spills
+    are retained until the se-pass consumes them. Returns the concatenated top-hit
+    candidate arrays ``(rows, cols, z, se)`` for the index build.
     """
     root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
     z_arr = root["z"]
     se_arr = root["se"]
     band_cols = effective_chunks[1]
-    z_band = np.empty((n_variants, band_cols), dtype=dtype)
-    se_band = np.empty((n_variants, band_cols), dtype=dtype)
+    band = np.empty((n_variants, band_cols), dtype=dtype)  # reused for z then se
 
     hit_rows_parts: list[np.ndarray] = []
     hit_cols_parts: list[np.ndarray] = []
     hit_z_parts: list[np.ndarray] = []
     hit_se_parts: list[np.ndarray] = []
 
-    log.info("Band-write: %d analyses to zarr in bands of %d", n_analyses, band_cols)
+    # Pass 1 — z. Fill, write z, and harvest top hits (se pulled from the spill,
+    # rounded to the stored dtype so the index matches what queries read from z).
+    log.info("Band-write z: %d analyses in bands of %d", n_analyses, band_cols)
     for c0 in range(0, n_analyses, band_cols):
         c1 = min(c0 + band_cols, n_analyses)
         w = c1 - c0
-        z_band[:, :w] = np.nan
-        se_band[:, :w] = np.nan
+        band[:, :w] = np.nan
         for c in range(c0, c1):
             local = c - c0
             with np.load(spill_dir / f"{c}.npz") as data:
                 rows = data["rows"]
-                z_band[rows, local] = data["z"]
-                se_band[rows, local] = data["se"]
-                # Harvest top hits from the *stored* (float16) values just written,
-                # so the index matches exactly what a query reads from `z` (046).
-                zc = z_band[rows, local]
-                sec = se_band[rows, local]
+                band[rows, local] = data["z"]
+                zc = band[rows, local]  # stored float16 z
                 hit = np.abs(zc.astype(np.float32)) >= _TOP_HIT_Z_CRIT
                 if np.any(hit):
                     hit_rows_parts.append(rows[hit])
                     hit_cols_parts.append(np.full(int(np.count_nonzero(hit)), c, dtype=np.int64))
                     hit_z_parts.append(zc[hit].astype(np.float32))
-                    hit_se_parts.append(sec[hit].astype(np.float32))
-            (spill_dir / f"{c}.npz").unlink()
-        z_arr[:, c0:c1] = z_band[:, :w]
-        se_arr[:, c0:c1] = se_band[:, :w]
+                    hit_se_parts.append(data["se"][hit].astype(dtype).astype(np.float32))
+        z_arr[:, c0:c1] = band[:, :w]
         _log_progress(
-            "Band-write", c1, n_analyses, pass2_start, f"cols {c0}:{c1}", every=band_cols
+            "Band-write z", c1, n_analyses, pass2_start, f"cols {c0}:{c1}", every=band_cols
+        )
+
+    # Pass 2 — se. Reuse the buffer; fill, write se, and delete each spill.
+    for c0 in range(0, n_analyses, band_cols):
+        c1 = min(c0 + band_cols, n_analyses)
+        w = c1 - c0
+        band[:, :w] = np.nan
+        for c in range(c0, c1):
+            local = c - c0
+            with np.load(spill_dir / f"{c}.npz") as data:
+                band[data["rows"], local] = data["se"]
+            (spill_dir / f"{c}.npz").unlink()
+        se_arr[:, c0:c1] = band[:, :w]
+        _log_progress(
+            "Band-write se", c1, n_analyses, pass2_start, f"cols {c0}:{c1}", every=band_cols
         )
 
     if hit_rows_parts:

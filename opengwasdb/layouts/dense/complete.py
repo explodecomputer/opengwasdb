@@ -784,9 +784,14 @@ def _write_completed_bands(
     n_analyses: int,
 ) -> tuple[np.ndarray, int, int]:
     """Seed z/se from the source, apply the imputed fills, and write z/se/imputed
-    to the zarr one row-band at a time. Peak memory is one band, never the full
-    matrix. Returns ``(n_missing_off_panel[n_analyses], n_missing_imputation_failed,
-    total_imputed)``. ``fill_*`` must be sorted by ``fill_row``.
+    one row-band at a time. ``z`` and ``se`` are written in two passes over a
+    **single reused** float32 band buffer (plus a uint8 imputed band in the z-pass),
+    so peak memory is ~one band rather than z + se + imputed held together. Both
+    passes fill the same cells because source z/se missingness is consistent (a
+    validated store invariant) — each pass reads only its own source array once, so
+    there is no extra I/O. Returns ``(n_missing_off_panel[n_analyses],
+    n_missing_imputation_failed, total_imputed)``. ``fill_*`` must be sorted by
+    ``fill_row``.
     """
     root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
     z_arr, se_arr, imp_arr = root["z"], root["se"], root["imputed"]
@@ -796,46 +801,65 @@ def _write_completed_bands(
     n_missing_off_panel = np.zeros(n_analyses, dtype=np.int64)
     n_missing_imputation_failed = 0
     total_imputed = 0
+    band = np.empty((band_rows, n_analyses), dtype=np.float32)  # reused for z then se
+
+    # Pass 1 — z + imputed mask + missingness counts.
     for r0 in range(0, n_variants, band_rows):
         r1 = min(r0 + band_rows, n_variants)
         br = r1 - r0
-        z_band = np.full((br, n_analyses), np.nan, dtype=np.float32)
-        se_band = np.full((br, n_analyses), np.nan, dtype=np.float32)
+        zb = band[:br]
+        zb[:] = np.nan
         imp_band = np.zeros((br, n_analyses), dtype=np.uint8)
 
-        # Seed observed values: source variants that map into this output band.
         valid = np.where(out_to_src[r0:r1] >= 0)[0]
         if len(valid):
             srows = out_to_src[r0:r1][valid]
-            z_band[valid, :] = src_z.oindex[srows, :].astype(np.float32)
-            se_band[valid, :] = src_se.oindex[srows, :].astype(np.float32)
+            zb[valid, :] = src_z.oindex[srows, :].astype(np.float32)
 
-        # Off-panel rows are never imputable; count their per-analysis missingness.
         off_local = np.where(on_panel[r0:r1] == 0)[0]
         if len(off_local):
-            n_missing_off_panel += np.isnan(z_band[off_local, :]).sum(axis=0).astype(np.int64)
+            n_missing_off_panel += np.isnan(zb[off_local, :]).sum(axis=0).astype(np.int64)
 
-        # Apply imputed fills for this band (only cells still missing after seeding).
         lo = int(np.searchsorted(fill_row, r0, side="left"))
         hi = int(np.searchsorted(fill_row, r1, side="left"))
         if hi > lo:
             lr = fill_row[lo:hi] - r0
             ai = fill_ai[lo:hi]
-            fillable = ~np.isfinite(z_band[lr, ai])
+            fillable = ~np.isfinite(zb[lr, ai])
             if fillable.any():
                 lrm, aim = lr[fillable], ai[fillable]
-                z_band[lrm, aim] = fill_z[lo:hi][fillable]
-                se_band[lrm, aim] = fill_se[lo:hi][fillable]
+                zb[lrm, aim] = fill_z[lo:hi][fillable]
                 imp_band[lrm, aim] = 1
                 total_imputed += int(fillable.sum())
 
-        # Imputation-failed: on-panel cells still missing after fills.
         on_local = np.where(on_panel[r0:r1] == 1)[0]
         if len(on_local):
-            n_missing_imputation_failed += int(np.isnan(z_band[on_local, :]).sum())
+            n_missing_imputation_failed += int(np.isnan(zb[on_local, :]).sum())
 
-        z_arr[r0:r1] = z_band
-        se_arr[r0:r1] = se_band
+        z_arr[r0:r1] = zb
         imp_arr[r0:r1] = imp_band
+
+    # Pass 2 — se (same cells filled, by the missingness-consistency invariant).
+    for r0 in range(0, n_variants, band_rows):
+        r1 = min(r0 + band_rows, n_variants)
+        br = r1 - r0
+        sb = band[:br]
+        sb[:] = np.nan
+
+        valid = np.where(out_to_src[r0:r1] >= 0)[0]
+        if len(valid):
+            srows = out_to_src[r0:r1][valid]
+            sb[valid, :] = src_se.oindex[srows, :].astype(np.float32)
+
+        lo = int(np.searchsorted(fill_row, r0, side="left"))
+        hi = int(np.searchsorted(fill_row, r1, side="left"))
+        if hi > lo:
+            lr = fill_row[lo:hi] - r0
+            ai = fill_ai[lo:hi]
+            fillable = ~np.isfinite(sb[lr, ai])
+            if fillable.any():
+                sb[lr[fillable], ai[fillable]] = fill_se[lo:hi][fillable]
+
+        se_arr[r0:r1] = sb
 
     return n_missing_off_panel, n_missing_imputation_failed, total_imputed
