@@ -30,8 +30,9 @@ from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
     DEFAULT_DTYPE,
+    TOP_HIT_THRESHOLDS,
 )
-from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
+from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
@@ -63,6 +64,12 @@ class _ManifestRow:
 _pass2_hg19_lookup: dict[tuple[str, int, str, str], str] | None = None
 _pass2_variant_index: dict[str, int] | None = None
 _pass2_spill_dir: Path | None = None
+
+# Top hits are harvested inline during Pass 2 rather than by a post-hoc scan of
+# the full matrix (which had to reload ~200 GB of float32 and compute a p-value
+# for every finite cell). Each worker emits only the cells clearing the loosest
+# threshold's |z| cutoff; the parent accumulates them and writes the index once.
+_TOP_HIT_Z_CRIT = z_critical(max(TOP_HIT_THRESHOLDS))
 
 
 def _fork_pool(n_workers: int) -> ProcessPoolExecutor:
@@ -104,13 +111,21 @@ def _pass2_worker(task: tuple[int, str]) -> int:
     zs = np.fromiter((v[0] for v in last_by_row.values()), dtype=np.float32, count=n)
     ses = np.fromiter((v[1] for v in last_by_row.values()), dtype=np.float32, count=n)
 
+    # Harvest this analysis's top hits inline: only the cells clearing the
+    # loosest threshold's |z| cutoff. Typically a tiny fraction of the column.
+    hit = np.abs(zs) >= _TOP_HIT_Z_CRIT
+
     # Atomic spill: write to a temp path then rename, so a crashed worker never
     # leaves a half-written .npz that the parent would try to load. Both names
     # end in .npz because np.savez appends that suffix unless it is already
     # present — a .tmp suffix would be silently rewritten to .tmp.npz.
     final = _pass2_spill_dir / f"{col_idx}.npz"
     tmp = _pass2_spill_dir / f"{col_idx}.tmp.npz"
-    np.savez(tmp, rows=rows, z=zs, se=ses)
+    np.savez(
+        tmp,
+        rows=rows, z=zs, se=ses,
+        hit_rows=rows[hit], hit_z=zs[hit], hit_se=ses[hit],
+    )
     tmp.replace(final)
     return col_idx
 
@@ -262,10 +277,21 @@ def build_dense_from_vcf_manifest(
     write_variant_axis(out, canonical_variants, {})
 
     # ------------------------------------------------------------------
-    # Allocate output arrays (O(n_variants × n_analyses) peak memory)
+    # Allocate output arrays (O(n_variants × n_analyses)).
+    #
+    # Backed by MAP_SHARED memory-mapped files rather than anonymous RAM. The
+    # Pass 2 process pool forks workers that inherit this address space; an
+    # anonymous array allocated before the fork COW-doubles as the parent
+    # scatters writes into it (children pin the untouched originals — issue 043).
+    # MAP_SHARED pages are never copied on write, so the matrix stays a single
+    # physical copy in page cache regardless of fork timing. Workers never touch
+    # these arrays. The files are removed in the finally below.
     # ------------------------------------------------------------------
-    z_mat = np.full((n_variants, n_analyses), np.nan, dtype=dtype)
-    se_mat = np.full((n_variants, n_analyses), np.nan, dtype=dtype)
+    mat_dir = Path(tempfile.mkdtemp(prefix=f".{out.name}.mat.", dir=out.parent))
+    z_mat = np.memmap(mat_dir / "z.dat", dtype=dtype, mode="w+", shape=(n_variants, n_analyses))
+    se_mat = np.memmap(mat_dir / "se.dat", dtype=dtype, mode="w+", shape=(n_variants, n_analyses))
+    z_mat[:] = np.nan
+    se_mat[:] = np.nan
 
     # ------------------------------------------------------------------
     # Pass 2: fill zarr columns one analysis at a time
@@ -275,9 +301,26 @@ def build_dense_from_vcf_manifest(
         n_variants, n_analyses, n_workers,
     )
     pass2_start = time.monotonic()
+    # Top-hit candidates harvested inline (cells clearing the loosest |z| cutoff).
+    hit_rows_parts: list[np.ndarray] = []
+    hit_cols_parts: list[np.ndarray] = []
+    hit_z_parts: list[np.ndarray] = []
+    hit_se_parts: list[np.ndarray] = []
+
+    def _collect_hits(col_idx: int, rr: np.ndarray, zz: np.ndarray, ss: np.ndarray) -> None:
+        hit = np.abs(zz) >= _TOP_HIT_Z_CRIT
+        if hit.any():
+            hit_rows_parts.append(rr[hit])
+            hit_cols_parts.append(np.full(int(hit.sum()), col_idx, dtype=np.int64))
+            hit_z_parts.append(zz[hit])
+            hit_se_parts.append(ss[hit])
+
     if n_workers <= 1:
         for i, row in enumerate(manifest_rows):
             col_idx = analysis_index[row.trait_id]
+            # Same dedup-then-vectorise shape as _pass2_worker, so serial and
+            # parallel builds produce byte-identical matrices and hit sets.
+            last_by_row: dict[int, tuple[float, float]] = {}
             for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(row.file_path):
                 hg38_alid = hg19_lookup.get((chrom, pos, ref, alt))
                 if hg38_alid is None:
@@ -285,8 +328,15 @@ def build_dense_from_vcf_manifest(
                 row_idx = variant_index.get(hg38_alid)
                 if row_idx is None:
                     continue
-                z_mat[row_idx, col_idx] = z
-                se_mat[row_idx, col_idx] = se
+                last_by_row[row_idx] = (z, se)
+            if last_by_row:
+                n = len(last_by_row)
+                rr = np.fromiter(last_by_row.keys(), dtype=np.int64, count=n)
+                zz = np.fromiter((v[0] for v in last_by_row.values()), dtype=np.float32, count=n)
+                ss = np.fromiter((v[1] for v in last_by_row.values()), dtype=np.float32, count=n)
+                z_mat[rr, col_idx] = zz
+                se_mat[rr, col_idx] = ss
+                _collect_hits(col_idx, rr, zz, ss)
             _log_progress(
                 "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
             )
@@ -309,6 +359,12 @@ def build_dense_from_vcf_manifest(
                     with np.load(spill) as data:
                         z_mat[data["rows"], col_idx] = data["z"]
                         se_mat[data["rows"], col_idx] = data["se"]
+                        hr = data["hit_rows"]
+                        if len(hr):
+                            hit_rows_parts.append(hr)
+                            hit_cols_parts.append(np.full(len(hr), col_idx, dtype=np.int64))
+                            hit_z_parts.append(data["hit_z"])
+                            hit_se_parts.append(data["hit_se"])
                     spill.unlink()
                     _log_progress(
                         "Pass 2", i + 1, n_analyses, pass2_start,
@@ -321,13 +377,32 @@ def build_dense_from_vcf_manifest(
             shutil.rmtree(spill_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
-    # Write zarr + manifest + top-hit indexes
+    # Write zarr + manifest + top-hit indexes (from inline-harvested hits)
     # ------------------------------------------------------------------
+    if hit_rows_parts:
+        all_rows = np.concatenate(hit_rows_parts)
+        all_cols = np.concatenate(hit_cols_parts)
+        all_z = np.concatenate(hit_z_parts)
+        all_se = np.concatenate(hit_se_parts)
+    else:
+        all_rows = np.empty(0, dtype=np.int64)
+        all_cols = np.empty(0, dtype=np.int64)
+        all_z = np.empty(0, dtype=np.float32)
+        all_se = np.empty(0, dtype=np.float32)
+
+    z_mat.flush()
+    se_mat.flush()
     _write_zarr(out, z_mat, se_mat, chunk_shape, dtype)
     _write_manifest(
         out, store_id, release_id, n_variants, n_analyses, chain_file, chunk_shape, dtype
     )
-    build_top_hit_indexes(out)
+    log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
+    write_top_hit_indexes(out, all_rows, all_cols, all_z, all_se)
+
+    # Release the memory-mapped matrices and delete their backing files.
+    del z_mat, se_mat
+    shutil.rmtree(mat_dir, ignore_errors=True)
+    log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
 
     return DenseBuildResult(output_path=out, n_variants=n_variants, n_analyses=n_analyses)
 

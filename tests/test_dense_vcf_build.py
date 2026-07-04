@@ -251,6 +251,62 @@ class TestParallel:
             serial_se[~np.isnan(serial_se)], parallel_se[~np.isnan(parallel_se)]
         )
 
+        # Inline-harvested top hits must match between serial and parallel.
+        for key in ("p_5e_04", "p_5e_06"):
+            s = serial_root[f"top_hits/{key}"]
+            p = parallel_root[f"top_hits/{key}"]
+            np.testing.assert_array_equal(s["variant_index"][:], p["variant_index"][:])
+            np.testing.assert_array_equal(s["analysis_index"][:], p["analysis_index"][:])
+            np.testing.assert_array_equal(s["z"][:], p["z"][:])
+
+
+class TestTopHitHarvest:
+    def test_harvest_matches_full_scan(self, tmp_path):
+        """Top hits harvested during Pass 2 must equal a full-matrix rescan."""
+        import zarr
+
+        from opengwasdb.layouts.dense.top_hits import (
+            build_top_hit_indexes,
+            threshold_key,
+        )
+
+        # trait z-scores: 4.0 and 5.0 clear the loosest tier; 3.0 does not.
+        vcf1 = _make_vcf(
+            tmp_path,
+            "trait_a",
+            [
+                f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",   # z=4.0
+                f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n",   # z=5.0
+                f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n",   # z=3.0
+            ],
+        )
+        vcf2 = _make_vcf(
+            tmp_path,
+            "trait_b",
+            [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t6.0:0.5\n"],     # z=12.0
+        )
+        manifest = _make_manifest(
+            tmp_path, [("trait_a", vcf1, "Trait A"), ("trait_b", vcf2, "Trait B")]
+        )
+        store = tmp_path / "store.opengwasdb"
+        build_dense_from_vcf_manifest(manifest, store, store_id="s", release_id="r", n_workers=2)
+
+        root = zarr.open_group(str(store / "data.zarr"), mode="r")
+        harvested = {
+            t: root[f"top_hits/{threshold_key(t)}"]["z"][:]
+            for t in (5e-4, 5e-6, 5e-8)
+        }
+
+        # Rebuild the same index by full-matrix scan and compare.
+        build_top_hit_indexes(store)
+        for t in (5e-4, 5e-6, 5e-8):
+            rescanned = root[f"top_hits/{threshold_key(t)}"]["z"][:]
+            np.testing.assert_array_equal(harvested[t], rescanned)
+
+        # Sanity: the loosest tier caught the three |z|>=3.4808 cells
+        # (z = -12, -5, -4); the z=3.0 cell is below the 3.4808 cutoff.
+        assert sorted(harvested[5e-4].tolist()) == [-12.0, -5.0, -4.0]
+
 
 def test_ez_preferred_over_es_se(tmp_path):
     """When EZ is present and finite, it is used instead of ES/SE."""

@@ -35,15 +35,19 @@ Two fork-related effects inflate the footprint, neither of which is fundamental:
 
 Both fixes are independent and can land separately.
 
-- [ ] **Allocate `z_mat`/`se_mat` after the worker pool has forked** (or otherwise
-      keep them out of the workers' inherited address space). Workers don't touch
-      them, so this removes the COW-doubling with no behavioural change. Low-risk,
-      high-value (~99 GB).
+- [x] **Keep `z_mat`/`se_mat` out of the workers' inherited COW space.** Done: the
+      matrices are now backed by MAP_SHARED memory-mapped files (temp files next
+      to the output store) instead of anonymous RAM. MAP_SHARED pages are never
+      copied on write, so the parent's scatter writes stay a single physical copy
+      in page cache regardless of fork timing — the ~99 GB doubling is gone, and
+      the arrays move from AnonPages to reclaimable page cache. Output is
+      byte-identical (`test_two_workers_matches_serial`, `test_harvest_matches_full_scan`).
 - [ ] **Represent the Pass 2 lookups as fork-safe structures** so reading them in a
       worker doesn't trigger refcount-COW. Options: pack `variant_index` as sorted
       numpy arrays + binary search (no per-element Python objects → no per-element
       refcounts), and/or resolve `(chrom,pos,ref,alt) → row` via the existing ALID
-      byte index rather than a Python dict. More involved (~100+ GB).
+      byte index rather than a Python dict. More involved (~100+ GB). Still open —
+      this is the remaining balloon after the COW-doubling fix.
 
 ## Acceptance criteria
 
