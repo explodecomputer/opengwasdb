@@ -1,0 +1,206 @@
+---
+title: "OpenGWASDB ukb-b Dense Store — Performance & Validation"
+subtitle: "Genome-wide · 2,514 UK Biobank analyses × ~9.85M variants"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import json
+from pathlib import Path
+
+HERE = Path(".")
+data = json.loads((HERE / "opengwasdb_ukbb_dense_benchmark.json").read_text())
+
+def md_table(headers, rows):
+    sep = "|" + "|".join(["---"] * len(headers)) + "|"
+    head = "| " + " | ".join(headers) + " |"
+    body = "\n".join("| " + " | ".join(str(c) for c in r) + " |" for r in rows)
+    return f"{head}\n{sep}\n{body}"
+
+def fmt_ms(v):
+    return f"{v:,.1f} ms" if v < 1000 else f"{v/1000:,.2f} s"
+```
+
+## Overview
+
+A single **Dense Observed-Only** store holding every association from **2,514
+genome-wide UK Biobank GWAS** (the OpenGWAS `ukb-b` batch), built from the source
+GWAS-VCFs with inline hg19→hg38 liftover. This report benchmarks query latency
+across all access patterns, storage and build cost versus the raw VCFs, and an MR
+IVW analysis as an end-to-end scientific validation.
+
+```{python}
+#| echo: false
+#| output: asis
+d = data["dataset"]
+rows = [
+    ("Analyses (GWAS)", f"{d['n_analyses']:,}"),
+    ("Variants (hg38)", f"{d['n_variants']:,}"),
+    ("Associations (dense cells)", f"{d['n_variants'] * d['n_analyses'] / 1e9:.1f} billion"),
+    ("Reference assembly", d["reference_assembly"]),
+]
+print(md_table(["Property", "Value"], rows))
+```
+
+---
+
+## Storage vs. raw VCF
+
+```{python}
+#| echo: false
+#| output: asis
+s = data["storage"]
+rows = [
+    ("Raw source VCFs (.vcf.gz)", f"{s['n_source_files']:,} files", f"{s['raw_vcf_gb']:,.1f} GB"),
+    ("OpenGWASDB Dense store", "single store", f"**{s['store_gb']:,.1f} GB**"),
+]
+print(md_table(["Form", "Files", "Size"], rows))
+print()
+print(f"**{s['compression_ratio']:.1f}× smaller** than the source VCFs "
+      f"({s['store_gb']:.1f} GB vs {s['raw_vcf_gb']:.0f} GB) — one queryable store "
+      f"replacing {s['n_source_files']:,} files. The store keeps float16 `z` + `se`, a "
+      f"tabix variant axis, an mmap'd ALID index, and a top-hit index.")
+```
+
+---
+
+## Build
+
+```{python}
+#| echo: false
+#| output: asis
+b = data["build"]
+if b.get("build_hours"):
+    rows = [
+        ("Build time", f"{b['build_hours']:.1f} h ({b['build_seconds']:,.0f} s)"),
+        ("Peak memory", "≈43 GB (band-streamed; see issue 043)"),
+        ("Pipeline", "serial union+liftover → parallel fill (spill) → band-write zarr"),
+    ]
+    print(md_table(["Property", "Value"], rows))
+else:
+    print("_Build timing not available from the build log._")
+```
+
+---
+
+## Query performance
+
+Median of repeated calls after one warm-up, on the full genome-wide store.
+
+```{python}
+#| echo: false
+#| output: asis
+DESC = {
+    "bulk": "One analysis, all variants (`analysis`)",
+    "phewas": "One variant × all 2,514 analyses (`phewas`)",
+    "regional": "All associations in a 1 Mb window (`range_phewas`)",
+    "tophits": "Genome-wide significant index read (`top_hits`, p<5e-8)",
+    "random_lookup": "100 variants × 10 analyses (`lookup`)",
+}
+rows = []
+for t in data["timings"]:
+    rows.append((
+        t["query"], fmt_ms(t["median_ms"]), fmt_ms(t["p95_ms"]),
+        f"{t['result_count']:,}", DESC.get(t["query"], ""),
+    ))
+print(md_table(["Pattern", "Median", "p95", "Result cells", "What it reads"], rows))
+```
+
+Point and index queries (`phewas`, `top_hits`, `lookup`) stay in the low-millisecond
+range even across 2,514 analyses; `bulk` and `regional` scale with the number of
+cells returned. The `top_hits` read is served entirely by the precomputed index.
+
+---
+
+## MR validation: high cholesterol → heart attack
+
+An end-to-end **inverse-variance weighted (IVW) Mendelian randomization** run
+straight off the store, as a scientific smoke test. Instruments and both effect
+sets are pulled with ordinary store queries.
+
+```{python}
+#| echo: false
+#| output: asis
+mr = data["mr"]
+lab = data["labels"]
+print(f"- **Exposure** (`{mr['exposure_id']}`): {lab[mr['exposure_id']]}")
+print(f"- **Outcome** (`{mr['outcome_id']}`): {lab[mr['outcome_id']]}")
+print(f"- **Instruments**: genome-wide significant (p<5e-8) exposure variants, "
+      f"distance-pruned at {mr['clump_kb']} kb → **{mr['n_instruments']}** "
+      f"independent instruments (from {mr['n_instruments_raw']:,} raw hits).")
+print()
+print("Effects are already on the same allele (the store orients every analysis to "
+      "the canonical ALID), so no harmonisation step is needed. Both traits are "
+      "binary, so effects are log odds ratios.")
+```
+
+```{python}
+#| echo: false
+#| output: asis
+mr = data["mr"]
+rows = [
+    ("IVW estimate (log OR / log-OR exposure)", f"{mr['ivw_beta']:.3f}"),
+    ("Standard error", f"{mr['ivw_se']:.3f}"),
+    ("Z", f"{mr['ivw_z']:.2f}"),
+    ("P-value", f"{mr['ivw_pval']:.2e}"),
+]
+print(md_table(["Quantity", "Value"], rows))
+print()
+direction = "positive" if mr["ivw_beta"] > 0 else "negative"
+print(f"The estimate is **{direction}** — genetically higher cholesterol liability "
+      f"is associated with higher heart-attack risk, the expected direction for this "
+      f"positive control.")
+```
+
+```{python}
+#| echo: false
+#| fig-cap: "Per-instrument effects: exposure (x) vs outcome (y), with 95% CIs and the IVW slope."
+import numpy as np
+import matplotlib.pyplot as plt
+
+mr = data["mr"]
+inst = mr["instruments"]
+be = np.array([i["beta_exp"] for i in inst])
+bo = np.array([i["beta_out"] for i in inst])
+see = np.array([i["se_exp"] for i in inst])
+seo = np.array([i["se_out"] for i in inst])
+
+fig, ax = plt.subplots(figsize=(6.4, 5.2))
+ax.errorbar(be, bo, xerr=1.96 * see, yerr=1.96 * seo, fmt="o", ms=4,
+            color="#2a78d6", ecolor="#b7d3f6", elinewidth=0.8, capsize=0, alpha=0.9,
+            label="instruments (95% CI)")
+xs = np.array([be.min() * 1.1, be.max() * 1.1])
+ax.plot(xs, mr["ivw_beta"] * xs, "-", color="#eb6834", lw=2,
+        label=f"IVW slope = {mr['ivw_beta']:.2f}")
+ax.axhline(0, color="#c3c2b7", lw=0.8); ax.axvline(0, color="#c3c2b7", lw=0.8)
+ax.set_xlabel("SNP effect on high cholesterol (log OR)")
+ax.set_ylabel("SNP effect on heart attack (log OR)")
+ax.set_title("MR IVW: high cholesterol → heart attack")
+ax.legend(frameon=False, fontsize=9)
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## Provenance
+
+```{python}
+#| echo: false
+#| output: asis
+print("- Data: `opengwasdb_ukbb_dense_benchmark.json` "
+      "(from `benchmarks/benchmark_ukbb_dense.py`)")
+print(f"- Store: `/local-scratch/data/opengwas/opengwasdb/ukb-b.opengwasdb` "
+      f"({data['dataset']['n_variants']:,} × {data['dataset']['n_analyses']:,})")
+print("- MR is a demonstration/validation of the query layer, not a definitive "
+      "epidemiological estimate (self-reported binary exposure, distance-based "
+      "pruning in place of LD clumping).")
+```
