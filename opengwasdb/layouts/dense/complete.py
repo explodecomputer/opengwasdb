@@ -25,10 +25,12 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import zarr
 from numcodecs import Blosc
+from threadpoolctl import threadpool_limits
 
 from opengwasdb.completion.impute import impute_z_block, scalar_n_se
 from opengwasdb.completion.ld_panel import (
@@ -60,7 +62,12 @@ log = logging.getLogger(__name__)
 
 _COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 _LD_PANEL_ID = "eur-hg38-gpm"
-_COMPLETION_METHOD = "elastic_net_eigenvectors_v1"
+_COMPLETION_METHOD = "elastic_net_eigenvectors_v2_regioncap"
+
+# Region-based imputation z-cap (QC): an imputed |z| may not exceed the largest
+# observed |z| within +/- this many bp of it (same chromosome / LD block). Caps
+# spurious large imputed z-scores from LD extrapolation. See pleiodb.
+REGION_CAP_BP = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,39 @@ class CompletionResult:
 
 def _bare_alid(snp_id: str) -> str:
     return snp_id[3:] if snp_id.startswith("chr") else snp_id
+
+
+def _canonical_panel_alid(snp_id: str) -> str | None:
+    """Normalise an LD-panel SNP id to a canonical store ALID (``chr:pos:a1:a2``).
+
+    Handles both the panel's ``[chr]CHR:POS_REF_ALT`` form (underscores) and an
+    already-colon-delimited ``CHR:POS:A1:A2`` form, orienting alleles to the
+    canonical A1 = min(ref, alt). Returns None for ids that don't parse.
+    """
+    s = _bare_alid(snp_id)
+    parts = s.split(":")
+    if len(parts) == 4:
+        chrom, pos_s, ref, alt = parts
+    elif len(parts) == 2 and parts[1].count("_") == 2:
+        chrom, rest = parts
+        pos_s, ref, alt = rest.split("_")
+    else:
+        return None
+    try:
+        return orient_to_canonical(chrom, int(pos_s), ref, alt).variant.alid
+    except (VariantNormalisationError, ValueError):
+        return None
+
+
+def _snp_position(snp_id: str) -> int:
+    """Extract the base-pair position from a panel SNP id (either format).
+    Returns -1 if it cannot be parsed."""
+    parts = _bare_alid(snp_id).split(":")
+    field = parts[1] if len(parts) >= 2 else parts[0]
+    try:
+        return int(field.split("_")[0])
+    except ValueError:
+        return -1
 
 
 def _sanitize_block_id(block_id: str) -> str:
@@ -153,6 +193,45 @@ def _load_checkpoint(path: Path) -> BlockCompletionResult:
     return BlockCompletionResult(block_id=block_id, quality_rows=quality_rows, fills=fills)
 
 
+# Kept alive for the worker's lifetime so the BLAS thread cap persists (a bare
+# threadpool_limits() call would reset on garbage collection).
+_worker_thread_limiter: Any = None
+
+
+def _init_block_worker() -> None:
+    """Cap each pool worker's BLAS (OpenBLAS/MKL) to one thread. numpy's linear
+    algebra and sklearn otherwise spawn one thread per core *inside every worker*,
+    so n_workers processes each with ~n_core threads massively oversubscribe the
+    CPU (~1000 threads on 256 cores). One BLAS thread per worker gives clean
+    process-level parallelism — scale with n_workers, not threads."""
+    global _worker_thread_limiter
+    _worker_thread_limiter = threadpool_limits(limits=1)
+
+
+def _region_capped_z(
+    zv: float,
+    pos: int,
+    obs_pos_sorted: np.ndarray,
+    obs_absz_sorted: np.ndarray,
+    window_bp: int = REGION_CAP_BP,
+) -> float:
+    """Clamp an imputed z-score so its magnitude does not exceed the largest
+    observed |z| within +/- ``window_bp`` of ``pos`` (QC, per pleiodb). Returns
+    ``zv`` unchanged when there is no observed variant in the window.
+
+    ``obs_pos_sorted`` must be ascending, with ``obs_absz_sorted`` the matching
+    |z| of the observed variants.
+    """
+    lo = int(np.searchsorted(obs_pos_sorted, pos - window_bp, side="left"))
+    hi = int(np.searchsorted(obs_pos_sorted, pos + window_bp, side="right"))
+    if hi <= lo:
+        return zv
+    z_region_max = float(obs_absz_sorted[lo:hi].max())
+    if abs(zv) <= z_region_max:
+        return zv
+    return z_region_max if zv >= 0 else -z_region_max
+
+
 def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
     """Complete one LD block for every Analysis. Runs inside a worker process.
 
@@ -171,7 +250,10 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
         _write_checkpoint(task.checkpoint_path, result)
         return result
 
-    bare_alids = [_bare_alid(s) for s in block.snp_ids]
+    # Canonical ALID per block variant (None if it doesn't parse); the LD
+    # eigenvectors are indexed by block position, so every block SNP keeps its
+    # slot even when unmatched.
+    canonical_alids = [_canonical_panel_alid(s) for s in block.snp_ids]
 
     src_axis = VariantAxis(task.source_path)
     try:
@@ -179,16 +261,16 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
         n_analyses = int(src_root["z"].shape[1])
 
         src_rows: list[int | None] = []
-        for alid in bare_alids:
-            parsed = parse_canonical_alid(alid)
+        for alid in canonical_alids:
+            parsed = parse_canonical_alid(alid) if alid is not None else None
             rec = src_axis.by_alid(parsed) if parsed is not None else None
             src_rows.append(rec.variant_index if rec is not None else None)
 
         matched_local = [i for i, r in enumerate(src_rows) if r is not None]
         matched_src = [src_rows[i] for i in matched_local]
 
-        z_obs = np.full((len(bare_alids), n_analyses), np.nan, dtype=np.float64)
-        se_obs = np.full((len(bare_alids), n_analyses), np.nan, dtype=np.float64)
+        z_obs = np.full((len(canonical_alids), n_analyses), np.nan, dtype=np.float64)
+        se_obs = np.full((len(canonical_alids), n_analyses), np.nan, dtype=np.float64)
         if matched_local:
             z_obs[matched_local, :] = src_root["z"].oindex[matched_src, :].astype(np.float64)
             se_obs[matched_local, :] = src_root["se"].oindex[matched_src, :].astype(np.float64)
@@ -196,6 +278,9 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
         src_axis.close()
 
     eaf = block.eaf
+    # Base-pair position per block variant (all same chromosome within a block),
+    # for the region-based imputation z-cap below.
+    positions = np.array([_snp_position(s) for s in block.snp_ids], dtype=np.int64)
     quality_rows: list[tuple[int, float | None, int, int]] = []
     fills: list[tuple[str, int, float, float]] = []
 
@@ -215,13 +300,25 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
         obs_mask = np.isfinite(z_dense)
         se_all = scalar_n_se(se_obs[obs_mask, ai], eaf[obs_mask], eaf)
 
+        # Region z-cap (QC, per pleiodb): an imputed |z| must not exceed the
+        # largest observed |z| among variants within +/- REGION_CAP_BP of it —
+        # imputation can extrapolate spurious large z-scores. Observed positions
+        # are sorted once so each missing variant's window is a searchsorted range.
+        obs_idx = np.where(obs_mask)[0]
+        o_order = np.argsort(positions[obs_idx])
+        obs_pos_s = positions[obs_idx][o_order]
+        obs_absz_s = np.abs(z_dense[obs_idx])[o_order]
+
         missing_mask = ~obs_mask
         n_filled = 0
         for i in np.where(missing_mask)[0]:
+            alid = canonical_alids[i]
             zv, sev = z_imp_arr[i], se_all[i]
-            if np.isfinite(zv) and np.isfinite(sev):
-                fills.append((bare_alids[i], ai, float(zv), float(sev)))
-                n_filled += 1
+            if alid is None or not (np.isfinite(zv) and np.isfinite(sev)):
+                continue
+            zv = _region_capped_z(float(zv), int(positions[i]), obs_pos_s, obs_absz_s)
+            fills.append((alid, ai, zv, float(sev)))
+            n_filled += 1
 
         quality_rows.append((ai, float(corr), n_filled, n_miss_block - n_filled))
 
@@ -379,7 +476,9 @@ def _run_completion(
             for block in list_all_blocks(ld_dir, ancestry, chrom):
                 tsv_paths.append(block.tsv_path)
                 for snp_id in block.snp_ids:
-                    panel_alids.add(_bare_alid(snp_id))
+                    ca = _canonical_panel_alid(snp_id)
+                    if ca is not None:
+                        panel_alids.add(ca)
         print(f"LD panel: {len(tsv_paths):,} blocks, {len(panel_alids):,} panel variants")
 
         new_canonical: list[CanonicalVariant] = []
@@ -426,23 +525,13 @@ def _run_completion(
         print("Writing variants.tsv.gz...")
         write_variant_axis(work, merged_variants, rsid_by_alid)
 
-        print("Seeding z/se from source...")
+        # Inverse map output_row -> source variant_index (-1 for panel-only rows).
+        # z/se are seeded from the source band-by-band during the write (issue 044),
+        # so the full source matrix is never loaded.
         src_root = zarr.open_group(str(src / "data.zarr"), mode="r")
-        src_z = src_root["z"][:].astype(np.float32)
-        src_se = src_root["se"][:].astype(np.float32)
-
-        z = np.full((n_variants, n_analyses), np.nan, dtype=np.float32)
-        se = np.full((n_variants, n_analyses), np.nan, dtype=np.float32)
+        out_to_src = np.full(n_variants, -1, dtype=np.int64)
         for v in src_variants:
-            new_row = new_alid_to_idx[v.alid]
-            z[new_row, :] = src_z[v.variant_index, :]
-            se[new_row, :] = src_se[v.variant_index, :]
-
-        off_panel_mask = ~on_panel
-        if off_panel_mask.any():
-            n_missing_off_panel = np.isnan(z[off_panel_mask, :]).sum(axis=0).astype(np.int64)
-        else:
-            n_missing_off_panel = np.zeros(n_analyses, dtype=np.int64)
+            out_to_src[new_alid_to_idx[v.alid]] = v.variant_index
 
         print("Writing index.sqlite...")
         with connect(work / "index.sqlite") as dst_db:
@@ -465,23 +554,9 @@ def _run_completion(
             set_metadata(dst_db, "schema_version", 2)
             set_metadata(dst_db, "n_variants", n_variants)
             set_metadata(dst_db, "n_analyses", n_analyses)
-            dst_db.executemany(
-                """
-                INSERT INTO analyses (
-                    analysis_index, analysis_id, phenotype_id, phenotype_label,
-                    analysis_label, stored_effect_scale, n_missing_off_panel
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        int(row["analysis_index"]), row["analysis_id"], row["phenotype_id"],
-                        row["phenotype_label"], row["analysis_label"], row["stored_effect_scale"],
-                        int(n_missing_off_panel[i]),
-                    )
-                    for i, row in enumerate(src_analyses)
-                ],
-            )
             dst_db.commit()
+            # analyses rows are inserted after the band write, once
+            # n_missing_off_panel is known (issue 044).
 
         # ── Phase 2: parallel LD-block completion ───────────────────────────
         print(f"Running reference completion across {len(tsv_paths):,} LD blocks "
@@ -513,7 +588,9 @@ def _run_completion(
                 if (i + 1) % 200 == 0:
                     print(f"  {i + 1:,} / {len(pending):,} blocks")
         else:
-            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            with ProcessPoolExecutor(
+                max_workers=n_workers, initializer=_init_block_worker
+            ) as pool:
                 futures = {pool.submit(_run_block, task): task for task in pending}
                 for i, fut in enumerate(as_completed(futures)):
                     r = fut.result()
@@ -522,11 +599,13 @@ def _run_completion(
                     if (i + 1) % 200 == 0:
                         print(f"  {i + 1:,} / {len(pending):,} blocks")
 
-        # ── Phase 3: merge, write, finalise ─────────────────────────────────
+        # ── Phase 3: collect fills, band-stream the write, finalise ─────────
         print("Merging block results...")
-        imputed = np.zeros((n_variants, n_analyses), dtype=np.uint8)
         quality_rows: list[tuple[int, str, float | None, int, int]] = []
-        total_imputed = 0
+        fr_l: list[int] = []
+        fai_l: list[int] = []
+        fz_l: list[float] = []
+        fse_l: list[float] = []
         for r in results:
             for ai, pearson, nimp, nmiss in r.quality_rows:
                 quality_rows.append((ai, r.block_id, pearson, nimp, nmiss))
@@ -534,13 +613,29 @@ def _run_completion(
                 new_idx = new_alid_to_idx.get(alid)
                 if new_idx is None:
                     continue
-                if not np.isfinite(z[new_idx, ai]):
-                    z[new_idx, ai] = zv
-                    se[new_idx, ai] = sev
-                    imputed[new_idx, ai] = 1
-                    total_imputed += 1
+                fr_l.append(new_idx)
+                fai_l.append(ai)
+                fz_l.append(zv)
+                fse_l.append(sev)
 
-        n_missing_imputation_failed = int(np.isnan(z[on_panel, :]).sum()) if on_panel.any() else 0
+        fill_row = np.array(fr_l, dtype=np.int64)
+        fill_ai = np.array(fai_l, dtype=np.int64)
+        fill_z = np.array(fz_l, dtype=np.float32)
+        fill_se = np.array(fse_l, dtype=np.float32)
+        order = np.argsort(fill_row, kind="stable")
+        fill_row, fill_ai, fill_z, fill_se = (
+            fill_row[order], fill_ai[order], fill_z[order], fill_se[order]
+        )
+
+        print("Writing data.zarr (band-streamed)...")
+        effective_chunks = _create_completed_zarr(
+            work, n_variants, n_analyses, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE
+        )
+        n_missing_off_panel, n_missing_imputation_failed, total_imputed = _write_completed_bands(
+            work, src_root, out_to_src, on_panel,
+            fill_row, fill_ai, fill_z, fill_se,
+            effective_chunks, n_variants, n_analyses,
+        )
         n_missing_off_panel_total = int(n_missing_off_panel.sum())
         print(
             f"Completion done: {total_imputed:,} imputed, "
@@ -548,8 +643,25 @@ def _run_completion(
             f"{n_missing_off_panel_total:,} off-panel missing"
         )
 
-        print("Writing data.zarr...")
-        _write_dense_zarr(work, z, se, imputed, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE)
+        print("Writing analyses table...")
+        with connect(work / "index.sqlite") as dst_db:
+            dst_db.executemany(
+                """
+                INSERT INTO analyses (
+                    analysis_index, analysis_id, phenotype_id, phenotype_label,
+                    analysis_label, stored_effect_scale, n_missing_off_panel
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        int(row["analysis_index"]), row["analysis_id"], row["phenotype_id"],
+                        row["phenotype_label"], row["analysis_label"], row["stored_effect_scale"],
+                        int(n_missing_off_panel[i]),
+                    )
+                    for i, row in enumerate(src_analyses)
+                ],
+            )
+            dst_db.commit()
 
         print(f"Writing {len(quality_rows):,} completion quality rows...")
         with connect(work / "index.sqlite") as dst_db:
@@ -620,25 +732,32 @@ def _run_completion(
         raise
 
 
-def _write_dense_zarr(
+# Row-band height for streaming the completed matrix — the seed/fill/write pass
+# never holds the full (n_variants × n_analyses) matrices in RAM (issue 044).
+_BAND_ROWS = 250_000
+
+
+def _create_completed_zarr(
     output_path: Path,
-    z: np.ndarray,
-    se: np.ndarray,
-    imputed: np.ndarray,
+    n_variants: int,
+    n_analyses: int,
     on_panel: np.ndarray,
     chunk_shape: tuple[int, int],
     dtype: str,
-) -> None:
-    effective_chunks = (min(chunk_shape[0], z.shape[0]), min(chunk_shape[1], z.shape[1]))
+) -> tuple[int, int]:
+    """Create empty z/se (NaN), imputed (0), and the 1-D on_panel datasets. The
+    matrices are filled by ``_write_completed_bands``; on_panel is small enough to
+    write in one shot."""
+    effective_chunks = (min(chunk_shape[0], n_variants), min(chunk_shape[1], n_analyses))
     root = zarr.open_group(str(output_path / "data.zarr"), mode="w")
+    for name in ("z", "se"):
+        root.create_dataset(
+            name, shape=(n_variants, n_analyses), chunks=effective_chunks,
+            compressor=_COMPRESSOR, dtype=dtype, fill_value=float("nan"),
+        )
     root.create_dataset(
-        "z", data=z.astype(dtype), chunks=effective_chunks, compressor=_COMPRESSOR, dtype=dtype
-    )
-    root.create_dataset(
-        "se", data=se.astype(dtype), chunks=effective_chunks, compressor=_COMPRESSOR, dtype=dtype
-    )
-    root.create_dataset(
-        "imputed", data=imputed, chunks=effective_chunks, compressor=_COMPRESSOR, dtype="uint8"
+        "imputed", shape=(n_variants, n_analyses), chunks=effective_chunks,
+        compressor=_COMPRESSOR, dtype="uint8", fill_value=0,
     )
     root.create_dataset(
         "on_panel", data=on_panel.astype(np.uint8),
@@ -648,3 +767,75 @@ def _write_dense_zarr(
     root.attrs["completion_state"] = "reference_completed"
     root.attrs["compressor"] = DEFAULT_COMPRESSOR
     root.attrs["chunk_shape"] = list(effective_chunks)
+    return effective_chunks
+
+
+def _write_completed_bands(
+    output_path: Path,
+    src_root: Any,
+    out_to_src: np.ndarray,
+    on_panel: np.ndarray,
+    fill_row: np.ndarray,
+    fill_ai: np.ndarray,
+    fill_z: np.ndarray,
+    fill_se: np.ndarray,
+    effective_chunks: tuple[int, int],
+    n_variants: int,
+    n_analyses: int,
+) -> tuple[np.ndarray, int, int]:
+    """Seed z/se from the source, apply the imputed fills, and write z/se/imputed
+    to the zarr one row-band at a time. Peak memory is one band, never the full
+    matrix. Returns ``(n_missing_off_panel[n_analyses], n_missing_imputation_failed,
+    total_imputed)``. ``fill_*`` must be sorted by ``fill_row``.
+    """
+    root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
+    z_arr, se_arr, imp_arr = root["z"], root["se"], root["imputed"]
+    src_z, src_se = src_root["z"], src_root["se"]
+    band_rows = max(int(effective_chunks[0]), _BAND_ROWS)
+
+    n_missing_off_panel = np.zeros(n_analyses, dtype=np.int64)
+    n_missing_imputation_failed = 0
+    total_imputed = 0
+    for r0 in range(0, n_variants, band_rows):
+        r1 = min(r0 + band_rows, n_variants)
+        br = r1 - r0
+        z_band = np.full((br, n_analyses), np.nan, dtype=np.float32)
+        se_band = np.full((br, n_analyses), np.nan, dtype=np.float32)
+        imp_band = np.zeros((br, n_analyses), dtype=np.uint8)
+
+        # Seed observed values: source variants that map into this output band.
+        valid = np.where(out_to_src[r0:r1] >= 0)[0]
+        if len(valid):
+            srows = out_to_src[r0:r1][valid]
+            z_band[valid, :] = src_z.oindex[srows, :].astype(np.float32)
+            se_band[valid, :] = src_se.oindex[srows, :].astype(np.float32)
+
+        # Off-panel rows are never imputable; count their per-analysis missingness.
+        off_local = np.where(on_panel[r0:r1] == 0)[0]
+        if len(off_local):
+            n_missing_off_panel += np.isnan(z_band[off_local, :]).sum(axis=0).astype(np.int64)
+
+        # Apply imputed fills for this band (only cells still missing after seeding).
+        lo = int(np.searchsorted(fill_row, r0, side="left"))
+        hi = int(np.searchsorted(fill_row, r1, side="left"))
+        if hi > lo:
+            lr = fill_row[lo:hi] - r0
+            ai = fill_ai[lo:hi]
+            fillable = ~np.isfinite(z_band[lr, ai])
+            if fillable.any():
+                lrm, aim = lr[fillable], ai[fillable]
+                z_band[lrm, aim] = fill_z[lo:hi][fillable]
+                se_band[lrm, aim] = fill_se[lo:hi][fillable]
+                imp_band[lrm, aim] = 1
+                total_imputed += int(fillable.sum())
+
+        # Imputation-failed: on-panel cells still missing after fills.
+        on_local = np.where(on_panel[r0:r1] == 1)[0]
+        if len(on_local):
+            n_missing_imputation_failed += int(np.isnan(z_band[on_local, :]).sum())
+
+        z_arr[r0:r1] = z_band
+        se_arr[r0:r1] = se_band
+        imp_arr[r0:r1] = imp_band
+
+    return n_missing_off_panel, n_missing_imputation_failed, total_imputed

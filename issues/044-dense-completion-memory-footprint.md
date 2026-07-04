@@ -32,17 +32,27 @@ Two compounding costs, both avoidable:
 
 ## What to change
 
-- [ ] **Band-stream the completion write** the same way as the VCF builder (see the
-      band-streaming design landed for issue 043): create the `z`/`se`/`imputed`/
-      `on_panel` zarr datasets empty with `fill_value`, and write them in
-      analysis-bands (or LD-block row-bands) so the full output matrix is never
-      resident.
-- [ ] **Avoid upcasting the entire source to float32.** Read source z/se per
-      block/row-range as needed rather than `src_root["z"][:].astype(float32)` over
-      the whole array; keep working precision local to each block.
-- [ ] Consider whether `src_z`/`src_se` need to be resident at all once the LD-block
-      workers read their own row slices directly from the source zarr (the workers
-      already open the source store).
+- [x] **Band-stream the completion write.** Done: `_create_completed_zarr` creates
+      empty `z`/`se`/`imputed`/`on_panel` (fill_value), and `_write_dense_bands`
+      seeds from the source, applies the sorted imputed fills, and writes
+      z/se/imputed one row-band at a time — the full matrix is never resident. The
+      analyses-table write (needs `n_missing_off_panel`) is reordered to after the
+      band pass.
+- [x] **Don't hold the source as float32.** Done: the full `src_z`/`src_se` load
+      is gone; each band reads only the source rows it needs
+      (`src_z.oindex[srows]`) via an `out_to_src` inverse map.
+
+Validated on chr1×100 (869,476 × 100, 34.6M imputed): parent peak ~8.6 GB (fills +
+block results), band write never holds the matrix; store validates. Two adjacent
+fixes landed with it: a region-based imputation z-cap (QC, per pleiodb) and
+canonicalisation of the real LD panel's `chr:pos_ref_alt` ALIDs (the completion
+otherwise matched nothing), plus a BLAS thread cap so the LD-block pool isn't
+oversubscribed (~50 min → ~2 min).
+
+## Follow-up (not blocking)
+- The accumulated `fills` (one entry per imputed cell) are Python tuples held in the
+  parent — ~O(n_imputed). At genome-wide analysis counts this could dominate; worth
+  spilling/streaming fills per block if a full ukb-b completion is attempted.
 
 ## Acceptance criteria
 
