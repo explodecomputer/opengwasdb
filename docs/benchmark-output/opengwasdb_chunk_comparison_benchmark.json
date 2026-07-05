@@ -1,0 +1,101 @@
+{
+  "dataset": {
+    "n_variants": 9847701,
+    "n_analyses": 2514,
+    "reference_assembly": "GRCh38"
+  },
+  "reps": 7,
+  "selection": {
+    "bulk_analysis_id": "ukb-b-10912",
+    "phewas_alid": "19:44908822:C:T",
+    "region": {
+      "chrom": "19",
+      "start": 44500000,
+      "end": 45500000
+    }
+  },
+  "configs": [
+    {
+      "name": "1000x1000",
+      "store": "/local-scratch/data/opengwas/opengwasdb/ukb-b.opengwasdb",
+      "chunks": [
+        1000,
+        1000
+      ],
+      "store_gb": 58.05,
+      "timings": [
+        {
+          "query": "bulk",
+          "median_ms": 31189.113,
+          "p95_ms": 33651.522,
+          "result_count": 8419893
+        },
+        {
+          "query": "phewas",
+          "median_ms": 8.701,
+          "p95_ms": 9.886,
+          "result_count": 1344
+        },
+        {
+          "query": "regional",
+          "median_ms": 799.701,
+          "p95_ms": 1198.835,
+          "result_count": 5231847
+        },
+        {
+          "query": "tophits",
+          "median_ms": 663.142,
+          "p95_ms": 741.966,
+          "result_count": 5493678
+        },
+        {
+          "query": "random_lookup",
+          "median_ms": 825.236,
+          "p95_ms": 945.421,
+          "result_count": 566
+        }
+      ]
+    },
+    {
+      "name": "1000x128",
+      "store": "/local-scratch/data/opengwas/opengwasdb/ukb-b-c128.opengwasdb",
+      "chunks": [
+        1000,
+        128
+      ],
+      "store_gb": 54.87,
+      "timings": [
+        {
+          "query": "bulk",
+          "median_ms": 9271.513,
+          "p95_ms": 9687.382,
+          "result_count": 8419893
+        },
+        {
+          "query": "phewas",
+          "median_ms": 17.981,
+          "p95_ms": 22.729,
+          "result_count": 1344
+        },
+        {
+          "query": "regional",
+          "median_ms": 829.452,
+          "p95_ms": 929.818,
+          "result_count": 5231847
+        },
+        {
+          "query": "tophits",
+          "median_ms": 681.158,
+          "p95_ms": 828.722,
+          "result_count": 5493678
+        },
+        {
+          "query": "random_lookup",
+          "median_ms": 1981.235,
+          "p95_ms": 2034.341,
+          "result_count": 566
+        }
+      ]
+    }
+  ]
+}

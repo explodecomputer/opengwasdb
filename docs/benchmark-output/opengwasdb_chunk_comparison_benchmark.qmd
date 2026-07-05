@@ -149,17 +149,23 @@ print("Chunk shape changes how the same float16 `z`/`se` are grouped on disk, so
 #| echo: false
 #| output: asis
 tb, tn = timings(BASE), timings(NEW)
-bulk_speedup = tb["bulk"]["median_ms"] / tn["bulk"]["median_ms"]
-phewas_ratio = tn["phewas"]["median_ms"] / tb["phewas"]["median_ms"]
-print(f"- **`bulk` (per-analysis) is {bulk_speedup:.1f}× faster** at 1000×128 — the "
-      f"chunk-bound read that dominated the square layout.")
-print(f"- **`phewas` (per-variant)** changes by {phewas_ratio:.1f}× — the expected "
-      f"cost of spanning more analysis-chunks, but it stays in the millisecond range.")
-print("- `regional`, `tophits`, and `lookup` are largely chunk-insensitive.")
+def ratio(q):  # >1 means 1000x128 is faster
+    return tb[q]["median_ms"] / tn[q]["median_ms"]
+bulk_abs = (tb["bulk"]["median_ms"] - tn["bulk"]["median_ms"]) / 1000
+print(f"- **`bulk` (per-analysis) is {ratio('bulk'):.1f}× faster** at 1000×128 "
+      f"({tb['bulk']['median_ms']/1000:.1f} s → {tn['bulk']['median_ms']/1000:.1f} s, "
+      f"−{bulk_abs:.0f} s) — the chunk-bound read that dominated the square layout.")
+print(f"- **`phewas` and `random_lookup` are slower** ({1/ratio('phewas'):.1f}× and "
+      f"{1/ratio('random_lookup'):.1f}×): both gather variant rows across more, narrower "
+      f"analysis-chunks. `phewas` stays in the millisecond range; `random_lookup` pays "
+      f"~{(tn['random_lookup']['median_ms']-tb['random_lookup']['median_ms'])/1000:.1f} s.")
+print("- `regional` and `tophits` are chunk-insensitive (variant-range scan and "
+      "index-served read).")
 print()
-print("A narrow analysis chunk is the right default when per-analysis reads matter "
-      "(bulk export, per-GWAS scans); the square chunk only wins if per-variant "
-      "PheWAS latency is the priority.")
+print("The trade is a large absolute win on the per-analysis read against a "
+      "sub-second-to-second cost on per-variant point reads. 1000×128 is the right "
+      "default when bulk / per-GWAS export dominates; keep the square chunk if random "
+      "point-lookups and PheWAS latency are the priority.")
 ```
 
 ---
