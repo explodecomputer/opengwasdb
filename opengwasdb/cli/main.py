@@ -13,6 +13,7 @@ from opengwasdb.layouts.dense.complete import (
     complete_dense_store,
     resume_dense_completion,
 )
+from opengwasdb.layouts.dense.constants import DEFAULT_CHUNK_SHAPE
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
@@ -96,11 +97,21 @@ def build_dense_vcf_command(
     release_id: str = typer.Option(...),
     overwrite: bool = typer.Option(False),
     n_workers: int = typer.Option(1, help="Fork-based process pool size for Pass 1 and Pass 2"),
+    chunk_variants: int = typer.Option(
+        DEFAULT_CHUNK_SHAPE[0], help="Zarr chunk size along the variant axis"
+    ),
+    chunk_analyses: int = typer.Option(
+        DEFAULT_CHUNK_SHAPE[1], help="Zarr chunk size along the analysis (trait) axis"
+    ),
 ) -> None:
     """Build a Dense Observed-Only store from a manifest of GWAS-VCF files.
 
     MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n.
     VCF files must be in GRCh37/hg19 coordinates; liftover to hg38 is applied inline.
+
+    The zarr chunk shape (default 1000x1000) can be tuned with --chunk-variants /
+    --chunk-analyses; a narrower analysis chunk speeds up per-analysis (bulk) reads
+    at the cost of larger per-variant (phewas) reads.
     """
 
     result = build_dense_from_vcf_manifest(
@@ -110,6 +121,7 @@ def build_dense_vcf_command(
         release_id=release_id,
         overwrite=overwrite,
         n_workers=n_workers,
+        chunk_shape=(chunk_variants, chunk_analyses),
     )
     typer.echo(
         json.dumps(
