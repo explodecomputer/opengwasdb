@@ -194,8 +194,11 @@ class StoreQuery:
             return _empty_result()
         row_indices = [v.variant_index for v in variants]
         col_indices = [int(a["analysis_index"]) for a in analyses]
-        z_block = self._root["z"].oindex[row_indices, :][:, col_indices].astype("float32")
-        se_block = self._root["se"].oindex[row_indices, :][:, col_indices].astype("float32")
+        # Surgical orthogonal read: fetch only the chunks intersecting the
+        # requested rows × cols, not the full analysis width per row. Under a
+        # narrow analysis chunk this reads far fewer chunks (issue 052).
+        z_block = self._root["z"].oindex[row_indices, col_indices].astype("float32")
+        se_block = self._root["se"].oindex[row_indices, col_indices].astype("float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols_rel = np.where(mask)
         rows = np.array([row_indices[r] for r in rows_rel], dtype="int32")
@@ -235,16 +238,11 @@ class StoreQuery:
         if "se" in group:
             se_values = group["se"][:].astype("float32")
         else:
-            unique_rows = np.unique(variant_indices).astype("int64")
-            row_offsets = {int(r): i for i, r in enumerate(unique_rows)}
-            se_block = self._root["se"].oindex[unique_rows, :]
-            se_values = np.array(
-                [
-                    float(se_block[row_offsets[int(r)], int(c)])
-                    for r, c in zip(variant_indices, analysis_indices, strict=True)
-                ],
-                dtype="float32",
-            )
+            # Pointwise (coordinate) read: fetch se at exactly the index cells,
+            # not the full analysis width per row (issue 052).
+            se_values = self._root["se"].vindex[
+                variant_indices.astype("int64"), analysis_indices.astype("int64")
+            ].astype("float32")
         imp = self._imputed_pairs(variant_indices, analysis_indices)
         if observed_only:
             keep = imp == 0

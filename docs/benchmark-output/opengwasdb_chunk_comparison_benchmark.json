@@ -26,32 +26,32 @@
       "timings": [
         {
           "query": "bulk",
-          "median_ms": 31189.113,
-          "p95_ms": 33651.522,
+          "median_ms": 38759.901,
+          "p95_ms": 40569.651,
           "result_count": 8419893
         },
         {
           "query": "phewas",
-          "median_ms": 8.701,
-          "p95_ms": 9.886,
+          "median_ms": 7.921,
+          "p95_ms": 9.234,
           "result_count": 1344
         },
         {
           "query": "regional",
-          "median_ms": 799.701,
-          "p95_ms": 1198.835,
+          "median_ms": 849.646,
+          "p95_ms": 994.708,
           "result_count": 5231847
         },
         {
           "query": "tophits",
-          "median_ms": 663.142,
-          "p95_ms": 741.966,
+          "median_ms": 745.878,
+          "p95_ms": 931.858,
           "result_count": 5493678
         },
         {
           "query": "random_lookup",
-          "median_ms": 825.236,
-          "p95_ms": 945.421,
+          "median_ms": 913.784,
+          "p95_ms": 1066.885,
           "result_count": 566
         }
       ]
@@ -67,32 +67,32 @@
       "timings": [
         {
           "query": "bulk",
-          "median_ms": 9271.513,
-          "p95_ms": 9687.382,
+          "median_ms": 9962.254,
+          "p95_ms": 10466.512,
           "result_count": 8419893
         },
         {
           "query": "phewas",
-          "median_ms": 17.981,
-          "p95_ms": 22.729,
+          "median_ms": 17.922,
+          "p95_ms": 21.693,
           "result_count": 1344
         },
         {
           "query": "regional",
-          "median_ms": 829.452,
-          "p95_ms": 929.818,
+          "median_ms": 920.525,
+          "p95_ms": 1124.454,
           "result_count": 5231847
         },
         {
           "query": "tophits",
-          "median_ms": 681.158,
-          "p95_ms": 828.722,
+          "median_ms": 737.365,
+          "p95_ms": 843.095,
           "result_count": 5493678
         },
         {
           "query": "random_lookup",
-          "median_ms": 1981.235,
-          "p95_ms": 2034.341,
+          "median_ms": 935.568,
+          "p95_ms": 1001.773,
           "result_count": 566
         }
       ]
