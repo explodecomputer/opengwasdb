@@ -1,0 +1,176 @@
+---
+title: "OpenGWASDB ukb-b Dense Store — Chunk-Shape Query Benchmark"
+subtitle: "1000×1000 vs 1000×128 · genome-wide · 2,514 UK Biobank analyses × ~9.85M variants"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import json
+from pathlib import Path
+
+data = json.loads((Path(".") / "opengwasdb_chunk_comparison_benchmark.json").read_text())
+configs = {c["name"]: c for c in data["configs"]}
+BASE, NEW = "1000x1000", "1000x128"
+
+def md_table(headers, rows):
+    sep = "|" + "|".join(["---"] * len(headers)) + "|"
+    head = "| " + " | ".join(headers) + " |"
+    body = "\n".join("| " + " | ".join(str(c) for c in r) + " |" for r in rows)
+    return f"{head}\n{sep}\n{body}"
+
+def fmt_ms(v):
+    return f"{v:,.1f} ms" if v < 1000 else f"{v/1000:,.2f} s"
+
+def timings(name):
+    return {t["query"]: t for t in configs[name]["timings"]}
+```
+
+## Overview
+
+Both stores hold the **same** genome-wide ukb-b data — 2,514 UK Biobank GWAS ×
+~9.85M variants — and differ only in the zarr **chunk shape**. The baseline uses
+square `1000×1000` chunks; the variant keeps the 1,000-variant rows but narrows
+the analysis axis to **128**. An identical query selection (the same ALIDs,
+analysis ids, and region) is run against each store.
+
+The point of interest is the **per-analysis (`bulk`) read**. With a
+1,000-analysis-wide chunk, reading one analysis column drags in 999 neighbours
+per chunk; a 128-wide chunk cuts that waste ~8×. The per-variant (`phewas`) read
+moves the other way — it now spans more analysis-chunks — so this is a trade, and
+the table shows both sides.
+
+```{python}
+#| echo: false
+#| output: asis
+d = data["dataset"]
+rows = [
+    ("Analyses (GWAS)", f"{d['n_analyses']:,}"),
+    ("Variants (hg38)", f"{d['n_variants']:,}"),
+    ("Repetitions (median of)", data["reps"]),
+    ("Baseline chunks", "×".join(map(str, configs[BASE]["chunks"]))),
+    ("Variant chunks", "×".join(map(str, configs[NEW]["chunks"]))),
+]
+print(md_table(["Property", "Value"], rows))
+```
+
+---
+
+## Query latency: 1000×1000 vs 1000×128
+
+```{python}
+#| echo: false
+#| output: asis
+DESC = {
+    "bulk": "One analysis, all variants (`analysis`)",
+    "phewas": "One variant × all analyses (`phewas`)",
+    "regional": "All associations in a 1 Mb window (`range_phewas`)",
+    "tophits": "Genome-wide significant index read (`top_hits`)",
+    "random_lookup": "100 variants × 10 analyses (`lookup`)",
+}
+tb, tn = timings(BASE), timings(NEW)
+rows = []
+for q in DESC:
+    b, n = tb[q]["median_ms"], tn[q]["median_ms"]
+    speedup = b / n if n else float("nan")
+    tag = f"**{speedup:.1f}× faster**" if speedup >= 1.05 else (
+        f"{1/speedup:.1f}× slower" if speedup <= 0.95 else "≈ same")
+    rows.append((DESC[q], fmt_ms(b), fmt_ms(n), tag))
+print(md_table(["Query", "1000×1000", "1000×128", "Change (128 vs 1000)"], rows))
+```
+
+```{python}
+#| echo: false
+#| fig-cap: "Median query latency by pattern (log scale). Lower is better."
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
+order = ["bulk", "phewas", "regional", "tophits", "random_lookup"]
+labels = ["bulk", "phewas", "regional", "tophits", "lookup"]
+tb, tn = timings(BASE), timings(NEW)
+base = np.array([tb[q]["median_ms"] for q in order])
+new = np.array([tn[q]["median_ms"] for q in order])
+
+C_BASE, C_NEW = "#2a78d6", "#eb6834"
+x = np.arange(len(order)); w = 0.38
+fig, ax = plt.subplots(figsize=(8.2, 4.6))
+b1 = ax.bar(x - w/2, base, w, label="1000×1000", color=C_BASE)
+b2 = ax.bar(x + w/2, new, w, label="1000×128", color=C_NEW)
+ax.set_yscale("log")
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(
+    lambda v, _: (f"{v:g} ms" if v < 1000 else f"{v/1000:g} s")))
+ax.set_ylabel("median latency (log scale)")
+ax.set_xticks(x); ax.set_xticklabels(labels)
+ax.grid(axis="y", color="#e3e2da", lw=0.7, which="major")
+ax.set_axisbelow(True)
+for spine in ("top", "right"):
+    ax.spines[spine].set_visible(False)
+for bars, vals in ((b1, base), (b2, new)):
+    for rect, v in zip(bars, vals, strict=True):
+        txt = f"{v:.0f} ms" if v < 1000 else f"{v/1000:.1f} s"
+        ax.annotate(txt, (rect.get_x() + rect.get_width()/2, v), ha="center",
+                    va="bottom", fontsize=8, color="#555")
+ax.legend(frameon=False, ncol=2, loc="upper right")
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## Storage
+
+```{python}
+#| echo: false
+#| output: asis
+rows = [
+    ("1000×1000", f"{configs[BASE]['store_gb']:,.1f} GB"),
+    ("1000×128", f"{configs[NEW]['store_gb']:,.1f} GB"),
+]
+print(md_table(["Chunk shape", "Store size"], rows))
+print()
+print("Chunk shape changes how the same float16 `z`/`se` are grouped on disk, so "
+      "compressed size shifts only modestly; the point of the narrower analysis "
+      "chunk is read amplification on per-analysis queries, not storage.")
+```
+
+---
+
+## Takeaway
+
+```{python}
+#| echo: false
+#| output: asis
+tb, tn = timings(BASE), timings(NEW)
+bulk_speedup = tb["bulk"]["median_ms"] / tn["bulk"]["median_ms"]
+phewas_ratio = tn["phewas"]["median_ms"] / tb["phewas"]["median_ms"]
+print(f"- **`bulk` (per-analysis) is {bulk_speedup:.1f}× faster** at 1000×128 — the "
+      f"chunk-bound read that dominated the square layout.")
+print(f"- **`phewas` (per-variant)** changes by {phewas_ratio:.1f}× — the expected "
+      f"cost of spanning more analysis-chunks, but it stays in the millisecond range.")
+print("- `regional`, `tophits`, and `lookup` are largely chunk-insensitive.")
+print()
+print("A narrow analysis chunk is the right default when per-analysis reads matter "
+      "(bulk export, per-GWAS scans); the square chunk only wins if per-variant "
+      "PheWAS latency is the priority.")
+```
+
+---
+
+## Provenance
+
+```{python}
+#| echo: false
+#| output: asis
+print("- Data: `opengwasdb_chunk_comparison_benchmark.json` "
+      "(from `benchmarks/benchmark_chunk_comparison.py`)")
+for c in data["configs"]:
+    print(f"- {c['name']}: `{c['store']}`")
+```

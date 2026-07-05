@@ -73,6 +73,12 @@ A query that returns associations ranked by statistical significance. Dense and 
 **Top-Hit Index**:
 A layout-specific acceleration structure that supports Top-Hit Queries using the Store's shared significance thresholds and result contract. Dense and Ragged components may encode the index differently but expose the same query semantics.
 
+**Rho**:
+The correlation between two Analyses' association statistics under the null — equivalently, the Analyses' phenotypic correlation multiplied by their proportion of sample overlap. It is estimated from pairs of non-significant (null) Z-Scores at approximately independent variants, and is undefined when too few shared null variants are available. Rho is symmetric between two Analyses; an Analysis with itself is 1.
+
+**Rho Matrix**:
+A release-level derived structure for a Dense Store giving Rho between every pair of Analyses. It is optional provenance-bearing metadata (which variants and null threshold produced it), not part of the association data, and shares the Store's Analysis identity and query concepts.
+
 **Variant Identity**:
 The canonical within-Store variant key is ALID, `chr:pos:A1:A2`, where A1 is alphabetically first and A2 is the other allele after trimming and left alignment. Cross-Store identity is the pair (**Reference Assembly**, ALID).
 
