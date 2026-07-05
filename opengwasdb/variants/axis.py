@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,8 @@ VARIANT_ALID_BYTES_FILENAME = "variant_alid_bytes.npy"
 VARIANT_ALID_ROWS_FILENAME = "variant_alid_rows.npy"
 VARIANT_AXIS_FORMAT = "tabix_tsv_v1"
 VARIANT_HEADER = (
-    "#chromosome\tposition\tvariant_index\teffect_allele\tother_allele\talid\trsid\n"
+    "#chromosome\tposition\tvariant_index\teffect_allele\tother_allele\talid\trsid"
+    "\tsource_alid\n"
 )
 # Fixed byte-width for ALID encoding in the mmap'd search index.
 # Supports chromosomes up to 3 chars, positions up to 9 digits, alleles up to ~20 chars.
@@ -43,6 +44,11 @@ class VariantRecord(Mapping[str, Any]):
     effect_allele: str
     other_allele: str
     rsid: str | None
+    # Canonical ALID of the source association on the *build* (pre-liftover)
+    # assembly that occupies this row — the store's provenance link back to the
+    # original dataset. None for same-assembly builds (no liftover) and for rows
+    # where several source variants collided onto one lifted ALID (ambiguous).
+    source_alid: str | None = None
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
@@ -57,11 +63,12 @@ class VariantRecord(Mapping[str, Any]):
                 "effect_allele",
                 "other_allele",
                 "rsid",
+                "source_alid",
             )
         )
 
     def __len__(self) -> int:
-        return 7
+        return 8
 
 
 @dataclass(frozen=True)
@@ -117,9 +124,21 @@ def write_variant_axis(
     store_path: str | Path,
     variants: list[CanonicalVariant],
     rsid_by_alid: Mapping[str, str],
+    source_alids: Sequence[str | None] | None = None,
 ) -> None:
-    """Write the Store Variant Table, row-offset sidecar, and tabix index."""
+    """Write the Store Variant Table, row-offset sidecar, and tabix index.
 
+    ``source_alids`` (optional, parallel to ``variants``) records the source-
+    assembly canonical ALID that each row was lifted from — provenance back to
+    the original dataset. Pass ``None`` (or per-row ``None``/``""``) for
+    same-assembly builds or ambiguous (collided) rows; the column is written as
+    ``"."`` there.
+    """
+
+    if source_alids is not None and len(source_alids) != len(variants):
+        raise ValueError(
+            f"source_alids has {len(source_alids)} entries but there are {len(variants)} variants"
+        )
     store = Path(store_path)
     table_path = variant_table_path(store)
     offsets: list[int] = []
@@ -128,9 +147,11 @@ def write_variant_axis(
         for variant_index, variant in enumerate(variants):
             offsets.append(int(handle.tell()))
             rsid = rsid_by_alid.get(variant.alid) or "."
+            source_alid = (source_alids[variant_index] if source_alids is not None else None) or "."
             line = (
                 f"{variant.chromosome}\t{variant.position}\t{variant_index}\t"
-                f"{variant.effect_allele}\t{variant.other_allele}\t{variant.alid}\t{rsid}\n"
+                f"{variant.effect_allele}\t{variant.other_allele}\t{variant.alid}\t{rsid}\t"
+                f"{source_alid}\n"
             )
             handle.write(line.encode("utf-8"))
     np.save(variant_offsets_path(store), np.asarray(offsets, dtype=np.uint64))
@@ -273,9 +294,17 @@ class VariantAxis:
 
 def _parse_variant_line(line: str) -> VariantRecord:
     fields = line.rstrip("\n").split("\t")
-    if len(fields) != 7:
-        raise ValueError(f"variant row has {len(fields)} fields, expected 7")
-    chromosome, position, variant_index, effect_allele, other_allele, alid, rsid = fields
+    # 7 fields = pre-source_alid stores; 8 = current (trailing source_alid column).
+    if len(fields) == 7:
+        chromosome, position, variant_index, effect_allele, other_allele, alid, rsid = fields
+        source_alid = "."
+    elif len(fields) == 8:
+        (
+            chromosome, position, variant_index, effect_allele, other_allele,
+            alid, rsid, source_alid,
+        ) = fields
+    else:
+        raise ValueError(f"variant row has {len(fields)} fields, expected 7 or 8")
     return VariantRecord(
         variant_index=int(variant_index),
         alid=alid,
@@ -284,4 +313,5 @@ def _parse_variant_line(line: str) -> VariantRecord:
         effect_allele=effect_allele,
         other_allele=other_allele,
         rsid=None if rsid in {"", "."} else rsid,
+        source_alid=None if source_alid in {"", "."} else source_alid,
     )

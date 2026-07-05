@@ -291,6 +291,36 @@ class TestValidation:
         assert any("NaN z" in e for e in result.errors), result.errors
 
 
+class TestSourceFidelity:
+    """validate_store(source=...) cross-checks store values against the source.
+
+    The observed store is same-assembly (GRCh38 in, GRCh38 store), so the join
+    goes through the canonical-ALID path with no liftover — no bcftools needed.
+    """
+
+    def test_fidelity_passes_against_source(self, observed_store, source_path):
+        result = validate_store(observed_store, source=source_path)
+        assert result.ok, result.errors
+
+    def test_fidelity_detects_sign_flip(self, observed_store, source_path):
+        # Flip the sign of one observed, below-threshold cell: internal validation
+        # still passes (|z| and the top-hit index are untouched), so only the
+        # source-fidelity check can catch it.
+        res = query_store(observed_store).lookup(["1:1000000:A:G"], ["a1"])
+        assert len(res["z"]) == 1
+        row, col = int(res["variant_index"][0]), int(res["analysis_index"][0])
+
+        root = zarr.open_group(str(observed_store / "data.zarr"), mode="r+")
+        z = root["z"][:]
+        z[row, col] = -z[row, col]
+        root["z"][:] = z
+
+        assert validate_store(observed_store).ok  # internal checks still pass
+        result = validate_store(observed_store, source=source_path)
+        assert not result.ok
+        assert any("source-fidelity" in e for e in result.errors), result.errors
+
+
 class TestQuery:
     def test_analysis_a1_includes_imputed_by_default(self, completed_store):
         q = query_store(completed_store)

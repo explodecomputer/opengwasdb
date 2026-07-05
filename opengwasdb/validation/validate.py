@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,8 +40,27 @@ class ValidationResult:
         return not self.errors
 
 
-def validate_store(path: str | Path) -> ValidationResult:
-    """Validate a v0.1 Store Release directory."""
+def validate_store(
+    path: str | Path,
+    source: str | Path | Sequence[str | Path] | None = None,
+    *,
+    fidelity_samples: int = 2000,
+    fidelity_seed: int = 0,
+    source_assembly: str | None = None,
+    chain_file: str | Path | None = None,
+) -> ValidationResult:
+    """Validate a v0.1 Store Release directory.
+
+    Internal (structural) validation is always run. When ``source`` is given —
+    the original dataset the store was built from (a manifest TSV with
+    ``trait_id``/``file_path`` columns, or one/many self-describing source
+    files) — a **source-fidelity** check is also run for dense stores: it draws
+    a random sample of source associations and confirms the store holds the same
+    z/se, orienting the join through the stored source-ALID provenance (or, for
+    lifted stores that predate that column, via liftover). ``source_assembly``
+    names the source coordinate build (default: the store's own assembly, i.e.
+    no liftover); ``chain_file`` overrides the liftover chain for the fallback.
+    """
 
     store_path = Path(path)
     errors: list[str] = []
@@ -49,8 +69,19 @@ def validate_store(path: str | Path) -> ValidationResult:
         return ValidationResult(errors=errors)
 
     if manifest.primary_layout is PrimaryStorageLayout.RAGGED:
-        return _validate_ragged_store(store_path, manifest, errors)
-    return _validate_dense_store(store_path, manifest, errors)
+        _validate_ragged_store(store_path, manifest, errors)
+        if source is not None:
+            errors.append("source-fidelity check is only supported for dense stores")
+        return ValidationResult(errors=errors)
+
+    _validate_dense_store(store_path, manifest, errors)
+    if source is not None and not errors:
+        _validate_source_fidelity(
+            store_path, manifest, source, errors,
+            n_samples=fidelity_samples, seed=fidelity_seed,
+            source_assembly=source_assembly, chain_file=chain_file,
+        )
+    return ValidationResult(errors=errors)
 
 
 def _validate_dense_store(
@@ -623,6 +654,274 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
             errors.append(f"top-hit index {key} contains z value inconsistent with z array")
         elif g["n"] != g["pass_count"]:
             errors.append(f"top-hit index {key} does not match stored z values")
+
+
+# ── Source-fidelity check ────────────────────────────────────────────────────
+# Confirm the store faithfully persisted the *values* of the original dataset —
+# the one class of bug internal validation structurally cannot catch (a store
+# that is self-consistent but systematically wrong: sign flip, allele
+# orientation, z/se swap, wrong analysis column, liftover mis-map, float16
+# corruption). We reuse the build's own readers, so this is a round-trip
+# persistence check, not an independent oracle of the normalisation maths.
+
+_FIDELITY_MAX_FILES = 25
+_FIDELITY_SCAN_PER_FILE = 100_000
+# A sampled cell is stored float16; compare against the source rounded the same
+# way, with a tolerance loose enough for float16 quantisation but far tighter
+# than any sign/scale/column bug.
+_FIDELITY_RTOL = 1e-2
+_FIDELITY_ATOL = 1e-2
+
+
+def _normalise_assembly(name: str) -> str:
+    n = str(name).strip().lower()
+    if n in {"grch37", "hg19", "b37", "37"}:
+        return "hg19"
+    if n in {"grch38", "hg38", "b38", "38"}:
+        return "hg38"
+    return n
+
+
+def _is_vcf_path(path: Path) -> bool:
+    s = str(path).lower()
+    return s.endswith((".vcf", ".vcf.gz", ".vcf.bgz", ".bcf"))
+
+
+def _source_units(
+    source: str | Path | Sequence[str | Path], errors: list[str]
+) -> list[tuple[str | None, Path, bool]]:
+    """Resolve ``source`` into (analysis_id_or_None, path, is_vcf) units.
+
+    A single TSV whose header carries ``trait_id``/``file_path`` is treated as a
+    build manifest (one analysis per file, analysis_id from ``trait_id``);
+    otherwise each path is a self-describing source file (analysis_id per row).
+    """
+    import csv
+
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        if not p.exists():
+            errors.append(f"source path does not exist: {p}")
+            return []
+        header = None
+        if not _is_vcf_path(p) and not str(p).lower().endswith(".gz"):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    header = fh.readline()
+            except (OSError, UnicodeDecodeError):
+                header = None
+        if header is not None and "file_path" in header and "trait_id" in header:
+            units: list[tuple[str | None, Path, bool]] = []
+            with open(p, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    fp = Path(row["file_path"])
+                    units.append((row["trait_id"], fp, _is_vcf_path(fp)))
+            return units
+        return [(None, p, _is_vcf_path(p))]
+    return [(None, Path(item), _is_vcf_path(Path(item))) for item in source]
+
+
+def _stream_unit(
+    analysis_id: str | None, path: Path, is_vcf: bool
+) -> Iterator[tuple[str, str, int, str, str, float, float]]:
+    """Yield canonical (analysis_id, chrom, pos, a1, a2, z, se) from one source."""
+    if is_vcf:
+        from opengwasdb.build.vcf_source import stream_vcf_associations
+
+        if analysis_id is None:
+            return  # a VCF carries no analysis_id; it needs a manifest trait_id
+        for chrom, pos, ref, alt, z, se, _scale in stream_vcf_associations(path):
+            a1, a2 = sorted((ref, alt))
+            yield (analysis_id, chrom, int(pos), a1, a2, float(z), float(se))
+    else:
+        from opengwasdb.build.source import read_normalised_associations
+
+        for assoc in read_normalised_associations(path):
+            v = assoc.variant
+            a1, a2 = sorted((v.effect_allele, v.other_allele))
+            yield (assoc.analysis_id, v.chromosome, int(v.position), a1, a2,
+                   float(assoc.z), float(assoc.se))
+
+
+def _sample_sources(
+    units: list[tuple[str | None, Path, bool]], n_samples: int, rng: np.random.Generator
+) -> list[tuple[str, str, int, str, str, float, float]]:
+    """Reservoir-sample up to ``n_samples`` associations across a random subset
+    of source files (scan-capped per file so cost stays bounded)."""
+    if not units:
+        return []
+    order = rng.permutation(len(units))[:_FIDELITY_MAX_FILES]
+    reservoir: list[tuple[str, str, int, str, str, float, float]] = []
+    seen = 0
+    for u in order:
+        analysis_id, path, is_vcf = units[int(u)]
+        scanned = 0
+        for item in _stream_unit(analysis_id, path, is_vcf):
+            seen += 1
+            scanned += 1
+            if len(reservoir) < n_samples:
+                reservoir.append(item)
+            else:
+                j = int(rng.integers(0, seen))
+                if j < n_samples:
+                    reservoir[j] = item
+            if scanned >= _FIDELITY_SCAN_PER_FILE:
+                break
+    return reservoir
+
+
+def _resolve_via_origin(store_path: Path, wanted: set[str]) -> dict[str, int] | None:
+    """Map wanted source ALIDs → variant_index via the stored source_alid column
+    in one streamed pass. Returns None if the store predates that column."""
+    import pysam
+
+    out: dict[str, int] = {}
+    remaining = set(wanted)
+    with pysam.BGZFile(str(variant_table_path(store_path)), "r") as handle:  # type: ignore[call-arg]
+        for raw in handle:
+            line = raw.decode("utf-8")
+            if line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 8:
+                return None  # no source_alid column → caller falls back to liftover
+            src = fields[7]
+            if src in remaining:
+                out[src] = int(fields[2])
+                remaining.discard(src)
+                if not remaining:
+                    break
+    return out
+
+
+def _validate_source_fidelity(
+    store_path: Path,
+    manifest: StoreManifest,
+    source: str | Path | Sequence[str | Path],
+    errors: list[str],
+    *,
+    n_samples: int,
+    seed: int,
+    source_assembly: str | None,
+    chain_file: str | Path | None,
+) -> None:
+    units = _source_units(source, errors)
+    if errors or not units:
+        return
+    rng = np.random.default_rng(seed)
+    samples = _sample_sources(units, n_samples, rng)
+    if not samples:
+        errors.append("source-fidelity: no associations could be read from the source")
+        return
+
+    store_asm = _normalise_assembly(manifest.reference_assembly)
+    src_asm = _normalise_assembly(source_assembly) if source_assembly else store_asm
+
+    # Resolve each sampled source variant to a store row.
+    src_alids = {f"{c}:{p}:{a1}:{a2}" for (_a, c, p, a1, a2, _z, _s) in samples}
+    row_by_alid: dict[str, int] = {}
+    if src_asm == store_asm:
+        va = VariantAxis(store_path)
+        try:
+            for alid in src_alids:
+                rec = va.by_identifier(alid)
+                if rec is not None:
+                    row_by_alid[alid] = rec.variant_index
+        finally:
+            va.close()
+    else:
+        origin_map = _resolve_via_origin(store_path, src_alids)
+        if origin_map is not None:
+            row_by_alid = origin_map  # store carries provenance → no liftover needed
+        else:
+            from opengwasdb.build.liftover import build_liftover_lookup
+
+            tuples = {(c, p, a1, a2) for (_a, c, p, a1, a2, _z, _s) in samples}
+            lut = build_liftover_lookup(
+                tuples, from_build=src_asm, to_build=store_asm,
+                failure_threshold=1.0, chain_file=chain_file,
+            )
+            va = VariantAxis(store_path)
+            try:
+                for (c, p, a1, a2) in tuples:
+                    hg38 = lut.get((c, p, a1, a2))
+                    if hg38 is None:
+                        continue
+                    rec = va.by_identifier(hg38)
+                    if rec is not None:
+                        row_by_alid[f"{c}:{p}:{a1}:{a2}"] = rec.variant_index
+            finally:
+                va.close()
+
+    # Resolve analysis ids to columns.
+    with connect(store_path / "index.sqlite") as conn:
+        col_by_aid = {
+            str(r["analysis_id"]): int(r["analysis_index"])
+            for r in conn.execute("SELECT analysis_id, analysis_index FROM analyses").fetchall()
+        }
+
+    pairs: list[tuple[int, int, float, float, str]] = []
+    n_unmatched_variant = 0
+    n_unmatched_analysis = 0
+    for (aid, c, p, a1, a2, z, se) in samples:
+        col = col_by_aid.get(aid)
+        if col is None:
+            n_unmatched_analysis += 1
+            continue
+        row = row_by_alid.get(f"{c}:{p}:{a1}:{a2}")
+        if row is None:
+            n_unmatched_variant += 1
+            continue
+        pairs.append((row, col, z, se, f"{c}:{p}:{a1}:{a2}"))
+
+    if not pairs:
+        errors.append(
+            f"source-fidelity: none of {len(samples)} sampled source associations could be "
+            f"matched to a store cell ({n_unmatched_variant} variants, {n_unmatched_analysis} "
+            f"analyses unmatched) — check source_assembly / that this is the right source"
+        )
+        return
+
+    # Gather store z/se for the matched cells and compare (bounded block).
+    root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+    urows = sorted({pr[0] for pr in pairs})
+    ucols = sorted({pr[1] for pr in pairs})
+    ri = {r: i for i, r in enumerate(urows)}
+    ci = {c: i for i, c in enumerate(ucols)}
+    z_blk = root["z"].oindex[urows, :][:, ucols].astype("float32")
+    se_blk = root["se"].oindex[urows, :][:, ucols].astype("float32")
+
+    n_compared = 0
+    n_missing_in_store = 0
+    mismatches: list[str] = []
+    for (row, col, z_src, se_src, alid) in pairs:
+        sz = z_blk[ri[row], ci[col]]
+        sse = se_blk[ri[row], ci[col]]
+        if not (np.isfinite(sz) and np.isfinite(sse)):
+            n_missing_in_store += 1
+            continue
+        n_compared += 1
+        z_ref = float(np.float16(z_src))
+        se_ref = float(np.float16(se_src))
+        if not (
+            np.isclose(sz, z_ref, rtol=_FIDELITY_RTOL, atol=_FIDELITY_ATOL)
+            and np.isclose(sse, se_ref, rtol=_FIDELITY_RTOL, atol=_FIDELITY_ATOL)
+        ):
+            if len(mismatches) < 5:
+                mismatches.append(
+                    f"{alid}: store z={sz:.4f} se={sse:.4f} vs source z={z_src:.4f} se={se_src:.4f}"
+                )
+
+    if mismatches:
+        errors.append(
+            f"source-fidelity: {len(mismatches)}{'+' if len(mismatches) == 5 else ''} of "
+            f"{n_compared} compared associations disagree with the source (e.g. {mismatches[0]})"
+        )
+    elif n_compared == 0:
+        errors.append(
+            f"source-fidelity: matched {len(pairs)} source associations but the store held no "
+            f"finite value at any of those cells (possible dropped associations)"
+        )
 
 
 def default_top_hit_key(threshold: float = 5e-8) -> str:

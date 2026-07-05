@@ -399,7 +399,20 @@ def build_dense_from_vcf_manifest(
         for alid in hg38_alids
         for chrom, pos_str, a1, a2 in [alid.split(":")]
     ]
-    write_variant_axis(out, canonical_variants, {})
+    # Provenance: record the source (hg19) canonical ALID each row was lifted
+    # from. A single hg38 ALID can be the liftover target of several hg19
+    # variants (a collision); those rows are ambiguous, so leave them blank.
+    hg38_to_source: dict[str, str | None] = {}
+    for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
+        a1, a2 = sorted((ref, alt))
+        origin = f"{chrom}:{pos}:{a1}:{a2}"
+        if hg38_alid in hg38_to_source:
+            if hg38_to_source[hg38_alid] != origin:
+                hg38_to_source[hg38_alid] = None  # collision → ambiguous
+        else:
+            hg38_to_source[hg38_alid] = origin
+    source_alids = [hg38_to_source.get(alid) for alid in hg38_alids]
+    write_variant_axis(out, canonical_variants, {}, source_alids)
 
     # ------------------------------------------------------------------
     # Fork-safe Pass 2 lookup: compose the two dicts into sorted numpy arrays so
