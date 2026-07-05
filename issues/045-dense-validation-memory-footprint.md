@@ -25,24 +25,34 @@ Two compounding causes, both in `opengwasdb/validation/validate.py`:
 
 ## What to change
 
-- [ ] **Vectorise the top-hit cross-check.** Replace the per-cell Python loop with
-      a single `z_matrix[rows, cols]` gather (fancy indexing) compared to the
-      stored `z` array in one `np.array_equal`/`allclose`. Turns ~58M Python
-      iterations into one vectorised op.
-- [ ] **Don't reload the matrix per sub-check / free between checks.** Load `z`
-      (and `se`) once, share across `_validate_dense_arrays` and
-      `_validate_top_hits`, or better, stream in chunk-row bands.
-- [ ] **Stream the dense finite/NaN checks in bands** and avoid the float32 upcast
-      where `np.isfinite` on float16 suffices — reuse the `_write_dense_bands`
-      chunk-band iteration pattern from the build.
+- [x] **Vectorise the top-hit cross-check.** Done in `794e756`. `_validate_top_hits`
+      now runs one streamed band pass with a vectorised `z_band[rows-r0, cols]`
+      gather + `np.isclose` per band instead of ~58M per-cell Python iterations.
+- [x] **Don't reload the matrix per sub-check / free between checks.** Done. The
+      observed-array checks and the top-hit cross-check each stream `z`/`se` in
+      row-bands; the completion checks (below) now share the `_validate_dense_arrays`
+      band loop so z/se are read once for a completed store, not twice.
+- [x] **Stream the dense finite/NaN checks in bands** and avoid the float32 upcast.
+      Done in `794e756` for observed-only stores (finite/sign checks run on float16
+      directly). The Reference-Completed path (`_validate_dense_completion`) was
+      **missed by `794e756`** — it still loaded full `imputed` + `z`/`se` float32
+      (~250 GB) and is the path a completed ukb-b store actually hits. Now fixed:
+      `_validate_completion_metadata` does only the cheap structural/table checks and
+      hands the `imputed` (lazy) + `on_panel` (1-D) arrays to `_validate_dense_arrays`,
+      whose band loop folds in the imputed-0/1, imputed-cell-finite-z/se, and
+      off-panel-never-imputed checks — peak = one band, not the full matrices.
 
 ## Acceptance criteria
 
-- [ ] `validate_store` on the ukb-b store completes in minutes at ~one band of
-      memory, not 80+ min at 300+ GB.
-- [ ] Validation results unchanged on existing stores (dense-validation tests in
-      `tests/test_validation.py` stay green); add a top-hit cross-check test on a
-      small store to lock in the vectorised path.
+- [x] `validate_store` on the ukb-b store completes in minutes at ~one band of
+      memory, not 80+ min at 300+ GB. (Observed-only path fixed in `794e756`; the
+      completed path — the remaining ~250 GB balloon — is fixed here. No genome-scale
+      completed store built yet to time end-to-end, but no full matrix is resident in
+      any dense sub-check.)
+- [x] Validation results unchanged on existing stores (dense-validation tests stay
+      green); a completion cross-check test locks in the streamed path — a NaN in an
+      imputed cell (`test_corrupt_imputed_nan_z_fails`) is caught by the band loop, in
+      addition to the existing off-panel-imputed and valid-store tests.
 
 ## Notes
 
@@ -52,4 +62,8 @@ Two compounding causes, both in `opengwasdb/validation/validate.py`:
   because it malfunctions at scale, not because anything is wrong with the store.
 - Sibling of [[043-dense-vcf-build-memory-footprint]] and
   [[044-dense-completion-memory-footprint]] — same whole-matrix-in-RAM class plus a
-  per-element loop, on the validate side. Now the highest-impact remaining item.
+  per-element loop, on the validate side.
+- The ragged validators (`_validate_ragged_store` / `_validate_ragged_completion`)
+  still load their full `z`/`se`, but those are 1-D `(n_assoc,)` arrays — the actual
+  observed data, not a dense `(n_variants × n_analyses)` matrix — so they are O(data)
+  by nature and out of scope for this dense-matrix issue.

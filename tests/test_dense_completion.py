@@ -270,6 +270,26 @@ class TestValidation:
         result = validate_store(completed_store)
         assert not result.ok
 
+    def test_corrupt_imputed_nan_z_fails(self, completed_store):
+        # An imputed=1 cell whose z is NaN must be caught by the streamed
+        # finite-check band pass (issue 045), not just a full-matrix load. Mark
+        # an on-panel cell imputed with a NaN z (on-panel so it isolates the
+        # finite check from the off-panel-never-imputed check).
+        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        on_panel = root["on_panel"][:]
+        on_panel_rows = np.where(on_panel == 1)[0]
+        assert len(on_panel_rows) > 0
+        r, c = int(on_panel_rows[0]), 0
+        imputed = root["imputed"][:]
+        imputed[r, c] = 1
+        root["imputed"][:] = imputed
+        z = root["z"][:]
+        z[r, c] = np.nan
+        root["z"][:] = z
+        result = validate_store(completed_store)
+        assert not result.ok
+        assert any("NaN z" in e for e in result.errors), result.errors
+
 
 class TestQuery:
     def test_analysis_a1_includes_imputed_by_default(self, completed_store):

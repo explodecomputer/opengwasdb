@@ -94,9 +94,16 @@ def _validate_dense_store(
                 variant_axis.close()
             n_analyses = count_rows(connection, "analyses")
             root = zarr.open_group(str(data_path), mode="r")
-            _validate_dense_arrays(root, n_variants, n_analyses, errors)
-            if not errors and manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
-                _validate_dense_completion(root, connection, n_variants, n_analyses, errors)
+            imputed_arr = None
+            on_panel_arr = None
+            if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
+                imputed_arr, on_panel_arr = _validate_completion_metadata(
+                    root, connection, n_variants, n_analyses, errors
+                )
+            if not errors:
+                _validate_dense_arrays(
+                    root, n_variants, n_analyses, errors, imputed_arr, on_panel_arr
+                )
             if not errors:
                 _validate_top_hits(root, errors)
     except Exception as exc:  # noqa: BLE001 - validators should report actionable failures
@@ -104,49 +111,43 @@ def _validate_dense_store(
     return ValidationResult(errors=errors)
 
 
-def _validate_dense_completion(
+def _validate_completion_metadata(
     root: Any,
     connection: sqlite3.Connection,
     n_variants: int,
     n_analyses: int,
     errors: list[str],
-) -> None:
-    """Validate the imputed/on_panel arrays and completion metadata for a
-    Reference-Completed Dense store."""
+) -> tuple[Any, np.ndarray | None]:
+    """Validate the non-matrix completion metadata for a Reference-Completed
+    Dense store and hand back the arrays the streamed band pass needs.
+
+    The matrix-touching checks (imputed values are 0/1, imputed cells have
+    finite z/se, off-panel rows are never imputed) are *not* done here — they
+    are folded into ``_validate_dense_arrays``' row-band loop so the full
+    z/se/imputed matrices are never resident (issue 045). This function only
+    runs the cheap structural/metadata checks and returns the ``imputed`` zarr
+    array (lazy) and the fully-loaded 1-D ``on_panel`` array (~n_variants bytes)
+    for that loop. Returns ``(None, None)`` if the arrays are missing/malformed,
+    which the caller treats as a hard error and skips the band pass.
+    """
     for name in ("imputed", "on_panel"):
         if name not in root:
             errors.append(f"reference-completed store is missing data.zarr/{name}")
     if errors:
-        return
+        return None, None
 
-    imp = root["imputed"][:]
+    imputed_arr = root["imputed"]
     expected_shape = (n_variants, n_analyses)
-    if tuple(imp.shape) != expected_shape:
-        errors.append(f"data.zarr/imputed shape {tuple(imp.shape)} does not match {expected_shape}")
-    if not np.all((imp == 0) | (imp == 1)):
-        errors.append("data.zarr/imputed contains values other than 0 and 1")
+    if tuple(imputed_arr.shape) != expected_shape:
+        errors.append(
+            f"data.zarr/imputed shape {tuple(imputed_arr.shape)} does not match {expected_shape}"
+        )
 
     on_panel = root["on_panel"][:]
     if len(on_panel) != n_variants:
         errors.append(f"data.zarr/on_panel has {len(on_panel)} entries but expected {n_variants}")
     if not np.all((on_panel == 0) | (on_panel == 1)):
         errors.append("data.zarr/on_panel contains values other than 0 and 1")
-
-    z_vals = root["z"][:].astype("float32")
-    se_vals = root["se"][:].astype("float32")
-    imp_mask = imp == 1
-    if imp_mask.any():
-        if not np.all(np.isfinite(z_vals[imp_mask])):
-            errors.append("imputed=1 cells have NaN z-scores")
-        if not np.all(np.isfinite(se_vals[imp_mask])):
-            errors.append("imputed=1 cells have NaN se values")
-
-    # Off-panel rows can never be imputed (no LD structure).
-    off_panel_mask = on_panel == 0
-    if off_panel_mask.any() and np.any(imp[off_panel_mask] == 1):
-        errors.append(
-            "off-panel (on_panel=0) rows have imputed=1 cells — off-panel is never imputable"
-        )
 
     tables = {r[0] for r in connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -171,6 +172,12 @@ def _validate_dense_completion(
         errors.append(
             "analyses table is missing n_missing_off_panel for a reference-completed store"
         )
+
+    # Only hand the arrays to the band pass if they are well-formed; a shape
+    # mismatch above already recorded a hard error, so the caller skips the pass.
+    if errors:
+        return None, None
+    return imputed_arr, on_panel
 
 
 def _validate_ragged_store(
@@ -475,7 +482,18 @@ def _validate_dense_arrays(
     n_variants: int,
     n_analyses: int,
     errors: list[str],
+    imputed_arr: Any = None,
+    on_panel: np.ndarray | None = None,
 ) -> None:
+    """Stream the dense z/se (and, for a completed store, imputed) matrices in
+    row-bands and run every matrix-touching content check in one pass.
+
+    ``imputed_arr``/``on_panel`` are supplied only for Reference-Completed
+    stores (from ``_validate_completion_metadata``); when present, the imputed
+    checks that used to load the whole matrix are folded into this same band
+    loop so peak memory stays at one band rather than the full matrices
+    (issue 045).
+    """
     for name in ("z", "se"):
         if name not in root:
             errors.append(f"missing data.zarr/{name}")
@@ -495,6 +513,10 @@ def _validate_dense_arrays(
     # there is no full-matrix load and no float32 upcast.
     neg_se = False
     missingness = False
+    imp_not_binary = False
+    imp_nan_z = False
+    imp_nan_se = False
+    off_panel_imputed = False
     for r0 in range(0, n_variants, _VALIDATE_BAND_ROWS):
         r1 = min(r0 + _VALIDATE_BAND_ROWS, n_variants)
         z = z_arr[r0:r1]
@@ -503,12 +525,35 @@ def _validate_dense_arrays(
             neg_se = True
         if not missingness and np.any(np.isnan(z) != np.isnan(se)):
             missingness = True
-        if neg_se and missingness:
-            break
+        if imputed_arr is not None:
+            imp = imputed_arr[r0:r1]
+            if not imp_not_binary and not np.all((imp == 0) | (imp == 1)):
+                imp_not_binary = True
+            imp_mask = imp == 1
+            if imp_mask.any():
+                if not imp_nan_z and not np.all(np.isfinite(z[imp_mask])):
+                    imp_nan_z = True
+                if not imp_nan_se and not np.all(np.isfinite(se[imp_mask])):
+                    imp_nan_se = True
+                # Off-panel rows can never be imputed (no LD structure).
+                if not off_panel_imputed:
+                    off_band = on_panel[r0:r1] == 0
+                    if off_band.any() and np.any(imp[off_band] == 1):
+                        off_panel_imputed = True
     if neg_se:
         errors.append("se contains negative finite values")
     if missingness:
         errors.append("z and se missingness is inconsistent")
+    if imp_not_binary:
+        errors.append("data.zarr/imputed contains values other than 0 and 1")
+    if imp_nan_z:
+        errors.append("imputed=1 cells have NaN z-scores")
+    if imp_nan_se:
+        errors.append("imputed=1 cells have NaN se values")
+    if off_panel_imputed:
+        errors.append(
+            "off-panel (on_panel=0) rows have imputed=1 cells — off-panel is never imputable"
+        )
 
 
 def _validate_top_hits(root: Any, errors: list[str]) -> None:
