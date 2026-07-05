@@ -13,6 +13,8 @@ The project is starting from a clean store contract:
 
 The first implementation slice is intentionally narrow: **Dense Observed-Only** stores with `z` and `se` arrays, metadata, validation, and layout-independent queries. Ragged layout, reference completion, and service/catalogue deployment are recorded in the ADRs but are not part of v0.1.
 
+For the broader OpenGWAS platform direction, see [docs/opengwas-roadmap.md](./docs/opengwas-roadmap.md).
+
 ## Repository status
 
 This repository is newly scaffolded. The design baseline lives in:
