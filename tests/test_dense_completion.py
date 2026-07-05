@@ -19,6 +19,24 @@ from opengwasdb.layouts.dense.complete import (
 from opengwasdb.query import query_store
 from opengwasdb.validation.validate import validate_store
 
+
+def _assert_stores_identical(dst_a: Path, dst_b: Path) -> None:
+    """Assert two completed stores hold byte-identical z/se/imputed arrays.
+
+    The parity guarantee for completion is stronger than matching cell counts:
+    the imputed z/se *values* (and the imputed/on_panel masks) must match too.
+    z/se are stored float16, so exact equality (NaN-aware) is the right check.
+    """
+    root_a = zarr.open_group(str(dst_a / "data.zarr"), mode="r")
+    root_b = zarr.open_group(str(dst_b / "data.zarr"), mode="r")
+    for name in ("z", "se"):
+        arr_a = root_a[name][:]
+        arr_b = root_b[name][:]
+        assert arr_a.shape == arr_b.shape, f"{name} shape differs"
+        assert np.array_equal(arr_a, arr_b, equal_nan=True), f"{name} values differ"
+    for name in ("imputed", "on_panel"):
+        assert np.array_equal(root_a[name][:], root_b[name][:]), f"{name} mask differs"
+
 SOURCE_HEADER = "\t".join(
     [
         "analysis_id", "phenotype_id", "phenotype_label", "analysis_label",
@@ -349,6 +367,7 @@ class TestResume:
         assert resumed.n_imputed == fresh.n_imputed
         assert resumed.n_missing_off_panel == fresh.n_missing_off_panel
         assert resumed.n_missing_imputation_failed == fresh.n_missing_imputation_failed
+        _assert_stores_identical(resumable_dst, fresh_dst)
 
 
 class TestParallel:
@@ -365,4 +384,5 @@ class TestParallel:
         assert parallel.n_imputed == serial.n_imputed
         assert parallel.n_missing_off_panel == serial.n_missing_off_panel
         assert parallel.n_missing_imputation_failed == serial.n_missing_imputation_failed
+        _assert_stores_identical(parallel_dst, serial_dst)
         assert validate_store(parallel_dst).ok

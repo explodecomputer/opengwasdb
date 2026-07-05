@@ -50,17 +50,25 @@ otherwise matched nothing), plus a BLAS thread cap so the LD-block pool isn't
 oversubscribed (~50 min → ~2 min).
 
 ## Follow-up (not blocking)
-- The accumulated `fills` (one entry per imputed cell) are Python tuples held in the
-  parent — ~O(n_imputed). At genome-wide analysis counts this could dominate; worth
-  spilling/streaming fills per block if a full ukb-b completion is attempted.
+- [x] **Resolved.** The accumulated `fills` are no longer held as Python tuples in
+      the parent. Workers checkpoint fills to disk and return an empty-fills marker
+      (no fills over the pool result queue); Phase 3 reads each checkpoint back as
+      packed numpy arrays and resolves fill ALIDs → union rows with one vectorised
+      `searchsorted`, so parent fill memory is packed arrays (~12–16 B/cell), not
+      ~O(n_imputed) tuples. Verified on chr1×100: parent peak 8.6 GB → 3.03 GB,
+      same n_imputed, same time, store validates and is byte-identical across two
+      runs. Parity tests now assert z/se **value** equality (not just cell counts),
+      so the streaming path is guarded byte-for-byte against the serial path.
 
 ## Acceptance criteria
 
-- [ ] A completed store at genome scale (or a scaled proxy) peaks well below the
+- [x] A completed store at genome scale (or a scaled proxy) peaks well below the
       current ~4× matrix footprint — target ≈ one band + block-worker memory.
-- [ ] Output store byte-identical to the current completion (guard with the
-      existing dense-completion parity tests, e.g. `test_resume_matches_fresh_run`
-      / `test_two_workers_matches_serial` in `tests/test_dense_completion.py`).
+      (chr1×100 proxy: parent peak 3.03 GB; band-write never holds the matrix.)
+- [x] Output store byte-identical to the current completion — now guarded by the
+      dense-completion parity tests, which assert z/se/imputed/on_panel **value**
+      equality (not just counts) in `test_resume_matches_fresh_run` /
+      `test_two_workers_matches_serial` (`tests/test_dense_completion.py`).
 
 ## Notes
 

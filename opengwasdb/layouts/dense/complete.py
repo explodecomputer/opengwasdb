@@ -175,24 +175,6 @@ def _write_checkpoint(path: Path, result: BlockCompletionResult) -> None:
     os.replace(tmp_path, path)
 
 
-def _load_checkpoint(path: Path) -> BlockCompletionResult:
-    data = np.load(path, allow_pickle=False)
-    block_id = str(data["block_id"][0])
-    quality_rows = [
-        (int(ai), None if not np.isfinite(p) else float(p), int(ni), int(nm))
-        for ai, p, ni, nm in zip(
-            data["q_ai"], data["q_pearson"], data["q_nimp"], data["q_nmiss"], strict=True
-        )
-    ]
-    fills = [
-        (str(alid), int(ai), float(z), float(se))
-        for alid, ai, z, se in zip(
-            data["f_alid"], data["f_ai"], data["f_z"], data["f_se"], strict=True
-        )
-    ]
-    return BlockCompletionResult(block_id=block_id, quality_rows=quality_rows, fills=fills)
-
-
 # Kept alive for the worker's lifetime so the BLAS thread cap persists (a bare
 # threadpool_limits() call would reset on garbage collection).
 _worker_thread_limiter: Any = None
@@ -324,7 +306,11 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
 
     result = BlockCompletionResult(block_id=block.block_id, quality_rows=quality_rows, fills=fills)
     _write_checkpoint(task.checkpoint_path, result)
-    return result
+    # Fills stay on disk (the checkpoint); the parent reads them back from the
+    # checkpoints in Phase 3. Returning them here would push potentially millions
+    # of tuples per block through the pool result queue and accumulate them in the
+    # parent (issue 044 follow-up), so return an empty-fills marker.
+    return BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
 
 
 # ── Public entry points ─────────────────────────────────────────────────────
@@ -564,13 +550,13 @@ def _run_completion(
         blocks_dir = checkpoint_dir / "blocks"
         blocks_dir.mkdir(parents=True, exist_ok=True)
 
-        results: list[BlockCompletionResult] = []
         pending: list[_BlockTask] = []
+        n_existing = 0
         for tsv_path in tsv_paths:
             block_id = f"{tsv_path.parent.name}/{tsv_path.stem}"
             ckpt_path = blocks_dir / f"{_sanitize_block_id(block_id)}.npz"
             if ckpt_path.exists():
-                results.append(_load_checkpoint(ckpt_path))
+                n_existing += 1  # fills read from the checkpoint in Phase 3
             else:
                 pending.append(_BlockTask(
                     tsv_path=tsv_path, source_path=src,
@@ -578,50 +564,75 @@ def _run_completion(
                 ))
 
         if pending:
-            print(f"  {len(tsv_paths) - len(pending):,} blocks already checkpointed, "
-                  f"{len(pending):,} remaining")
+            print(f"  {n_existing:,} blocks already checkpointed, {len(pending):,} remaining")
+        # Each block writes its own checkpoint; the parent keeps nothing per block.
         if n_workers <= 1:
             for i, task in enumerate(pending):
-                r = _run_block(task)
-                if r is not None:
-                    results.append(r)
+                _run_block(task)
                 if (i + 1) % 200 == 0:
                     print(f"  {i + 1:,} / {len(pending):,} blocks")
         else:
             with ProcessPoolExecutor(
                 max_workers=n_workers, initializer=_init_block_worker
             ) as pool:
-                futures = {pool.submit(_run_block, task): task for task in pending}
+                futures = [pool.submit(_run_block, task) for task in pending]
                 for i, fut in enumerate(as_completed(futures)):
-                    r = fut.result()
-                    if r is not None:
-                        results.append(r)
+                    fut.result()  # propagate worker errors; result is on disk
                     if (i + 1) % 200 == 0:
                         print(f"  {i + 1:,} / {len(pending):,} blocks")
 
-        # ── Phase 3: collect fills, band-stream the write, finalise ─────────
-        print("Merging block results...")
-        quality_rows: list[tuple[int, str, float | None, int, int]] = []
-        fr_l: list[int] = []
-        fai_l: list[int] = []
-        fz_l: list[float] = []
-        fse_l: list[float] = []
-        for r in results:
-            for ai, pearson, nimp, nmiss in r.quality_rows:
-                quality_rows.append((ai, r.block_id, pearson, nimp, nmiss))
-            for alid, ai, zv, sev in r.fills:
-                new_idx = new_alid_to_idx.get(alid)
-                if new_idx is None:
-                    continue
-                fr_l.append(new_idx)
-                fai_l.append(ai)
-                fz_l.append(zv)
-                fse_l.append(sev)
+        # ── Phase 3: stream fills from checkpoints, band-write, finalise ────
+        # Read each block's checkpoint as compact arrays and resolve its fill
+        # ALIDs to union rows with one vectorised searchsorted — never Python
+        # tuples/lists, so the parent's fill memory is packed arrays (~12 B/cell)
+        # not ~O(n_imputed) tuples (issue 044 follow-up).
+        print("Merging block results from checkpoints...")
+        union_alids = np.fromiter(
+            new_alid_to_idx.keys(), dtype="U64", count=len(new_alid_to_idx)
+        )
+        union_rows = np.fromiter(
+            new_alid_to_idx.values(), dtype=np.int32, count=len(new_alid_to_idx)
+        )
+        o = np.argsort(union_alids)
+        union_alids_s = union_alids[o]
+        union_rows_s = union_rows[o]
 
-        fill_row = np.array(fr_l, dtype=np.int64)
-        fill_ai = np.array(fai_l, dtype=np.int64)
-        fill_z = np.array(fz_l, dtype=np.float32)
-        fill_se = np.array(fse_l, dtype=np.float32)
+        quality_rows: list[tuple[int, str, float | None, int, int]] = []
+        fr_parts: list[np.ndarray] = []
+        fai_parts: list[np.ndarray] = []
+        fz_parts: list[np.ndarray] = []
+        fse_parts: list[np.ndarray] = []
+        for ckpt in sorted(blocks_dir.glob("*.npz")):
+            with np.load(ckpt, allow_pickle=False) as d:
+                bid = str(d["block_id"][0])
+                for ai, p, ni, nm in zip(
+                    d["q_ai"], d["q_pearson"], d["q_nimp"], d["q_nmiss"], strict=True
+                ):
+                    quality_rows.append(
+                        (int(ai), bid, None if not np.isfinite(p) else float(p), int(ni), int(nm))
+                    )
+                f_alid = d["f_alid"]
+                if len(f_alid):
+                    idx = np.minimum(
+                        np.searchsorted(union_alids_s, f_alid), len(union_alids_s) - 1
+                    )
+                    matched = union_alids_s[idx] == f_alid
+                    if matched.any():
+                        fr_parts.append(union_rows_s[idx[matched]])
+                        fai_parts.append(d["f_ai"][matched].astype(np.int32))
+                        fz_parts.append(d["f_z"][matched].astype(np.float32))
+                        fse_parts.append(d["f_se"][matched].astype(np.float32))
+
+        if fr_parts:
+            fill_row = np.concatenate(fr_parts)
+            fill_ai = np.concatenate(fai_parts)
+            fill_z = np.concatenate(fz_parts)
+            fill_se = np.concatenate(fse_parts)
+        else:
+            fill_row = np.empty(0, dtype=np.int32)
+            fill_ai = np.empty(0, dtype=np.int32)
+            fill_z = np.empty(0, dtype=np.float32)
+            fill_se = np.empty(0, dtype=np.float32)
         order = np.argsort(fill_row, kind="stable")
         fill_row, fill_ai, fill_z, fill_se = (
             fill_row[order], fill_ai[order], fill_z[order], fill_se[order]
