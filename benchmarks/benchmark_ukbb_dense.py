@@ -106,23 +106,27 @@ def _clump(instr: list[dict], kb: int) -> list[dict]:
     return kept
 
 
-def run_mr(q, analyses_by_id: dict[str, int]) -> dict:
+def run_mr(q, analyses_by_id: dict[str, int], *, imputed_only: bool = False) -> dict:
     exp_idx = analyses_by_id[EXPOSURE]
     # exposure genome-wide significant hits -> raw instruments
     th = q.top_hits(threshold=5e-8)
     m = th["analysis_index"] == exp_idx
+    n_raw_all = int(np.sum(m))
+    if imputed_only:
+        m = m & (th["association_status"] == "imputed")
     vidx = th["variant_index"][m]
     z_exp = th["z"][m]
     se_exp = th["se"][m]
+    status_exp = th["association_status"][m]
 
     raw = []
-    for vi, ze, see in zip(vidx, z_exp, se_exp, strict=True):
+    for vi, ze, see, status in zip(vidx, z_exp, se_exp, status_exp, strict=True):
         rec = q._variant_axis.by_index(int(vi))
         if rec is None:
             continue
         raw.append(
             {"alid": rec.alid, "chrom": rec.chromosome, "pos": int(rec.position),
-             "z_exp": float(ze), "se_exp": float(see)}
+             "z_exp": float(ze), "se_exp": float(see), "status_exp": str(status)}
         )
     clumped = _clump(raw, CLUMP_KB)
 
@@ -142,21 +146,36 @@ def run_mr(q, analyses_by_id: dict[str, int]) -> dict:
             d["z_exp"], d["se_exp"] = float(z), float(se)
         elif int(ai) == out_i:
             d["z_out"], d["se_out"] = float(z), float(se)
+    for vi, ai, status in zip(
+        look["variant_index"], look["analysis_index"], look["association_status"], strict=True
+    ):
+        d = per_vi.setdefault(int(vi), {})
+        if int(ai) == exp_i:
+            d["status_exp"] = str(status)
+        elif int(ai) == out_i:
+            d["status_out"] = str(status)
 
     axis = q._variant_axis
     instruments = []
     for vi, d in per_vi.items():
-        if {"z_exp", "z_out"} <= d.keys():
-            rec = axis.by_index(vi)
-            instruments.append(
-                {
-                    "alid": rec.alid if rec else str(vi),
-                    "chrom": rec.chromosome if rec else "",
-                    "pos": int(rec.position) if rec else 0,
-                    "beta_exp": d["z_exp"] * d["se_exp"], "se_exp": d["se_exp"],
-                    "beta_out": d["z_out"] * d["se_out"], "se_out": d["se_out"],
-                }
-            )
+        if not {"z_exp", "z_out"} <= d.keys():
+            continue
+        if imputed_only and (
+            d.get("status_exp") != "imputed" or d.get("status_out") != "imputed"
+        ):
+            continue
+        rec = axis.by_index(vi)
+        instruments.append(
+            {
+                "alid": rec.alid if rec else str(vi),
+                "chrom": rec.chromosome if rec else "",
+                "pos": int(rec.position) if rec else 0,
+                "beta_exp": d["z_exp"] * d["se_exp"], "se_exp": d["se_exp"],
+                "beta_out": d["z_out"] * d["se_out"], "se_out": d["se_out"],
+                "status_exp": d.get("status_exp", "observed"),
+                "status_out": d.get("status_out", "observed"),
+            }
+        )
 
     be = np.array([i["beta_exp"] for i in instruments])
     bo = np.array([i["beta_out"] for i in instruments])
@@ -172,6 +191,8 @@ def run_mr(q, analyses_by_id: dict[str, int]) -> dict:
         "exposure_id": EXPOSURE,
         "outcome_id": OUTCOME,
         "clump_kb": CLUMP_KB,
+        "instrument_filter": "imputed_only" if imputed_only else "all",
+        "n_instruments_raw_all": n_raw_all,
         "n_instruments_raw": len(raw),
         "n_instruments": len(instruments),
         "ivw_beta": ivw_beta,
@@ -179,6 +200,54 @@ def run_mr(q, analyses_by_id: dict[str, int]) -> dict:
         "ivw_z": ivw_z,
         "ivw_pval": ivw_p,
         "instruments": instruments,
+    }
+
+
+def regional_imputation_check(q, analyses_by_id: dict[str, int]) -> dict:
+    """Return one 1 Mb exposure region around the strongest imputed top hit."""
+    exp_idx = analyses_by_id[EXPOSURE]
+    th = q.top_hits(threshold=5e-8)
+    m = (th["analysis_index"] == exp_idx) & (th["association_status"] == "imputed")
+    if not np.any(m):
+        m = th["analysis_index"] == exp_idx
+    strongest = np.argmax(np.abs(th["z"][m]))
+    center_vi = int(th["variant_index"][m][strongest])
+    center_z = float(th["z"][m][strongest])
+    center = q._variant_axis.by_index(center_vi)
+    start = max(1, int(center.position) - 500_000)
+    end = int(center.position) + 500_000
+
+    region = q.range_phewas(center.chromosome, start, end)
+    keep = region["analysis_index"] == exp_idx
+    points = []
+    for vi, z, se, status in zip(
+        region["variant_index"][keep],
+        region["z"][keep],
+        region["se"][keep],
+        region["association_status"][keep],
+        strict=True,
+    ):
+        rec = q._variant_axis.by_index(int(vi))
+        points.append(
+            {
+                "alid": rec.alid if rec else str(int(vi)),
+                "pos": int(rec.position) if rec else int(vi),
+                "z": float(z),
+                "se": float(se),
+                "association_status": str(status),
+                "is_center": int(vi) == center_vi,
+            }
+        )
+
+    return {
+        "analysis_id": EXPOSURE,
+        "chrom": center.chromosome,
+        "start": start,
+        "end": end,
+        "center_alid": center.alid,
+        "center_pos": int(center.position),
+        "center_z": center_z,
+        "points": points,
     }
 
 
@@ -227,7 +296,8 @@ def main() -> None:
     raw_bytes, n_files = _raw_vcf_bytes(MANIFEST)
     build_seconds = _build_seconds(BUILD_LOG)
 
-    mr = run_mr(q, analyses_by_id)
+    imputed_only_mr = bool(getattr(q, "_is_completed", False))
+    mr = run_mr(q, analyses_by_id, imputed_only=imputed_only_mr)
     print(f"MR IVW: beta={mr['ivw_beta']:.4f} se={mr['ivw_se']:.4f} "
           f"p={mr['ivw_pval']:.2e}  n_instruments={mr['n_instruments']}")
 
@@ -249,6 +319,7 @@ def main() -> None:
         },
         "timings": timings,
         "mr": mr,
+        "regional_imputation_check": regional_imputation_check(q, analyses_by_id),
         "labels": {
             EXPOSURE: an[analyses_by_id[EXPOSURE]]["phenotype_label"],
             OUTCOME: an[analyses_by_id[OUTCOME]]["phenotype_label"],

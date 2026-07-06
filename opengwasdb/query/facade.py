@@ -55,6 +55,27 @@ class StoreQuery:
             return np.zeros(len(rows), dtype=np.uint8)
         return self._imputed.vindex[rows, cols].astype(np.uint8)
 
+    @staticmethod
+    def _contiguous_row_slice(row_indices: np.ndarray) -> slice | None:
+        if len(row_indices) == 0:
+            return None
+        start = int(row_indices[0])
+        stop = int(row_indices[-1]) + 1
+        if stop - start != len(row_indices):
+            return None
+        if not np.array_equal(row_indices, np.arange(start, stop, dtype=row_indices.dtype)):
+            return None
+        return slice(start, stop)
+
+    @classmethod
+    def _read_row_block(
+        cls, array: zarr.Array, row_indices: np.ndarray, dtype: str | np.dtype
+    ) -> np.ndarray:
+        row_slice = cls._contiguous_row_slice(row_indices)
+        if row_slice is not None:
+            return array[row_slice, :].astype(dtype)
+        return array.oindex[row_indices, :].astype(dtype)
+
     def close(self) -> None:
         self._variant_axis.close()
         self._connection.close()
@@ -150,15 +171,19 @@ class StoreQuery:
         row_indices = self._variant_axis.range_indices(chromosome, start, end)
         if len(row_indices) == 0:
             return _empty_result()
-        z_block = self._root["z"].oindex[row_indices, :].astype("float32")
-        se_block = self._root["se"].oindex[row_indices, :].astype("float32")
+        z_block = self._read_row_block(self._root["z"], row_indices, "float32")
+        se_block = self._read_row_block(self._root["se"], row_indices, "float32")
         mask = np.isfinite(z_block) & np.isfinite(se_block)
         rows_rel, cols = np.where(mask)
         rows = row_indices[rows_rel].astype("int32")
         cols = cols.astype("int32")
         z_vals = z_block[mask]
         se_vals = se_block[mask]
-        imp = self._imputed_pairs(rows, cols)
+        if self._imputed is None:
+            imp = np.zeros(len(z_vals), dtype=np.uint8)
+        else:
+            imp_block = self._read_row_block(self._imputed, row_indices, np.uint8)
+            imp = imp_block[mask]
         if observed_only:
             keep = imp == 0
             rows, cols, z_vals, se_vals, imp = (
