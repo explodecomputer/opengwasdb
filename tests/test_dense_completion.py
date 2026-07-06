@@ -395,6 +395,23 @@ class TestQuery:
         assert len(result["association_status"]) == len(result["z"])
         q.close()
 
+    def test_range_phewas_reads_imputed_status_as_block(self, completed_store):
+        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        imputed = root["imputed"][:]
+        imputed[0, 0] = 1
+        root["imputed"][:] = imputed
+
+        q = query_store(completed_store)
+
+        def fail_imputed_pairs(rows, cols):  # noqa: ARG001
+            raise AssertionError("range_phewas should read imputed flags as a block")
+
+        q._imputed_pairs = fail_imputed_pairs
+        result = q.range_phewas("1", 900_000, 1_100_000)
+        assert len(result["association_status"]) == len(result["z"])
+        assert "imputed" in set(result["association_status"].tolist())
+        q.close()
+
     def test_top_hits_falls_back_without_indexed_imputed_flags(self, completed_store):
         from opengwasdb.layouts.dense.top_hits import threshold_key
 
