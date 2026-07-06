@@ -14,6 +14,7 @@ from opengwasdb.layouts.dense.complete import (
     resume_dense_completion,
 )
 from opengwasdb.layouts.dense.constants import DEFAULT_CHUNK_SHAPE
+from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
@@ -290,6 +291,13 @@ def complete_dense_resume_command(
 def build_ragged_top_hits_command(store_path: Path) -> None:
     """Build (or rebuild) the top-hit index for a Ragged store."""
     build_ragged_top_hit_indexes(store_path)
+    typer.echo("done")
+
+
+@app.command("build-dense-top-hits")
+def build_dense_top_hits_command(store_path: Path) -> None:
+    """Build (or rebuild) the top-hit index for a Dense store."""
+    build_top_hit_indexes(store_path)
     typer.echo("done")
 
 

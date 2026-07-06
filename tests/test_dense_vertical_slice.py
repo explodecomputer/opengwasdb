@@ -143,3 +143,36 @@ def test_range_indices_matches_range_variant_index(dense_store_path):
         va = VariantAxis(dense_store_path, conn)
         assert len(va.range_indices("1", 999999, 999999)) == 0
         va.close()
+
+
+def test_lookup_surgical_read_matches_direct_matrix(dense_store_path):
+    # issue 052: surgical oindex[rows, cols] must return exactly the finite cells
+    # (and the same values) as a direct per-cell matrix read — no over- or
+    # under-reporting when rows/cols are scattered and some cells are missing.
+    query = query_store(dense_store_path)
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r")
+    variants = query.variants_table()
+    analyses = query.analyses_table()
+    alids = [v["alid"] for v in variants.values()]
+    aids = [a["analysis_id"] for a in analyses.values()]
+
+    result = query.lookup(alids, aids)
+    z = root["z"][:].astype("float32")
+    se = root["se"][:].astype("float32")
+
+    returned = set()
+    for r, c, zz, ss in zip(
+        result["variant_index"], result["analysis_index"],
+        result["z"], result["se"], strict=True,
+    ):
+        r, c = int(r), int(c)
+        assert np.isfinite(z[r, c]) and np.isfinite(se[r, c])
+        assert zz == pytest.approx(float(z[r, c]), rel=1e-3, abs=1e-3)
+        assert ss == pytest.approx(float(se[r, c]), rel=1e-3, abs=1e-3)
+        returned.add((r, c))
+
+    finite = {
+        (int(r), int(c))
+        for r, c in zip(*np.where(np.isfinite(z) & np.isfinite(se)), strict=True)
+    }
+    assert returned == finite

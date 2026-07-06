@@ -592,6 +592,7 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
         return
     top = root["top_hits"]
     z_arr = root["z"]
+    imputed_arr = root["imputed"] if "imputed" in root else None
     n_variants, n_analyses = int(z_arr.shape[0]), int(z_arr.shape[1])
 
     # Load each threshold group's (comparatively small) index arrays and run the
@@ -605,7 +606,15 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
         cols = group["analysis_index"][:].astype(np.int64)
         z_values = group["z"][:].astype("float32")
         abs_z = group["abs_z"][:].astype("float32")
-        if len(rows) != len(cols) or len(rows) != len(z_values) or len(rows) != len(abs_z):
+        imputed_values = (
+            group["imputed"][:].astype(np.uint8) if "imputed" in group else None
+        )
+        if (
+            len(rows) != len(cols)
+            or len(rows) != len(z_values)
+            or len(rows) != len(abs_z)
+            or (imputed_values is not None and len(rows) != len(imputed_values))
+        ):
             errors.append(f"top-hit index {key} has inconsistent array lengths")
             continue
         if len(abs_z) > 1 and np.any(abs_z[:-1] < abs_z[1:]):
@@ -621,9 +630,11 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
             "rows": rows,
             "cols": cols,
             "z_values": z_values,
+            "imputed_values": imputed_values,
             "n": len(rows),
             "pass_count": 0,
             "consistent": True,
+            "imputed_consistent": True,
         }
     if not groups:
         return
@@ -648,10 +659,21 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
                 and np.all(np.abs(gathered) >= g["z_crit"])
             ):
                 g["consistent"] = False
+            if imputed_arr is not None and g["imputed_values"] is not None:
+                imputed_band = imputed_arr[r0:r1]
+                gathered_imputed = imputed_band[
+                    g["rows"][in_band] - r0, g["cols"][in_band]
+                ].astype(np.uint8)
+                if not np.array_equal(gathered_imputed, g["imputed_values"][in_band]):
+                    g["imputed_consistent"] = False
 
     for key, g in groups.items():
         if not g["consistent"]:
             errors.append(f"top-hit index {key} contains z value inconsistent with z array")
+        elif not g["imputed_consistent"]:
+            errors.append(
+                f"top-hit index {key} contains imputed value inconsistent with imputed array"
+            )
         elif g["n"] != g["pass_count"]:
             errors.append(f"top-hit index {key} does not match stored z values")
 

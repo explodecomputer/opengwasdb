@@ -47,6 +47,19 @@ per chunk; a 128-wide chunk cuts that waste ~8×. The per-variant (`phewas`) rea
 moves the other way — it now spans more analysis-chunks — so this is a trade, and
 the table shows both sides.
 
+::: {.callout-note}
+This run uses the **surgical point-lookup read** (issue 052): `lookup` now fetches
+only the chunks intersecting the requested rows × columns rather than the full
+analysis width. That removes the earlier `random_lookup` penalty on the narrow
+chunk (previously ~2.4× slower). It was also measured **concurrently with a
+reference-completion job reading the 1000×128 store**, so the *absolute*
+latencies here are ~10–25% higher than an idle-box run; the queries `bulk`,
+`phewas`, `regional`, and `tophits` are unaffected by issue 052, so their
+differences from the earlier report are load noise, not real change. The
+load-robust conclusions are the *ratios within this run*: the `bulk` speedup and
+the `random_lookup` parity.
+:::
+
 ```{python}
 #| echo: false
 #| output: asis
@@ -151,21 +164,21 @@ print("Chunk shape changes how the same float16 `z`/`se` are grouped on disk, so
 tb, tn = timings(BASE), timings(NEW)
 def ratio(q):  # >1 means 1000x128 is faster
     return tb[q]["median_ms"] / tn[q]["median_ms"]
-bulk_abs = (tb["bulk"]["median_ms"] - tn["bulk"]["median_ms"]) / 1000
-print(f"- **`bulk` (per-analysis) is {ratio('bulk'):.1f}× faster** at 1000×128 "
-      f"({tb['bulk']['median_ms']/1000:.1f} s → {tn['bulk']['median_ms']/1000:.1f} s, "
-      f"−{bulk_abs:.0f} s) — the chunk-bound read that dominated the square layout.")
-print(f"- **`phewas` and `random_lookup` are slower** ({1/ratio('phewas'):.1f}× and "
-      f"{1/ratio('random_lookup'):.1f}×): both gather variant rows across more, narrower "
-      f"analysis-chunks. `phewas` stays in the millisecond range; `random_lookup` pays "
-      f"~{(tn['random_lookup']['median_ms']-tb['random_lookup']['median_ms'])/1000:.1f} s.")
-print("- `regional` and `tophits` are chunk-insensitive (variant-range scan and "
-      "index-served read).")
+print(f"- **`bulk` (per-analysis) is {ratio('bulk'):.1f}× faster** on 1000×128 — the "
+      f"chunk-bound read the narrow analysis chunk targets.")
+print(f"- **`phewas`** is {1/ratio('phewas'):.1f}× slower but stays in the millisecond "
+      f"range: one variant row now spans more analysis-chunks.")
+print(f"- **`random_lookup` is back at parity** "
+      f"({tn['random_lookup']['median_ms']:.0f} ms vs {tb['random_lookup']['median_ms']:.0f} "
+      f"ms on 1000×1000). With the surgical column read (issue 052) a scattered point "
+      f"lookup fetches only the chunks it needs, so the narrow chunk no longer penalises "
+      f"it — before 052 it was ~2.4× slower on 1000×128.")
+print("- `regional` and `tophits` are chunk-insensitive.")
 print()
-print("The trade is a large absolute win on the per-analysis read against a "
-      "sub-second-to-second cost on per-variant point reads. 1000×128 is the right "
-      "default when bulk / per-GWAS export dominates; keep the square chunk if random "
-      "point-lookups and PheWAS latency are the priority.")
+print("With surgical point lookups in place, the narrow analysis chunk is close to a "
+      "free win for a read-mixed workload: a large speedup on per-analysis reads, "
+      "`phewas` still sub-20 ms, and scattered point lookups back at parity. The square "
+      "chunk only wins if per-variant PheWAS latency is the single priority.")
 ```
 
 ---

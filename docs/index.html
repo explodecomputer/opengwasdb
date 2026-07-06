@@ -78,9 +78,9 @@
           </a>
           <br>
           Same genome-wide ukb-b data at two zarr chunk shapes: the narrower analysis
-          chunk makes the per-analysis (bulk) read 3.4× faster (31 s → 9 s) at the cost
-          of slower per-variant point reads (phewas, random lookup). Speedup table and
-          log-scale bar chart.
+          chunk makes the per-analysis (bulk) read ~4× faster; with surgical point
+          lookups (issue 052) scattered lookups are back at parity, leaving only a small
+          per-variant PheWAS cost. Speedup table and log-scale bar chart.
         </li>
         <li>
           <a href="benchmark-output/opengwasdb_vs_besdq_comparison.html">

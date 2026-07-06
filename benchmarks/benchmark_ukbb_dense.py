@@ -7,7 +7,7 @@ Writes docs/benchmark-output/opengwasdb_ukbb_dense_benchmark.json, which the
 companion QMD renders.
 
 Usage:
-  uv run python benchmarks/benchmark_ukbb_dense.py [--reps N]
+  uv run python benchmarks/benchmark_ukbb_dense.py [--reps N] [--store PATH] [--output PATH]
 """
 
 from __future__ import annotations
@@ -185,9 +185,11 @@ def run_mr(q, analyses_by_id: dict[str, int]) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=5)
+    ap.add_argument("--store", type=Path, default=STORE)
+    ap.add_argument("--output", type=Path, default=OUTPUT)
     args = ap.parse_args()
 
-    q = query_store(STORE)
+    q = query_store(args.store)
     an = q.analyses_table()
     analyses_by_id = {v["analysis_id"]: k for k, v in an.items()}
     n_analyses = len(an)
@@ -221,7 +223,7 @@ def main() -> None:
                         "p95_ms": round(p95, 3), "result_count": cnt})
         print(f"{name:15s} median={med:9.2f} ms  count={cnt:,}")
 
-    store_bytes = _dir_bytes(STORE)
+    store_bytes = _dir_bytes(args.store)
     raw_bytes, n_files = _raw_vcf_bytes(MANIFEST)
     build_seconds = _build_seconds(BUILD_LOG)
 
@@ -231,7 +233,7 @@ def main() -> None:
 
     result = {
         "dataset": {"n_variants": n_variants, "n_analyses": n_analyses,
-                    "reference_assembly": "GRCh38"},
+                    "reference_assembly": "GRCh38", "store": str(args.store)},
         "storage": {
             "store_bytes": store_bytes, "store_gb": round(store_bytes / 1e9, 2),
             "raw_vcf_bytes": raw_bytes, "raw_vcf_gb": round(raw_bytes / 1e9, 2),
@@ -252,8 +254,8 @@ def main() -> None:
             OUTCOME: an[analyses_by_id[OUTCOME]]["phenotype_label"],
         },
     }
-    OUTPUT.write_text(json.dumps(result, indent=2))
-    print(f"wrote {OUTPUT}")
+    args.output.write_text(json.dumps(result, indent=2))
+    print(f"wrote {args.output}")
 
 
 if __name__ == "__main__":

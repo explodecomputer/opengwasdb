@@ -334,6 +334,7 @@ class TestTopHitHarvest:
         z_matrix = root["z"][:]
         for t in (5e-4, 5e-6, 5e-8):
             g = root[f"top_hits/{threshold_key(t)}"]
+            assert "imputed" not in g
             rows = g["variant_index"][:]
             cols = g["analysis_index"][:]
             index_z = g["z"][:]

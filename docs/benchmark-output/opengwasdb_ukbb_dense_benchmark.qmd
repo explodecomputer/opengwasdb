@@ -1,6 +1,6 @@
 ---
 title: "OpenGWASDB ukb-b Dense Store — Performance & Validation"
-subtitle: "Genome-wide · 2,514 UK Biobank analyses × ~9.85M variants"
+subtitle: "Genome-wide · 2,514 UK Biobank analyses · observed-only and reference-completed"
 date: today
 format:
   html:
@@ -18,6 +18,7 @@ from pathlib import Path
 
 HERE = Path(".")
 data = json.loads((HERE / "opengwasdb_ukbb_dense_benchmark.json").read_text())
+completed = json.loads((HERE / "opengwasdb_ukbb_dense_completed_benchmark.json").read_text())
 
 def md_table(headers, rows):
     sep = "|" + "|".join(["---"] * len(headers)) + "|"
@@ -27,27 +28,42 @@ def md_table(headers, rows):
 
 def fmt_ms(v):
     return f"{v:,.1f} ms" if v < 1000 else f"{v/1000:,.2f} s"
+
+def by_query(d):
+    return {row["query"]: row for row in d["timings"]}
 ```
 
 ## Overview
 
-A single **Dense Observed-Only** store holding every association from **2,514
-genome-wide UK Biobank GWAS** (the OpenGWAS `ukb-b` batch), built from the source
-GWAS-VCFs with inline hg19→hg38 liftover. This report benchmarks query latency
-across all access patterns, storage and build cost versus the raw VCFs, and an MR
-IVW analysis as an end-to-end scientific validation.
+Two **Dense** stores over the **2,514 genome-wide UK Biobank GWAS** in the
+OpenGWAS `ukb-b` batch:
+
+- an **Observed-Only** store built from the source GWAS-VCFs with inline
+  hg19→hg38 liftover;
+- a **Reference-Completed** store whose variant axis is the observed source
+  variants plus EUR LD-panel variants.
+
+This report benchmarks query latency across all access patterns, storage and
+build cost versus the raw VCFs, and an MR IVW analysis as an end-to-end
+scientific validation.
 
 ```{python}
 #| echo: false
 #| output: asis
 d = data["dataset"]
+dc = completed["dataset"]
 rows = [
-    ("Analyses (GWAS)", f"{d['n_analyses']:,}"),
-    ("Variants (hg38)", f"{d['n_variants']:,}"),
-    ("Associations (dense cells)", f"{d['n_variants'] * d['n_analyses'] / 1e9:.1f} billion"),
-    ("Reference assembly", d["reference_assembly"]),
+    ("Analyses (GWAS)", f"{d['n_analyses']:,}", f"{dc['n_analyses']:,}"),
+    ("Variants (hg38)", f"{d['n_variants']:,}", f"{dc['n_variants']:,}"),
+    ("Additional panel variants", "—", f"{dc['n_variants'] - d['n_variants']:,}"),
+    (
+        "Associations (dense cells)",
+        f"{d['n_variants'] * d['n_analyses'] / 1e9:.1f} billion",
+        f"{dc['n_variants'] * dc['n_analyses'] / 1e9:.1f} billion",
+    ),
+    ("Reference assembly", d["reference_assembly"], dc["reference_assembly"]),
 ]
-print(md_table(["Property", "Value"], rows))
+print(md_table(["Property", "Observed-Only", "Reference-Completed"], rows))
 ```
 
 ---
@@ -58,9 +74,11 @@ print(md_table(["Property", "Value"], rows))
 #| echo: false
 #| output: asis
 s = data["storage"]
+sc = completed["storage"]
 rows = [
     ("Raw source VCFs (.vcf.gz)", f"{s['n_source_files']:,} files", f"{s['raw_vcf_gb']:,.1f} GB"),
-    ("OpenGWASDB Dense store", "single store", f"**{s['store_gb']:,.1f} GB**"),
+    ("OpenGWASDB Dense Observed-Only", "single store", f"**{s['store_gb']:,.1f} GB**"),
+    ("OpenGWASDB Dense Reference-Completed", "single store", f"**{sc['store_gb']:,.1f} GB**"),
 ]
 print(md_table(["Form", "Files", "Size"], rows))
 print()
@@ -68,6 +86,10 @@ print(f"**{s['compression_ratio']:.1f}× smaller** than the source VCFs "
       f"({s['store_gb']:.1f} GB vs {s['raw_vcf_gb']:.0f} GB) — one queryable store "
       f"replacing {s['n_source_files']:,} files. The store keeps float16 `z` + `se`, a "
       f"tabix variant axis, an mmap'd ALID index, and a top-hit index.")
+print()
+print(f"The reference-completed store is **{sc['store_gb'] - s['store_gb']:.1f} GB larger** "
+      f"than observed-only after adding {completed['dataset']['n_variants'] - data['dataset']['n_variants']:,} "
+      "panel variants, imputed flags, and completion metadata.")
 ```
 
 ---
@@ -93,7 +115,7 @@ else:
 
 ## Query performance
 
-Median of repeated calls after one warm-up, on the full genome-wide store.
+Median of repeated calls after one warm-up, on the full genome-wide stores.
 
 ```{python}
 #| echo: false
@@ -106,17 +128,30 @@ DESC = {
     "random_lookup": "100 variants × 10 analyses (`lookup`)",
 }
 rows = []
-for t in data["timings"]:
+obs_t = by_query(data)
+comp_t = by_query(completed)
+for name in obs_t:
+    t = obs_t[name]
+    tc = comp_t[name]
     rows.append((
-        t["query"], fmt_ms(t["median_ms"]), fmt_ms(t["p95_ms"]),
-        f"{t['result_count']:,}", DESC.get(t["query"], ""),
+        name,
+        fmt_ms(t["median_ms"]),
+        fmt_ms(tc["median_ms"]),
+        f"{tc['median_ms'] / t['median_ms']:.2f}×",
+        f"{t['result_count']:,} → {tc['result_count']:,}",
+        DESC.get(name, ""),
     ))
-print(md_table(["Pattern", "Median", "p95", "Result cells", "What it reads"], rows))
+print(md_table([
+    "Pattern", "Observed median", "Completed median", "Ratio",
+    "Result cells", "What it reads",
+], rows))
 ```
 
 Point and index queries (`phewas`, `top_hits`, `lookup`) stay in the low-millisecond
 range even across 2,514 analyses; `bulk` and `regional` scale with the number of
-cells returned. The `top_hits` read is served entirely by the precomputed index.
+cells returned. The reference-completed `top_hits` path is also served entirely
+by the precomputed index: the top-hit index now stores the `imputed` flag
+alongside `z`/`se`, avoiding millions of random reads into `data.zarr/imputed`.
 
 ---
 
@@ -130,12 +165,15 @@ sets are pulled with ordinary store queries.
 #| echo: false
 #| output: asis
 mr = data["mr"]
+mrc = completed["mr"]
 lab = data["labels"]
 print(f"- **Exposure** (`{mr['exposure_id']}`): {lab[mr['exposure_id']]}")
 print(f"- **Outcome** (`{mr['outcome_id']}`): {lab[mr['outcome_id']]}")
 print(f"- **Instruments**: genome-wide significant (p<5e-8) exposure variants, "
       f"distance-pruned at {mr['clump_kb']} kb → **{mr['n_instruments']}** "
-      f"independent instruments (from {mr['n_instruments_raw']:,} raw hits).")
+      f"observed-only instruments (from {mr['n_instruments_raw']:,} raw hits) and "
+      f"**{mrc['n_instruments']}** completed-store instruments "
+      f"(from {mrc['n_instruments_raw']:,} raw hits).")
 print()
 print("Effects are already on the same allele (the store orients every analysis to "
       "the canonical ALID), so no harmonisation step is needed. Both traits are "
@@ -145,16 +183,21 @@ print("Effects are already on the same allele (the store orients every analysis 
 ```{python}
 #| echo: false
 #| output: asis
-mr = data["mr"]
+mro = data["mr"]
+mrc = completed["mr"]
 rows = [
-    ("IVW estimate (log OR / log-OR exposure)", f"{mr['ivw_beta']:.3f}"),
-    ("Standard error", f"{mr['ivw_se']:.3f}"),
-    ("Z", f"{mr['ivw_z']:.2f}"),
-    ("P-value", f"{mr['ivw_pval']:.2e}"),
+    (
+        "IVW estimate (log OR / log-OR exposure)",
+        f"{mro['ivw_beta']:.3f}",
+        f"{mrc['ivw_beta']:.3f}",
+    ),
+    ("Standard error", f"{mro['ivw_se']:.3f}", f"{mrc['ivw_se']:.3f}"),
+    ("Z", f"{mro['ivw_z']:.2f}", f"{mrc['ivw_z']:.2f}"),
+    ("P-value", f"{mro['ivw_pval']:.2e}", f"{mrc['ivw_pval']:.2e}"),
 ]
-print(md_table(["Quantity", "Value"], rows))
+print(md_table(["Quantity", "Observed-Only", "Reference-Completed"], rows))
 print()
-direction = "positive" if mr["ivw_beta"] > 0 else "negative"
+direction = "positive" if mrc["ivw_beta"] > 0 else "negative"
 print(f"The estimate is **{direction}** — genetically higher cholesterol liability "
       f"is associated with higher heart-attack risk, the expected direction for this "
       f"positive control.")
@@ -166,7 +209,7 @@ print(f"The estimate is **{direction}** — genetically higher cholesterol liabi
 import numpy as np
 import matplotlib.pyplot as plt
 
-mr = data["mr"]
+mr = completed["mr"]
 inst = mr["instruments"]
 be = np.array([i["beta_exp"] for i in inst])
 bo = np.array([i["beta_out"] for i in inst])
@@ -196,10 +239,13 @@ plt.show()
 ```{python}
 #| echo: false
 #| output: asis
-print("- Data: `opengwasdb_ukbb_dense_benchmark.json` "
+print("- Data: `opengwasdb_ukbb_dense_benchmark.json` and "
+      "`opengwasdb_ukbb_dense_completed_benchmark.json` "
       "(from `benchmarks/benchmark_ukbb_dense.py`)")
 print(f"- Store: `/local-scratch/data/opengwas/opengwasdb/ukb-b.opengwasdb` "
       f"({data['dataset']['n_variants']:,} × {data['dataset']['n_analyses']:,})")
+print(f"- Completed store: `{completed['dataset']['store']}` "
+      f"({completed['dataset']['n_variants']:,} × {completed['dataset']['n_analyses']:,})")
 print("- MR is a demonstration/validation of the query layer, not a definitive "
       "epidemiological estimate (self-reported binary exposure, distance-based "
       "pruning in place of LD clumping).")
