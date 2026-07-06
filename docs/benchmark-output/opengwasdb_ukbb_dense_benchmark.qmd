@@ -155,11 +155,13 @@ alongside `z`/`se`, avoiding millions of random reads into `data.zarr/imputed`.
 
 ---
 
-## MR validation: high cholesterol → heart attack
+## MR validation: imputed high cholesterol → heart attack
 
 An end-to-end **inverse-variance weighted (IVW) Mendelian randomization** run
-straight off the store, as a scientific smoke test. Instruments and both effect
-sets are pulled with ordinary store queries.
+straight off the store, as a scientific smoke test. For the reference-completed
+store this deliberately uses **only imputed instruments**: the exposure
+top-hit association must be imputed, and the exposure/outcome lookup used in the
+scatter plot is also restricted to instruments where both cells are imputed.
 
 ```{python}
 #| echo: false
@@ -169,11 +171,14 @@ mrc = completed["mr"]
 lab = data["labels"]
 print(f"- **Exposure** (`{mr['exposure_id']}`): {lab[mr['exposure_id']]}")
 print(f"- **Outcome** (`{mr['outcome_id']}`): {lab[mr['outcome_id']]}")
-print(f"- **Instruments**: genome-wide significant (p<5e-8) exposure variants, "
-      f"distance-pruned at {mr['clump_kb']} kb → **{mr['n_instruments']}** "
-      f"observed-only instruments (from {mr['n_instruments_raw']:,} raw hits) and "
-      f"**{mrc['n_instruments']}** completed-store instruments "
-      f"(from {mrc['n_instruments_raw']:,} raw hits).")
+print(f"- **Observed-only reference**: genome-wide significant (p<5e-8) exposure "
+      f"variants, distance-pruned at {mr['clump_kb']} kb → "
+      f"**{mr['n_instruments']}** instruments from {mr['n_instruments_raw']:,} raw hits.")
+print(f"- **Reference-completed sanity check**: imputed-only genome-wide significant "
+      f"exposure variants, distance-pruned at {mrc['clump_kb']} kb → "
+      f"**{mrc['n_instruments']}** instruments from {mrc['n_instruments_raw']:,} "
+      f"imputed raw hits "
+      f"({mrc.get('n_instruments_raw_all', mrc['n_instruments_raw']):,} total exposure hits before filtering).")
 print()
 print("Effects are already on the same allele (the store orients every analysis to "
       "the canonical ALID), so no harmonisation step is needed. Both traits are "
@@ -195,17 +200,17 @@ rows = [
     ("Z", f"{mro['ivw_z']:.2f}", f"{mrc['ivw_z']:.2f}"),
     ("P-value", f"{mro['ivw_pval']:.2e}", f"{mrc['ivw_pval']:.2e}"),
 ]
-print(md_table(["Quantity", "Observed-Only", "Reference-Completed"], rows))
+print(md_table(["Quantity", "Observed-Only", "Completed: imputed-only"], rows))
 print()
 direction = "positive" if mrc["ivw_beta"] > 0 else "negative"
-print(f"The estimate is **{direction}** — genetically higher cholesterol liability "
-      f"is associated with higher heart-attack risk, the expected direction for this "
-      f"positive control.")
+print(f"The imputed-only estimate is **{direction}** — genetically higher cholesterol "
+      f"liability is associated with higher heart-attack risk, the expected direction "
+      f"for this positive-control sanity check.")
 ```
 
 ```{python}
 #| echo: false
-#| fig-cap: "Per-instrument effects: exposure (x) vs outcome (y), with 95% CIs and the IVW slope."
+#| fig-cap: "Imputed-only per-instrument effects from the completed store: exposure (x) vs outcome (y), with 95% CIs and the IVW slope."
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -218,16 +223,70 @@ seo = np.array([i["se_out"] for i in inst])
 
 fig, ax = plt.subplots(figsize=(6.4, 5.2))
 ax.errorbar(be, bo, xerr=1.96 * see, yerr=1.96 * seo, fmt="o", ms=4,
-            color="#2a78d6", ecolor="#b7d3f6", elinewidth=0.8, capsize=0, alpha=0.9,
-            label="instruments (95% CI)")
+            color="#c43c39", ecolor="#efbbb8", elinewidth=0.8, capsize=0, alpha=0.9,
+            label="imputed instruments (95% CI)")
 xs = np.array([be.min() * 1.1, be.max() * 1.1])
-ax.plot(xs, mr["ivw_beta"] * xs, "-", color="#eb6834", lw=2,
+ax.plot(xs, mr["ivw_beta"] * xs, "-", color="#1f2933", lw=2,
         label=f"IVW slope = {mr['ivw_beta']:.2f}")
 ax.axhline(0, color="#c3c2b7", lw=0.8); ax.axvline(0, color="#c3c2b7", lw=0.8)
 ax.set_xlabel("SNP effect on high cholesterol (log OR)")
 ax.set_ylabel("SNP effect on heart attack (log OR)")
-ax.set_title("MR IVW: high cholesterol → heart attack")
+ax.set_title("Imputed-only MR IVW: high cholesterol → heart attack")
 ax.legend(frameon=False, fontsize=9)
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## Regional imputation sanity check
+
+The 1 Mb regional check is centred on the strongest imputed high-cholesterol
+top hit in the completed store. The plot shows all high-cholesterol associations
+returned for that window, with imputed associations highlighted.
+
+```{python}
+#| echo: false
+#| output: asis
+reg = completed["regional_imputation_check"]
+points = reg["points"]
+n_imp = sum(p["association_status"] == "imputed" for p in points)
+n_obs = sum(p["association_status"] == "observed" for p in points)
+print(f"- **Analysis**: `{reg['analysis_id']}` ({completed['labels'][reg['analysis_id']]})")
+print(f"- **Region**: chr{reg['chrom']}:{reg['start']:,}-{reg['end']:,} "
+      f"centred on `{reg['center_alid']}` (z={reg['center_z']:.2f})")
+print(f"- **Associations plotted**: {len(points):,} total; "
+      f"{n_obs:,} observed and {n_imp:,} imputed.")
+```
+
+```{python}
+#| echo: false
+#| fig-cap: "One megabase around the strongest imputed high-cholesterol top hit. Imputed associations are highlighted in red."
+import numpy as np
+import matplotlib.pyplot as plt
+
+reg = completed["regional_imputation_check"]
+points = reg["points"]
+pos = np.array([p["pos"] for p in points], dtype=float) / 1e6
+z = np.array([p["z"] for p in points], dtype=float)
+status = np.array([p["association_status"] for p in points])
+is_center = np.array([p["is_center"] for p in points], dtype=bool)
+
+fig, ax = plt.subplots(figsize=(8.2, 4.8))
+obs = status == "observed"
+imp = status == "imputed"
+ax.scatter(pos[obs], z[obs], s=12, color="#52616b", alpha=0.45,
+           linewidths=0, label=f"observed ({obs.sum():,})")
+ax.scatter(pos[imp], z[imp], s=18, color="#c43c39", alpha=0.85,
+           linewidths=0, label=f"imputed ({imp.sum():,})")
+ax.scatter(pos[is_center], z[is_center], s=90, facecolors="none",
+           edgecolors="#111827", linewidths=1.5, label="centre top hit")
+ax.axhline(0, color="#c3c2b7", lw=0.8)
+ax.axvline(reg["center_pos"] / 1e6, color="#111827", lw=0.8, ls="--", alpha=0.7)
+ax.set_xlabel(f"chr{reg['chrom']} position (Mb, hg38)")
+ax.set_ylabel("High-cholesterol z-score")
+ax.set_title(f"Regional check around {reg['center_alid']}")
+ax.legend(frameon=False, fontsize=9, ncols=3)
 fig.tight_layout()
 plt.show()
 ```
