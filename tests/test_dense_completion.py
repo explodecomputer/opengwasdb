@@ -290,6 +290,21 @@ class TestValidation:
         assert not result.ok
         assert any("NaN z" in e for e in result.errors), result.errors
 
+    def test_corrupt_top_hit_imputed_index_fails(self, completed_store):
+        from opengwasdb.layouts.dense.top_hits import threshold_key
+
+        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        group = root[f"top_hits/{threshold_key(5e-4)}"]
+        assert "imputed" in group
+        values = group["imputed"][:]
+        assert len(values) > 0
+        values[0] = 1 - values[0]
+        group["imputed"][:] = values
+
+        result = validate_store(completed_store)
+        assert not result.ok
+        assert any("imputed value inconsistent" in e for e in result.errors), result.errors
+
 
 class TestSourceFidelity:
     """validate_store(source=...) cross-checks store values against the source.
@@ -355,6 +370,47 @@ class TestQuery:
         result = q.top_hits(threshold=1.0, observed_only=True)
         assert "imputed" not in set(result["association_status"].tolist())
         q.close()
+
+    def test_top_hit_index_stores_imputed_flags(self, completed_store):
+        from opengwasdb.layouts.dense.top_hits import threshold_key
+
+        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r")
+        group = root[f"top_hits/{threshold_key(5e-4)}"]
+        assert "imputed" in group
+
+        rows = group["variant_index"][:].astype(np.int64)
+        cols = group["analysis_index"][:].astype(np.int64)
+        indexed = group["imputed"][:].astype(np.uint8)
+        gathered = root["imputed"].vindex[rows, cols].astype(np.uint8)
+        np.testing.assert_array_equal(indexed, gathered)
+
+    def test_top_hits_uses_indexed_imputed_flags(self, completed_store):
+        q = query_store(completed_store)
+
+        def fail_imputed_pairs(rows, cols):  # noqa: ARG001
+            raise AssertionError("top_hits should read indexed imputed flags")
+
+        q._imputed_pairs = fail_imputed_pairs
+        result = q.top_hits(threshold=5e-4)
+        assert len(result["association_status"]) == len(result["z"])
+        q.close()
+
+    def test_top_hits_falls_back_without_indexed_imputed_flags(self, completed_store):
+        from opengwasdb.layouts.dense.top_hits import threshold_key
+
+        q = query_store(completed_store)
+        indexed = q.top_hits(threshold=5e-4)
+        q.close()
+
+        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        del root[f"top_hits/{threshold_key(5e-4)}"]["imputed"]
+
+        q = query_store(completed_store)
+        fallback = q.top_hits(threshold=5e-4)
+        q.close()
+
+        for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
+            np.testing.assert_array_equal(indexed[name], fallback[name])
 
 
 class TestResume:

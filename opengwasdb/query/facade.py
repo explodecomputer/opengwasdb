@@ -243,7 +243,10 @@ class StoreQuery:
             se_values = self._root["se"].vindex[
                 variant_indices.astype("int64"), analysis_indices.astype("int64")
             ].astype("float32")
-        imp = self._imputed_pairs(variant_indices, analysis_indices)
+        if "imputed" in group:
+            imp = group["imputed"][:].astype(np.uint8)
+        else:
+            imp = self._imputed_pairs(variant_indices, analysis_indices)
         if observed_only:
             keep = imp == 0
             variant_indices, analysis_indices, z_values, se_values, imp = (

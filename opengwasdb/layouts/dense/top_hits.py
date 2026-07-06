@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 from numcodecs import Blosc
-from scipy.special import erfc, erfcinv
+from scipy.special import erfc, erfcinv  # type: ignore[import-untyped]
 
 from opengwasdb.layouts.dense.constants import TOP_HIT_THRESHOLDS
 
@@ -38,6 +38,7 @@ def write_top_hit_indexes(
     z: np.ndarray,
     se: np.ndarray,
     thresholds: tuple[float, ...] = TOP_HIT_THRESHOLDS,
+    imputed: np.ndarray | None = None,
 ) -> None:
     """Write ranked top-hit groups from pre-collected candidate cells.
 
@@ -46,13 +47,16 @@ def write_top_hit_indexes(
     every threshold are harmless; each tier re-filters by its own ``z_critical``.
     Because candidates are a tiny fraction of a dense matrix, only the
     significant cells are ever held in memory — there is no full-matrix scan
-    here. Cells are ranked within each analysis by descending ``|z|``.
+    here. Cells are ranked within each analysis by descending ``|z|``. When
+    present, ``imputed`` is written in the same order so completed-store queries
+    can label top hits without random reads back into ``data.zarr/imputed``.
     """
 
     rows = np.asarray(rows, dtype="uint32")
     cols = np.asarray(cols, dtype="uint32")
     z = np.asarray(z, dtype="float32")
     se = np.asarray(se, dtype="float32")
+    imputed_values = None if imputed is None else np.asarray(imputed, dtype="uint8")
     abs_z = np.abs(z).astype("float32")
 
     root = zarr.open_group(str(Path(store_path) / "data.zarr"), mode="a")
@@ -70,6 +74,7 @@ def write_top_hit_indexes(
         kept_abs_z = abs_z[keep]
         kept_z = z[keep]
         kept_se = se[keep]
+        kept_imputed = None if imputed_values is None else imputed_values[keep]
         kept_p = erfc(kept_abs_z.astype("float64") / math.sqrt(2.0))
         order = np.lexsort((kept_cols, kept_rows, -kept_abs_z))
         kept_rows = kept_rows[order]
@@ -77,6 +82,7 @@ def write_top_hit_indexes(
         kept_abs_z = kept_abs_z[order]
         kept_z = kept_z[order]
         kept_se = kept_se[order]
+        kept_imputed = None if kept_imputed is None else kept_imputed[order]
         kept_p = kept_p[order]
         chunk = max(1, min(len(kept_rows), 100_000))
         group.create_dataset(
@@ -97,6 +103,14 @@ def write_top_hit_indexes(
         group.create_dataset(
             "p_value", data=kept_p, chunks=(chunk,), compressor=compressor, dtype="float64"
         )
+        if kept_imputed is not None:
+            group.create_dataset(
+                "imputed",
+                data=kept_imputed,
+                chunks=(chunk,),
+                compressor=compressor,
+                dtype="uint8",
+            )
         group.attrs["threshold"] = threshold
     top.attrs["thresholds"] = list(thresholds)
 
@@ -117,6 +131,7 @@ def build_top_hit_indexes(
     root = zarr.open_group(str(Path(store_path) / "data.zarr"), mode="r")
     z_arr = root["z"]
     se_arr = root["se"]
+    imputed_arr = root["imputed"] if "imputed" in root else None
     n_variants = int(z_arr.shape[0])
     loosest = z_critical(max(thresholds))
     band_rows = max(int(z_arr.chunks[0]), 250_000)
@@ -125,6 +140,7 @@ def build_top_hit_indexes(
     cols_parts: list[np.ndarray] = []
     z_parts: list[np.ndarray] = []
     se_parts: list[np.ndarray] = []
+    imputed_parts: list[np.ndarray] = []
     for r0 in range(0, n_variants, band_rows):
         r1 = min(r0 + band_rows, n_variants)
         z_band = z_arr[r0:r1]
@@ -136,15 +152,20 @@ def build_top_hit_indexes(
             cols_parts.append(bc.astype(np.int64))
             z_parts.append(z_band[br, bc].astype("float32"))
             se_parts.append(se_band[br, bc].astype("float32"))
+            if imputed_arr is not None:
+                imputed_band = imputed_arr[r0:r1]
+                imputed_parts.append(imputed_band[br, bc].astype("uint8"))
 
     if rows_parts:
         rows = np.concatenate(rows_parts)
         cols = np.concatenate(cols_parts)
         z = np.concatenate(z_parts)
         se = np.concatenate(se_parts)
+        imputed = np.concatenate(imputed_parts) if imputed_parts else None
     else:
         rows = np.empty(0, dtype=np.int64)
         cols = np.empty(0, dtype=np.int64)
         z = np.empty(0, dtype=np.float32)
         se = np.empty(0, dtype=np.float32)
-    write_top_hit_indexes(store_path, rows, cols, z, se, thresholds)
+        imputed = np.empty(0, dtype=np.uint8) if imputed_arr is not None else None
+    write_top_hit_indexes(store_path, rows, cols, z, se, thresholds, imputed=imputed)
