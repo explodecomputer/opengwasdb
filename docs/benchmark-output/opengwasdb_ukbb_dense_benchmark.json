@@ -2,7 +2,8 @@
   "dataset": {
     "n_variants": 9847701,
     "n_analyses": 2514,
-    "reference_assembly": "GRCh38"
+    "reference_assembly": "GRCh38",
+    "store": "/local-scratch/data/opengwas/opengwasdb/ukb-b.opengwasdb"
   },
   "storage": {
     "store_bytes": 58048303868,
@@ -30,32 +31,32 @@
   "timings": [
     {
       "query": "bulk",
-      "median_ms": 31027.567,
-      "p95_ms": 31843.041,
+      "median_ms": 29647.935,
+      "p95_ms": 32603.973,
       "result_count": 8419893
     },
     {
       "query": "phewas",
-      "median_ms": 5.623,
-      "p95_ms": 5.913,
+      "median_ms": 5.281,
+      "p95_ms": 5.873,
       "result_count": 1344
     },
     {
       "query": "regional",
-      "median_ms": 659.164,
-      "p95_ms": 688.36,
+      "median_ms": 620.663,
+      "p95_ms": 637.635,
       "result_count": 5231847
     },
     {
       "query": "tophits",
-      "median_ms": 618.734,
-      "p95_ms": 647.462,
+      "median_ms": 499.623,
+      "p95_ms": 596.35,
       "result_count": 5493678
     },
     {
       "query": "random_lookup",
-      "median_ms": 842.628,
-      "p95_ms": 875.206,
+      "median_ms": 814.68,
+      "p95_ms": 828.311,
       "result_count": 566
     }
   ],
