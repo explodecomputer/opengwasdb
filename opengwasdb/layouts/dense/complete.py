@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,7 +31,7 @@ from typing import Any
 import numpy as np
 import zarr
 from numcodecs import Blosc
-from threadpoolctl import threadpool_limits
+from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from opengwasdb.completion.impute import impute_z_block, scalar_n_se
 from opengwasdb.completion.ld_panel import (
@@ -63,6 +64,7 @@ log = logging.getLogger(__name__)
 _COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 _LD_PANEL_ID = "eur-hg38-gpm"
 _COMPLETION_METHOD = "elastic_net_eigenvectors_v2_regioncap"
+_ALID_DTYPE = "S64"
 
 # Region-based imputation z-cap (QC): an imputed |z| may not exceed the largest
 # observed |z| within +/- this many bp of it (same chromosome / LD block). Caps
@@ -159,10 +161,10 @@ def _write_checkpoint(path: Path, result: BlockCompletionResult) -> None:
     )
     q_nimp = np.array([r[2] for r in result.quality_rows], dtype=np.int32)
     q_nmiss = np.array([r[3] for r in result.quality_rows], dtype=np.int32)
-    f_alid = np.array([r[0] for r in result.fills], dtype="U64")
+    f_alid = np.array([r[0].encode("ascii") for r in result.fills], dtype=_ALID_DTYPE)
     f_ai = np.array([r[1] for r in result.fills], dtype=np.int32)
-    f_z = np.array([r[2] for r in result.fills], dtype=np.float64)
-    f_se = np.array([r[3] for r in result.fills], dtype=np.float64)
+    f_z = np.array([r[2] for r in result.fills], dtype=np.float32)
+    f_se = np.array([r[3] for r in result.fills], dtype=np.float32)
 
     tmp_path = path.with_name(path.name + ".tmp")
     with open(tmp_path, "wb") as fh:
@@ -582,13 +584,15 @@ def _run_completion(
                         print(f"  {i + 1:,} / {len(pending):,} blocks")
 
         # ── Phase 3: stream fills from checkpoints, band-write, finalise ────
-        # Read each block's checkpoint as compact arrays and resolve its fill
-        # ALIDs to union rows with one vectorised searchsorted — never Python
-        # tuples/lists, so the parent's fill memory is packed arrays (~12 B/cell)
-        # not ~O(n_imputed) tuples (issue 044 follow-up).
+        # Resolve checkpoint fill ALIDs to union rows and shard the fill records
+        # by output row-band on disk. The final zarr writer then reads only the
+        # shard for the band it is currently writing, so Phase 3 never needs a
+        # whole-genome fill array in RAM.
         print("Merging block results from checkpoints...")
         union_alids = np.fromiter(
-            new_alid_to_idx.keys(), dtype="U64", count=len(new_alid_to_idx)
+            (alid.encode("ascii") for alid in new_alid_to_idx),
+            dtype=_ALID_DTYPE,
+            count=len(new_alid_to_idx),
         )
         union_rows = np.fromiter(
             new_alid_to_idx.values(), dtype=np.int32, count=len(new_alid_to_idx)
@@ -597,56 +601,23 @@ def _run_completion(
         union_alids_s = union_alids[o]
         union_rows_s = union_rows[o]
 
-        quality_rows: list[tuple[int, str, float | None, int, int]] = []
-        fr_parts: list[np.ndarray] = []
-        fai_parts: list[np.ndarray] = []
-        fz_parts: list[np.ndarray] = []
-        fse_parts: list[np.ndarray] = []
-        for ckpt in sorted(blocks_dir.glob("*.npz")):
-            with np.load(ckpt, allow_pickle=False) as d:
-                bid = str(d["block_id"][0])
-                for ai, p, ni, nm in zip(
-                    d["q_ai"], d["q_pearson"], d["q_nimp"], d["q_nmiss"], strict=True
-                ):
-                    quality_rows.append(
-                        (int(ai), bid, None if not np.isfinite(p) else float(p), int(ni), int(nm))
-                    )
-                f_alid = d["f_alid"]
-                if len(f_alid):
-                    idx = np.minimum(
-                        np.searchsorted(union_alids_s, f_alid), len(union_alids_s) - 1
-                    )
-                    matched = union_alids_s[idx] == f_alid
-                    if matched.any():
-                        fr_parts.append(union_rows_s[idx[matched]])
-                        fai_parts.append(d["f_ai"][matched].astype(np.int32))
-                        fz_parts.append(d["f_z"][matched].astype(np.float32))
-                        fse_parts.append(d["f_se"][matched].astype(np.float32))
-
-        if fr_parts:
-            fill_row = np.concatenate(fr_parts)
-            fill_ai = np.concatenate(fai_parts)
-            fill_z = np.concatenate(fz_parts)
-            fill_se = np.concatenate(fse_parts)
-        else:
-            fill_row = np.empty(0, dtype=np.int32)
-            fill_ai = np.empty(0, dtype=np.int32)
-            fill_z = np.empty(0, dtype=np.float32)
-            fill_se = np.empty(0, dtype=np.float32)
-        order = np.argsort(fill_row, kind="stable")
-        fill_row, fill_ai, fill_z, fill_se = (
-            fill_row[order], fill_ai[order], fill_z[order], fill_se[order]
-        )
-
-        print("Writing data.zarr (band-streamed)...")
         effective_chunks = _create_completed_zarr(
             work, n_variants, n_analyses, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE
         )
+        band_rows = _completion_band_rows(effective_chunks)
+        fill_shard_dir, quality_count = _shard_checkpoint_fills_by_band(
+            blocks_dir, work, union_alids_s, union_rows_s, n_variants, band_rows
+        )
+        print(f"Wrote {quality_count:,} completion quality rows")
+        del union_alids, union_rows, union_alids_s, union_rows_s, o
+
+        print("Writing data.zarr (band-streamed)...")
         n_missing_off_panel, n_missing_imputation_failed, total_imputed = _write_completed_bands(
             work, src_root, out_to_src, on_panel,
-            fill_row, fill_ai, fill_z, fill_se,
+            fill_shard_dir,
             effective_chunks, n_variants, n_analyses,
         )
+        shutil.rmtree(fill_shard_dir, ignore_errors=True)
         n_missing_off_panel_total = int(n_missing_off_panel.sum())
         print(
             f"Completion done: {total_imputed:,} imputed, "
@@ -671,16 +642,6 @@ def _run_completion(
                     )
                     for i, row in enumerate(src_analyses)
                 ],
-            )
-            dst_db.commit()
-
-        print(f"Writing {len(quality_rows):,} completion quality rows...")
-        with connect(work / "index.sqlite") as dst_db:
-            dst_db.executemany(
-                "INSERT INTO completion_quality "
-                "(analysis_index, block_id, pearson_r, n_imputed, n_missing) "
-                "VALUES (?, ?, ?, ?, ?)",
-                quality_rows,
             )
             dst_db.commit()
 
@@ -746,6 +707,130 @@ def _run_completion(
 # Row-band height for streaming the completed matrix — the seed/fill/write pass
 # never holds the full (n_variants × n_analyses) matrices in RAM (issue 044).
 _BAND_ROWS = 250_000
+_FILL_RECORD_DTYPE = np.dtype(
+    [("row", np.int32), ("ai", np.int32), ("z", np.float32), ("se", np.float32)]
+)
+_FILL_RECORD_READ_COUNT = 5_000_000
+
+
+def _completion_band_rows(effective_chunks: tuple[int, int]) -> int:
+    return max(int(effective_chunks[0]), _BAND_ROWS)
+
+
+def _fill_shard_path(fill_shard_dir: Path, band_index: int) -> Path:
+    return fill_shard_dir / f"band-{band_index:06d}.bin"
+
+
+def _iter_fill_records(path: Path) -> Iterator[np.ndarray]:
+    if not path.exists():
+        return
+    with open(path, "rb") as fh:
+        while True:
+            records = np.fromfile(
+                fh, dtype=_FILL_RECORD_DTYPE, count=_FILL_RECORD_READ_COUNT
+            )
+            if len(records) == 0:
+                break
+            yield records
+
+
+def _insert_completion_quality_batch(
+    db: Any,
+    batch: list[tuple[int, str, float | None, int, int]],
+) -> None:
+    if not batch:
+        return
+    db.executemany(
+        "INSERT INTO completion_quality "
+        "(analysis_index, block_id, pearson_r, n_imputed, n_missing) "
+        "VALUES (?, ?, ?, ?, ?)",
+        batch,
+    )
+    db.commit()
+
+
+def _shard_checkpoint_fills_by_band(
+    blocks_dir: Path,
+    work: Path,
+    union_alids_s: np.ndarray,
+    union_rows_s: np.ndarray,
+    n_variants: int,
+    band_rows: int,
+) -> tuple[Path, int]:
+    """Resolve checkpoint fills into raw row-band shard files.
+
+    Checkpoints store fill rows by ALID because the union variant axis is built
+    by the parent. This pass resolves those ALIDs once, writes compact
+    ``(row, analysis, z, se)`` records to per-band files, and streams
+    completion_quality directly into SQLite.
+    """
+    fill_shard_dir = work / "fill_shards"
+    if fill_shard_dir.exists():
+        shutil.rmtree(fill_shard_dir)
+    fill_shard_dir.mkdir()
+
+    quality_count = 0
+    quality_batch: list[tuple[int, str, float | None, int, int]] = []
+    quality_batch_size = 100_000
+
+    with connect(work / "index.sqlite") as dst_db:
+        for ckpt in sorted(blocks_dir.glob("*.npz")):
+            with np.load(ckpt, allow_pickle=False) as d:
+                bid = str(d["block_id"][0])
+                for ai, p, ni, nm in zip(
+                    d["q_ai"], d["q_pearson"], d["q_nimp"], d["q_nmiss"], strict=True
+                ):
+                    quality_batch.append(
+                        (
+                            int(ai),
+                            bid,
+                            None if not np.isfinite(p) else float(p),
+                            int(ni),
+                            int(nm),
+                        )
+                    )
+                    quality_count += 1
+                    if len(quality_batch) >= quality_batch_size:
+                        _insert_completion_quality_batch(dst_db, quality_batch)
+                        quality_batch.clear()
+
+                f_alid = d["f_alid"]
+                if not len(f_alid):
+                    continue
+                if f_alid.dtype.kind == "U":
+                    f_alid = f_alid.astype(_ALID_DTYPE)
+
+                idx = np.minimum(
+                    np.searchsorted(union_alids_s, f_alid), len(union_alids_s) - 1
+                )
+                matched = union_alids_s[idx] == f_alid
+                if not matched.any():
+                    continue
+
+                rows = union_rows_s[idx[matched]].astype(np.int32, copy=False)
+                in_bounds = (rows >= 0) & (rows < n_variants)
+                if not in_bounds.any():
+                    continue
+
+                rows = rows[in_bounds]
+                ai = d["f_ai"][matched].astype(np.int32, copy=False)[in_bounds]
+                z = d["f_z"][matched].astype(np.float32, copy=False)[in_bounds]
+                se = d["f_se"][matched].astype(np.float32, copy=False)[in_bounds]
+                band_ids = rows // band_rows
+
+                for band_index in np.unique(band_ids):
+                    selected = band_ids == band_index
+                    records = np.empty(int(selected.sum()), dtype=_FILL_RECORD_DTYPE)
+                    records["row"] = rows[selected]
+                    records["ai"] = ai[selected]
+                    records["z"] = z[selected]
+                    records["se"] = se[selected]
+                    with open(_fill_shard_path(fill_shard_dir, int(band_index)), "ab") as fh:
+                        records.tofile(fh)
+
+        _insert_completion_quality_batch(dst_db, quality_batch)
+
+    return fill_shard_dir, quality_count
 
 
 def _create_completed_zarr(
@@ -786,10 +871,7 @@ def _write_completed_bands(
     src_root: Any,
     out_to_src: np.ndarray,
     on_panel: np.ndarray,
-    fill_row: np.ndarray,
-    fill_ai: np.ndarray,
-    fill_z: np.ndarray,
-    fill_se: np.ndarray,
+    fill_shard_dir: Path,
     effective_chunks: tuple[int, int],
     n_variants: int,
     n_analyses: int,
@@ -799,15 +881,15 @@ def _write_completed_bands(
     **single reused** float32 band buffer (plus a uint8 imputed band in the z-pass),
     so peak memory is ~one band rather than z + se + imputed held together. Both
     passes fill the same cells because source z/se missingness is consistent (a
-    validated store invariant) — each pass reads only its own source array once, so
-    there is no extra I/O. Returns ``(n_missing_off_panel[n_analyses],
-    n_missing_imputation_failed, total_imputed)``. ``fill_*`` must be sorted by
-    ``fill_row``.
+    validated store invariant) — each pass reads only its own source array once.
+    Returns ``(n_missing_off_panel[n_analyses], n_missing_imputation_failed,
+    total_imputed)``. Fill records are read from per-band shard files in bounded
+    chunks.
     """
     root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
     z_arr, se_arr, imp_arr = root["z"], root["se"], root["imputed"]
     src_z, src_se = src_root["z"], src_root["se"]
-    band_rows = max(int(effective_chunks[0]), _BAND_ROWS)
+    band_rows = _completion_band_rows(effective_chunks)
 
     n_missing_off_panel = np.zeros(n_analyses, dtype=np.int64)
     n_missing_imputation_failed = 0
@@ -815,7 +897,7 @@ def _write_completed_bands(
     band = np.empty((band_rows, n_analyses), dtype=np.float32)  # reused for z then se
 
     # Pass 1 — z + imputed mask + missingness counts.
-    for r0 in range(0, n_variants, band_rows):
+    for band_index, r0 in enumerate(range(0, n_variants, band_rows)):
         r1 = min(r0 + band_rows, n_variants)
         br = r1 - r0
         zb = band[:br]
@@ -831,15 +913,14 @@ def _write_completed_bands(
         if len(off_local):
             n_missing_off_panel += np.isnan(zb[off_local, :]).sum(axis=0).astype(np.int64)
 
-        lo = int(np.searchsorted(fill_row, r0, side="left"))
-        hi = int(np.searchsorted(fill_row, r1, side="left"))
-        if hi > lo:
-            lr = fill_row[lo:hi] - r0
-            ai = fill_ai[lo:hi]
+        shard_path = _fill_shard_path(fill_shard_dir, band_index)
+        for records in _iter_fill_records(shard_path):
+            lr = records["row"] - r0
+            ai = records["ai"]
             fillable = ~np.isfinite(zb[lr, ai])
             if fillable.any():
                 lrm, aim = lr[fillable], ai[fillable]
-                zb[lrm, aim] = fill_z[lo:hi][fillable]
+                zb[lrm, aim] = records["z"][fillable]
                 imp_band[lrm, aim] = 1
                 total_imputed += int(fillable.sum())
 
@@ -851,7 +932,7 @@ def _write_completed_bands(
         imp_arr[r0:r1] = imp_band
 
     # Pass 2 — se (same cells filled, by the missingness-consistency invariant).
-    for r0 in range(0, n_variants, band_rows):
+    for band_index, r0 in enumerate(range(0, n_variants, band_rows)):
         r1 = min(r0 + band_rows, n_variants)
         br = r1 - r0
         sb = band[:br]
@@ -862,14 +943,13 @@ def _write_completed_bands(
             srows = out_to_src[r0:r1][valid]
             sb[valid, :] = src_se.oindex[srows, :].astype(np.float32)
 
-        lo = int(np.searchsorted(fill_row, r0, side="left"))
-        hi = int(np.searchsorted(fill_row, r1, side="left"))
-        if hi > lo:
-            lr = fill_row[lo:hi] - r0
-            ai = fill_ai[lo:hi]
+        shard_path = _fill_shard_path(fill_shard_dir, band_index)
+        for records in _iter_fill_records(shard_path):
+            lr = records["row"] - r0
+            ai = records["ai"]
             fillable = ~np.isfinite(sb[lr, ai])
             if fillable.any():
-                sb[lr[fillable], ai[fillable]] = fill_se[lo:hi][fillable]
+                sb[lr[fillable], ai[fillable]] = records["se"][fillable]
 
         se_arr[r0:r1] = sb
 
