@@ -14,8 +14,9 @@ Catalogue TSV with every Analysis annotated (PRD "Catalogue", "Code shape").
 - Version stamps: `catalogue_version` and `ancestry_reference_version` columns/rows.
 - **Parking**: non-EUR and Unassigned Analyses are present and annotated in the
   Catalogue, not dropped (PRD user story 9).
-- Uses the real **Ancestry Reference Panel** (1000G+HGDP, hg38, canonical ALID) —
-  an external prerequisite artifact, not built here.
+- Uses the real **Ancestry Reference Panel** (Privé 2022 UK Biobank 21-group
+  reference, lifted GRCh37→hg38, canonical ALID) — an external prerequisite
+  artifact, not built here.
 
 ## Acceptance criteria
 

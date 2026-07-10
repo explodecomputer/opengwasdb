@@ -15,11 +15,12 @@ summary statistics, and route it accordingly.
 govern routing. The method follows Privé (2022): model an Analysis's allele
 frequencies as a **non-negative, sum-to-one mixture** of reference-population
 frequencies over a common variant set, solved by NNLS, yielding **Ancestry
-Composition**. We **fit against a fine reference** (1000G+HGDP, ~21 groups —
-the **Ancestry Reference Panel**) for accuracy on admixed and edge populations,
-then **aggregate the proportions up to 1000G super-populations** for the routing
-label, because our LD panels are keyed to super-populations. Fit-fine,
-label-coarse.
+Composition**. We **fit against a fine reference** — Privé (2022)'s UK Biobank
+"global reference of worldwide populations" (allele frequencies for ~5.8M variants
+across 21 ancestry groups, the `snp_ancestry_summary` reference; the **Ancestry
+Reference Panel**) — for accuracy on admixed and edge populations, then
+**aggregate the proportions up to super-populations** for the routing label,
+because our LD panels are keyed to super-populations. Fit-fine, label-coarse.
 
 An Analysis's **Assigned Ancestry** is the dominant super-population, admitted only
 if it clears a **multi-gate rule**: proportion ≥ τ, margin over the runner-up ≥ δ,
@@ -64,9 +65,11 @@ missingness (non-overlapping off-panel tails) and only EUR has an LD panel today
   unalignable); the fit uses common (reference MAF ≥ ~1%) variants in the
   reference ∩ study-AF intersection, without heavy LD-pruning (NNLS tolerates
   correlated SNPs).
-- The **Ancestry Reference Panel** (1000G+HGDP frequencies, on hg38 with canonical
-  ALIDs, plus a fine→super-population map) is a new static artifact to source and
-  normalise.
+- The **Ancestry Reference Panel** (Privé 2022's UK Biobank reference frequencies
+  for 21 groups — bigsnpr `ref_freqs.csv.gz`, on GRCh37, lifted to hg38 and re-keyed
+  to canonical ALIDs — plus a fine→super-population map) is a static artifact to
+  source and normalise. The liftover is a one-off on a fixed file, cheaper than
+  standing up a raw callset.
 - Ancestry assignment is an **annotator that writes into the Analysis Catalogue**
   (ADR 0027): Assigned Ancestry, Ancestry Composition, gate results, and the
   Reported-Population comparison. Stores inherit Assigned Ancestry via the subset

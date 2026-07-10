@@ -21,8 +21,9 @@ An **annotate-then-subset** ingestion pipeline (ADR 0027):
 
 1. **Ancestry annotator** (ADR 0028): for every `ieu-a`/`ieu-b` Analysis, extract
    allele frequencies at reference sites, estimate **Ancestry Composition** by NNLS
-   mixture against a fine **Ancestry Reference Panel** (1000G+HGDP), aggregate to
-   super-populations, and apply a multi-gate rule (τ, δ, overlap, residual) to
+   mixture against a fine **Ancestry Reference Panel** (Privé 2022's UK Biobank
+   21-group reference), aggregate to super-populations, and apply a multi-gate rule
+   (τ, δ, overlap, residual) to
    produce an **Assigned Ancestry** or leave the Analysis **Unassigned**.
 2. **Analysis Catalogue**: a versioned TSV — a superset of the build manifest —
    with one row per Analysis carrying the build columns plus the annotations
@@ -40,9 +41,9 @@ to audit disagreements — never to route.
 1. As a data engineer, I want the ancestry of each `ieu-a`/`ieu-b` Analysis inferred
    from its summary-stat allele frequencies, so I do not have to trust the coarse,
    often-`"Mixed"` declared population.
-2. As a data engineer, I want a fine-reference (1000G+HGDP) NNLS mixture aggregated
-   to super-populations, so admixed/edge Analyses are modelled accurately but routed
-   at the granularity our LD panels use.
+2. As a data engineer, I want a fine-reference (Privé 2022 UK Biobank 21-group) NNLS
+   mixture aggregated to super-populations, so admixed/edge Analyses are modelled
+   accurately but routed at the granularity our LD panels use.
 3. As a data engineer, I want a multi-gate admission rule (dominant proportion,
    runner-up margin, SNP overlap, fit residual) so that only confidently
    single-ancestry Analyses are assigned and the rest are explicitly Unassigned.
@@ -68,9 +69,12 @@ to audit disagreements — never to route.
 ## Implementation Decisions
 
 ### Ancestry Reference Panel
-1000G+HGDP allele frequencies (~21 fine groups), normalised to hg38 + canonical
-ALID, shipped with a fine→super-population grouping map. A static artifact
-(prerequisite; sourced separately).
+Privé (2022)'s UK Biobank "global reference": allele frequencies for ~5.8M variants
+across 21 fine groups (bigsnpr `ref_freqs.csv.gz`, figshare file 31620968), on
+GRCh37 — lifted to hg38 and re-keyed to canonical ALID — with a fine→super-population
+grouping map. A static artifact (prerequisite; sourced/lifted separately). The
+IEU 1000G v3 plink reference (`fileserve.mrcieu.ac.uk/ld/1kg.v3.tgz`) is a separate
+resource, useful later for building non-EUR LD panels — not for ancestry assignment.
 
 ### Allele-frequency extraction
 Targeted read of GWAS-VCF `FORMAT/AF` at the reference sites (not a full scan),
@@ -105,8 +109,8 @@ release flag; per-cell Association Status is ground truth.
 
 ## Out of Scope
 
-- Sourcing/normalising the 1000G+HGDP reference (prerequisite artifact, done
-  separately from this pipeline).
+- Sourcing/lifting the Ancestry Reference Panel (Privé 2022 UKB reference,
+  GRCh37→hg38) — a prerequisite artifact done separately from this pipeline.
 - Building non-EUR stores (no non-EUR LD panel yet) — non-EUR Analyses are parked.
 - What ultimately happens to parked non-EUR/Unassigned Analyses (future work).
 - A SQLite-backed Catalogue and all-OpenGWAS scope (TSV, ieu-a/b only for now).
