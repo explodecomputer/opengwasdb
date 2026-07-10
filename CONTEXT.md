@@ -20,7 +20,7 @@ An immutable, self-identifying published version of a Store. A release records S
 The version of the OpenGWASDB storage contract required to interpret a Store Release. It describes representation compatibility, not the version of the biological data.
 
 **Primary Storage Layout**:
-The main physical organisation of associations within a Store. Dense and Ragged are alternative primary layouts behind the same metadata, identity, validation, and query concepts.
+The main physical organisation of associations within a Store. Dense, Ragged, and Hybrid are alternative primary layouts behind the same metadata, identity, validation, and query concepts.
 
 **Dense Layout**:
 A Primary Storage Layout in which Analyses share a variant axis and associations occupy cells in a variant-by-Analysis matrix. For Reference-Completed Dense stores, the dense variant axis is the union of source-observed variants and **Reference Variant Set** variants; source variants outside the Reference Variant Set remain in the dense matrix as observed or missing, and are never imputed.
@@ -28,8 +28,17 @@ A Primary Storage Layout in which Analyses share a variant axis and associations
 **Ragged Layout**:
 A Primary Storage Layout in which each Analysis has its own sequence of retained associations referencing a Store-wide variant table. In Reference-Completed Ragged stores, observed, imputed, and missing reference variants for a completed region belong to the same Analysis association sequence.
 
+**Hybrid Layout**:
+A Primary Storage Layout combining a **Dense Component** and a **Ragged Overflow Component** over a single Store Variant Table. It suits genome-wide collections whose Analyses share a large common core of variants but also carry heterogeneous, study-specific variants. Variants on the Dense Component's reference axis are stored densely for every Analysis; a study's observed variants that are off that axis are stored in the Ragged Overflow Component. The two components partition an Analysis's associations disjointly.
+
+**Dense Component**:
+The dense matrix part of a Hybrid Layout store, over a shared reference variant axis. It behaves like a Dense Layout and is the only part subject to Reference Completion.
+
+**Ragged Overflow Component**:
+The ragged part of a Hybrid Layout store, holding each Analysis's observed associations for variants that are off the Dense Component's reference axis. Overflow associations are always observed (never imputed), because off-axis variants lack the reference LD structure needed for completion.
+
 **Query Component**:
-The part of a Store Release from which a returned association was read. For Dense stores there is a single query component (the dense matrix). For Ragged stores, observed, imputed, and missing associations for a completed region are ordinary rows in the same Analysis association sequence.
+The part of a Store Release from which a returned association was read. For Dense stores there is a single query component (the dense matrix). For Ragged stores, observed, imputed, and missing associations for a completed region are ordinary rows in the same Analysis association sequence. For Hybrid stores there are two components — the Dense Component and the Ragged Overflow Component — unified behind one query result.
 
 **Association Coverage**:
 The guarantee a Store Release makes about which source associations it retains, independently of Primary Storage Layout. Full Coverage retains every usable source association after normalisation and quality control; Cis-and-Signals Coverage retains complete cis regions plus selected significant and suggestive trans associations.
