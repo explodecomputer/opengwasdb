@@ -72,9 +72,13 @@ to audit disagreements — never to route.
 Privé (2022)'s UK Biobank "global reference": allele frequencies for ~5.8M variants
 across 21 fine groups (bigsnpr `ref_freqs.csv.gz`, figshare file 31620968), on
 GRCh37 — lifted to hg38 and re-keyed to canonical ALID — with a fine→super-population
-grouping map. A static artifact (prerequisite; sourced/lifted separately). The
-IEU 1000G v3 plink reference (`fileserve.mrcieu.ac.uk/ld/1kg.v3.tgz`) is a separate
-resource, useful later for building non-EUR LD panels — not for ancestry assignment.
+grouping map. A static artifact (prerequisite; sourced/lifted separately). Built by
+`scripts/build_ancestry_reference.py` → `ref_freqs.hg38.tsv.gz` (columns `alid`,
+`chromosome`, `position`, `effect_allele`, `other_allele`, `rsid`, then one
+A1-oriented frequency column per group) plus `ancestry_groups.tsv` (fine→super-pop
+map). The IEU 1000G v3 plink reference (`fileserve.mrcieu.ac.uk/ld/1kg.v3.tgz`) is a
+separate resource, useful later for building non-EUR LD panels — not for ancestry
+assignment.
 
 ### Allele-frequency extraction
 Targeted read of GWAS-VCF `FORMAT/AF` at the reference sites (not a full scan),
