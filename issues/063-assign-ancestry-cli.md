@@ -16,7 +16,10 @@ Catalogue TSV with every Analysis annotated (PRD "Catalogue", "Code shape").
   Catalogue, not dropped (PRD user story 9).
 - Uses the real **Ancestry Reference Panel** (Privé 2022 UK Biobank 21-group
   reference, lifted GRCh37→hg38, canonical ALID) — an external prerequisite
-  artifact, not built here.
+  artifact, not built here. Built by `scripts/build_ancestry_reference.py`;
+  artifact on this machine at
+  `/local-scratch/data/opengwas/ancestry_reference/ref_freqs.hg38.tsv.gz` (+
+  `ancestry_groups.tsv`).
 
 ## Acceptance criteria
 

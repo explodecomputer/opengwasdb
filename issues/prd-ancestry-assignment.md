@@ -76,9 +76,11 @@ grouping map. A static artifact (prerequisite; sourced/lifted separately). Built
 `scripts/build_ancestry_reference.py` → `ref_freqs.hg38.tsv.gz` (columns `alid`,
 `chromosome`, `position`, `effect_allele`, `other_allele`, `rsid`, then one
 A1-oriented frequency column per group) plus `ancestry_groups.tsv` (fine→super-pop
-map). The IEU 1000G v3 plink reference (`fileserve.mrcieu.ac.uk/ld/1kg.v3.tgz`) is a
-separate resource, useful later for building non-EUR LD panels — not for ancestry
-assignment.
+map). **Built artifact (this machine):**
+`/local-scratch/data/opengwas/ancestry_reference/ref_freqs.hg38.tsv.gz` +
+`ancestry_groups.tsv` (5,810,529 variants, 21 groups). The IEU 1000G v3 plink
+reference (`fileserve.mrcieu.ac.uk/ld/1kg.v3.tgz`) is a separate resource, useful
+later for building non-EUR LD panels — not for ancestry assignment.
 
 ### Allele-frequency extraction
 Targeted read of GWAS-VCF `FORMAT/AF` at the reference sites (not a full scan),
@@ -114,7 +116,9 @@ release flag; per-cell Association Status is ground truth.
 ## Out of Scope
 
 - Sourcing/lifting the Ancestry Reference Panel (Privé 2022 UKB reference,
-  GRCh37→hg38) — a prerequisite artifact done separately from this pipeline.
+  GRCh37→hg38) — a prerequisite artifact done separately from this pipeline
+  (built by `scripts/build_ancestry_reference.py`; artifact on this machine at
+  `/local-scratch/data/opengwas/ancestry_reference/`).
 - Building non-EUR stores (no non-EUR LD panel yet) — non-EUR Analyses are parked.
 - What ultimately happens to parked non-EUR/Unassigned Analyses (future work).
 - A SQLite-backed Catalogue and all-OpenGWAS scope (TSV, ieu-a/b only for now).
