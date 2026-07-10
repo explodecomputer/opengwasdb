@@ -15,6 +15,8 @@ from opengwasdb.layouts.dense.complete import (
 )
 from opengwasdb.layouts.dense.constants import DEFAULT_CHUNK_SHAPE
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
+from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
+from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
@@ -130,6 +132,99 @@ def build_dense_vcf_command(
                 "output_path": str(result.output_path),
                 "n_variants": result.n_variants,
                 "n_analyses": result.n_analyses,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("build-hybrid")
+def build_hybrid_command(
+    manifest_path: Path,
+    output_path: Path,
+    reference_panel: Path = typer.Option(
+        ..., help="Dense Component axis: reference-panel ALIDs (text or variants.tsv.gz)"
+    ),
+    store_id: str = typer.Option(...),
+    release_id: str = typer.Option(...),
+    overwrite: bool = typer.Option(False),
+    n_workers: int = typer.Option(1, help="Fork-based process pool size for Pass 2"),
+    chunk_variants: int = typer.Option(
+        DEFAULT_CHUNK_SHAPE[0], help="Zarr chunk size along the variant axis"
+    ),
+    chunk_analyses: int = typer.Option(
+        DEFAULT_CHUNK_SHAPE[1], help="Zarr chunk size along the analysis (trait) axis"
+    ),
+) -> None:
+    """Build a Hybrid store (Dense Component + Ragged Overflow) from a VCF manifest.
+
+    MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n. On-panel
+    variants (in --reference-panel) fill the nested Dense Component; off-panel variants
+    go to the Ragged Overflow. VCFs are hg19; liftover to hg38 is applied inline.
+    """
+    result = build_hybrid_from_vcf_manifest(
+        manifest_path,
+        output_path,
+        reference_panel=reference_panel,
+        store_id=store_id,
+        release_id=release_id,
+        overwrite=overwrite,
+        n_workers=n_workers,
+        chunk_shape=(chunk_variants, chunk_analyses),
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_panel": result.n_panel,
+                "n_off_panel": result.n_off_panel,
+                "n_overflow": result.n_overflow,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("complete-hybrid")
+def complete_hybrid_command(
+    source_path: Path,
+    dest_path: Path,
+    ld_panel: Path = typer.Option(..., help="Root of LD panel (ld_dir/{ancestry}/{chr}/...)"),
+    ancestry: str = typer.Option("EUR"),
+    min_cor: float = typer.Option(0.7),
+    thresh: float = typer.Option(0.9),
+    release_id: str = typer.Option(None),
+    n_workers: int = typer.Option(1, help="LD-block process-pool size"),
+    overwrite: bool = typer.Option(False),
+) -> None:
+    """Reference-complete a Hybrid store — impute only the Dense Component."""
+    import time
+    t0 = time.time()
+    result = complete_hybrid_store(
+        source_path,
+        dest_path,
+        ld_panel,
+        ancestry=ancestry,
+        min_cor=min_cor,
+        thresh=thresh,
+        release_id=release_id or None,
+        n_workers=n_workers,
+        overwrite=overwrite,
+    )
+    elapsed = time.time() - t0
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_panel": result.n_panel,
+                "n_off_panel": result.n_off_panel,
+                "n_overflow": result.n_overflow,
+                "n_imputed": result.n_imputed,
+                "elapsed_s": round(elapsed, 1),
             },
             sort_keys=True,
         )

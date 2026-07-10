@@ -73,6 +73,17 @@
           analysis (high cholesterol → heart attack) with scatter plot.
         </li>
         <li>
+          <a href="benchmark-output/opengwasdb_hybrid_ieua_benchmark.html">
+            Hybrid Layout — Hybrid vs Dense-of-union (BMI · CAD · LDL)
+          </a>
+          <br>
+          Three heterogeneous consortium GWAS built as a Hybrid store (Dense Component
+          on the panel + Ragged Overflow for off-panel observed variants) and as a
+          Dense-of-union store: storage split, per-query latency, imputed-only
+          positive-control MR (LDL→CAD, BMI→CAD) vs observed, and a regional
+          imputation plot.
+        </li>
+        <li>
           <a href="benchmark-output/opengwasdb_chunk_comparison_benchmark.html">
             ukb-b Dense Store — Chunk-Shape Query Benchmark (1000×1000 vs 1000×128)
           </a>
@@ -139,6 +150,7 @@
       <h2>Report sources (Quarto)</h2>
       <ul>
         <li><a href="benchmark-output/opengwasdb_ukbb_dense_benchmark.qmd">opengwasdb_ukbb_dense_benchmark.qmd</a></li>
+        <li><a href="benchmark-output/opengwasdb_hybrid_ieua_benchmark.qmd">opengwasdb_hybrid_ieua_benchmark.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_chunk_comparison_benchmark.qmd">opengwasdb_chunk_comparison_benchmark.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_vs_besdq_comparison.qmd">opengwasdb_vs_besdq_comparison.qmd</a></li>
         <li><a href="benchmark-output/opengwasdb_vcf_ukb_chr1_benchmark.qmd">opengwasdb_vcf_ukb_chr1_benchmark.qmd</a></li>

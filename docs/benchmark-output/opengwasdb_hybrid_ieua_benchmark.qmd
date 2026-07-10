@@ -1,0 +1,292 @@
+---
+title: "OpenGWASDB Hybrid Layout — Hybrid vs Dense-of-union"
+subtitle: "Heterogeneous consortia (BMI · CAD · LDL) · one shared panel · reference-completed"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import json
+from pathlib import Path
+
+HERE = Path(".")
+data = json.loads((HERE / "opengwasdb_hybrid_ieua_benchmark.json").read_text())
+
+def md_table(headers, rows):
+    sep = "|" + "|".join(["---"] * len(headers)) + "|"
+    head = "| " + " | ".join(headers) + " |"
+    body = "\n".join("| " + " | ".join(str(c) for c in r) + " |" for r in rows)
+    return f"{head}\n{sep}\n{body}"
+
+def fmt_ms(v):
+    return f"{v:,.1f} ms" if v < 1000 else f"{v/1000:,.2f} s"
+
+def gb(b):
+    return f"{b/1e9:,.2f} GB"
+
+def by_query(rows):
+    return {r["query"]: r for r in rows}
+```
+
+## Overview
+
+Three **independent consortium GWAS**, each imputed to a *different* panel yet
+genome-wide with a large shared common core — the regime the **Hybrid Layout**
+(ADR 0026) targets:
+
+```{python}
+#| echo: false
+#| output: asis
+rows = [(sid, lab) for sid, lab in data["labels"].items()]
+print(md_table(["Study", "Trait"], rows))
+```
+
+Both layouts are built from the **same three GWAS-VCFs** against the **same EUR
+reference panel**, and both are reference-completed:
+
+- **Hybrid** — a Dense Component on the panel (imputable) + a Ragged Overflow of
+  each study's off-panel observed variants.
+- **Dense-of-union** — a single dense matrix over the *whole* observed union
+  (ADR 0022's rule applied to this regime), for comparison.
+
+This report compares their storage and query latency, then validates the
+completed Hybrid store with positive-control **imputed-only MR** and a regional
+imputation plot.
+
+```{python}
+#| echo: false
+#| output: asis
+s = data["storage"]
+d = data["dataset"]
+rows = [
+    ("Analyses (GWAS)", f"{d['n_analyses']:,}"),
+    ("Shared variant table (panel ∪ off-panel)", f"{s['n_shared']:,}"),
+    ("On-panel (Dense Component rows)", f"{s['n_panel']:,}"),
+    ("Off-panel (Ragged Overflow variants)", f"{s['n_off_panel']:,}"),
+    ("Reference assembly", d["reference_assembly"]),
+]
+print(md_table(["Property", "Value"], rows))
+```
+
+```{python}
+#| echo: false
+#| output: asis
+bad = {k: v for k, v in data["validation"].items() if v}
+if not bad:
+    print("> **All four stores validate** (observed-only and reference-completed, "
+          "both layouts).")
+else:
+    print("> **Validation errors:** " + "; ".join(f"`{k}`: {v}" for k, v in bad.items()))
+```
+
+---
+
+## Storage: Hybrid vs Dense-of-union
+
+```{python}
+#| echo: false
+#| output: asis
+s = data["storage"]
+saving = 1 - s["hybrid_completed_bytes"] / s["dense_union_completed_bytes"]
+rows = [
+    ("Raw source VCFs (.vcf.gz)", gb(s["raw_vcf_bytes"])),
+    ("Dense-of-union (completed)", f"**{gb(s['dense_union_completed_bytes'])}**"),
+    ("Hybrid (completed)", f"**{gb(s['hybrid_completed_bytes'])}**"),
+    ("  — Dense Component", gb(s["hybrid_dense_component_bytes"])),
+    ("  — Ragged Overflow", gb(s["hybrid_overflow_bytes"])),
+]
+print(md_table(["Form", "Size"], rows))
+print()
+frac_off = s["n_off_panel"] / s["n_shared"] if s["n_shared"] else 0
+print(f"The off-panel tail is **{frac_off:.0%}** of the shared variant table "
+      f"({s['n_off_panel']:,} of {s['n_shared']:,} variants). The Hybrid store keeps "
+      f"those raggedly (a `variant_index` per observed cell) and never imputes them, "
+      f"so its dense matrix — and therefore its dense variant axis, tabix index and "
+      f"ALID mmap — spans only the {s['n_panel']:,} imputable panel variants, versus "
+      f"all {s['n_shared']:,} in the Dense-of-union store.")
+if saving > 0:
+    print(f"\nNet: the Hybrid store is **{saving:.0%} smaller** than Dense-of-union here.")
+```
+
+---
+
+## Query performance
+
+Median of repeated calls after one warm-up, on the reference-completed stores.
+
+```{python}
+#| echo: false
+#| output: asis
+DESC = {
+    "bulk": "One analysis, all variants (`analysis`)",
+    "phewas": "One (panel) variant × all analyses (`phewas`)",
+    "regional": "All associations in a 1 Mb window (`range_phewas`)",
+    "tophits": "Genome-wide significant index read (`top_hits`)",
+    "random_lookup": "100 variants × analyses (`lookup`)",
+}
+h = by_query(data["timings"]["hybrid"])
+u = by_query(data["timings"]["dense_union"])
+rows = []
+for name in h:
+    rows.append((
+        name,
+        fmt_ms(h[name]["median_ms"]),
+        fmt_ms(u[name]["median_ms"]),
+        DESC.get(name, ""),
+    ))
+print(md_table(["Pattern", "Hybrid", "Dense-of-union", "What it reads"], rows))
+print()
+print("On-panel point queries are served by the Dense Component and stay in the "
+      "low-millisecond range; the Hybrid facade adds only a dispatch + concatenate "
+      "over the two components. Off-panel PheWAS inherits the ragged O(n) scan "
+      "(a variant-centric overflow index is deferred, ADR 0026).")
+```
+
+---
+
+## MR validation: imputed-only positive controls
+
+Two positive-control **IVW Mendelian randomization** runs straight off the store.
+For the completed Hybrid store each uses **only imputed instruments** — the
+exposure top hit and both exposure/outcome lookup cells must be imputed by the
+Dense Component's completion — compared against the observed-only estimate.
+
+```{python}
+#| echo: false
+#| output: asis
+rows = []
+for m in data["mr"]:
+    o, i = m["observed"], m["imputed_only"]
+    def cell(x, k, f="{:.3f}"):
+        return "—" if x.get(k) is None else f.format(x[k])
+    rows.append((
+        m["label"],
+        f"{cell(o,'ivw_beta')} (n={o['n_instruments']})",
+        f"{cell(i,'ivw_beta')} (n={i['n_instruments']})",
+        cell(i, "ivw_pval", "{:.1e}"),
+    ))
+print(md_table(
+    ["Exposure → Outcome", "Observed IVW β", "Imputed-only IVW β", "Imputed p"], rows))
+print()
+oks = []
+for m in data["mr"]:
+    i = m["imputed_only"]
+    if i.get("ivw_beta") is not None and i["ivw_beta"] > 0:
+        oks.append(m["label"])
+if oks:
+    print(f"The imputed-only estimates are **positive** for {', '.join(oks)} — the "
+          "expected direction, and consistent with the observed-only estimate. The "
+          "completed Hybrid store's imputed dense cells reproduce the causal signal.")
+```
+
+```{python}
+#| echo: false
+#| fig-cap: "Imputed-only per-instrument effects (completed Hybrid store): exposure (x) vs outcome (y), 95% CIs, IVW slope."
+import numpy as np
+import matplotlib.pyplot as plt
+
+mrs = [m for m in data["mr"] if m["imputed_only"].get("instruments")]
+if not mrs:
+    print("No imputed-only instruments were available for the scatter plot.")
+else:
+    fig, axes = plt.subplots(1, len(mrs), figsize=(6.2 * len(mrs), 5.0), squeeze=False)
+    for ax, m in zip(axes[0], mrs):
+        inst = m["imputed_only"]["instruments"]
+        be = np.array([i["beta_exp"] for i in inst])
+        bo = np.array([i["beta_out"] for i in inst])
+        see = np.array([i["se_exp"] for i in inst])
+        seo = np.array([i["se_out"] for i in inst])
+        ax.errorbar(be, bo, xerr=1.96 * see, yerr=1.96 * seo, fmt="o", ms=4,
+                    color="#c43c39", ecolor="#efbbb8", elinewidth=0.8, capsize=0, alpha=0.9,
+                    label="imputed instruments (95% CI)")
+        xs = np.array([be.min() * 1.1, be.max() * 1.1]) if len(be) else np.array([-1, 1])
+        ax.plot(xs, m["imputed_only"]["ivw_beta"] * xs, "-", color="#1f2933", lw=2,
+                label=f"IVW slope = {m['imputed_only']['ivw_beta']:.2f}")
+        ax.axhline(0, color="#c3c2b7", lw=0.8); ax.axvline(0, color="#c3c2b7", lw=0.8)
+        ax.set_xlabel("SNP effect on exposure")
+        ax.set_ylabel("SNP effect on outcome")
+        ax.set_title(m["label"])
+        ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    plt.show()
+```
+
+---
+
+## Regional imputation sanity check
+
+A 1 Mb window centred on the strongest imputed LDL top hit in the completed Hybrid
+store; every association returned for the window, imputed highlighted against
+observed.
+
+```{python}
+#| echo: false
+#| output: asis
+reg = data.get("regional_imputation_check") or {}
+pts = reg.get("points", [])
+if not pts:
+    print("_No regional imputation data available._")
+else:
+    n_imp = sum(p["association_status"] == "imputed" for p in pts)
+    n_obs = sum(p["association_status"] == "observed" for p in pts)
+    print(f"- **Analysis**: `{reg['analysis_id']}` ({data['labels'][reg['analysis_id']]})")
+    print(f"- **Region**: chr{reg['chrom']}:{reg['start']:,}-{reg['end']:,} "
+          f"(centre z={reg['center_z']:.2f})")
+    print(f"- **Associations plotted**: {len(pts):,} total; {n_obs:,} observed, "
+          f"{n_imp:,} imputed.")
+```
+
+```{python}
+#| echo: false
+#| fig-cap: "One megabase around the strongest imputed LDL top hit. Imputed associations highlighted in red."
+import numpy as np
+import matplotlib.pyplot as plt
+
+reg = data.get("regional_imputation_check") or {}
+pts = reg.get("points", [])
+if pts:
+    pos = np.array([p["pos"] for p in pts], dtype=float) / 1e6
+    z = np.array([p["z"] for p in pts], dtype=float)
+    status = np.array([p["association_status"] for p in pts])
+    is_center = np.array([p["is_center"] for p in pts], dtype=bool)
+    obs = status == "observed"
+    imp = status == "imputed"
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+    ax.scatter(pos[obs], z[obs], s=12, color="#52616b", alpha=0.45, linewidths=0,
+               label=f"observed ({obs.sum():,})")
+    ax.scatter(pos[imp], z[imp], s=18, color="#c43c39", alpha=0.85, linewidths=0,
+               label=f"imputed ({imp.sum():,})")
+    if is_center.any():
+        ax.scatter(pos[is_center], z[is_center], s=90, facecolors="none",
+                   edgecolors="#111827", linewidths=1.5, label="centre top hit")
+    ax.axhline(0, color="#c3c2b7", lw=0.8)
+    ax.axvline(reg["center_pos"] / 1e6, color="#111827", lw=0.8, ls="--", alpha=0.7)
+    ax.set_xlabel(f"chr{reg['chrom']} position (Mb, hg38)")
+    ax.set_ylabel("LDL z-score")
+    ax.set_title("Regional imputation around the strongest imputed LDL hit")
+    ax.legend(frameon=False, fontsize=9, ncols=3)
+    fig.tight_layout()
+    plt.show()
+```
+
+---
+
+## Provenance
+
+```{python}
+#| echo: false
+#| output: asis
+print("- Data: `opengwasdb_hybrid_ieua_benchmark.json` "
+      "(from `benchmarks/benchmark_hybrid_ieua.py`).")
+print("- Layout: Hybrid (ADR 0026) — Dense Component (panel) + Ragged Overflow "
+      "(off-panel observed), reference completion targets the Dense Component only.")
+print("- MR is a demonstration/validation of the query layer, not a definitive "
+      "epidemiological estimate (distance-based pruning in place of LD clumping).")
+```

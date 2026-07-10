@@ -10,6 +10,7 @@ import zarr
 
 from opengwasdb.index import analysis_by_id, connect
 from opengwasdb.layouts.dense.top_hits import threshold_key
+from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
 from opengwasdb.store.open import OpenGWASDBStore, open_store
@@ -645,9 +646,225 @@ class RaggedStoreQuery:
         }
 
 
-def query_store(path: str | Path) -> StoreQuery | RaggedStoreQuery:
+def _concat_results(parts: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    """Concatenate query-result dicts (each a plain component read)."""
+    parts = [p for p in parts if len(p["z"])]
+    if not parts:
+        return _empty_result()
+    return {
+        "variant_index": np.concatenate([p["variant_index"] for p in parts]).astype("int32"),
+        "analysis_index": np.concatenate([p["analysis_index"] for p in parts]).astype("int32"),
+        "z": np.concatenate([p["z"] for p in parts]).astype("float32"),
+        "se": np.concatenate([p["se"] for p in parts]).astype("float32"),
+        "association_status": np.concatenate([p["association_status"] for p in parts]),
+    }
+
+
+class HybridStoreQuery:
+    """Query facade for a Hybrid store (ADR 0026).
+
+    A thin integration layer: it dispatches to the nested Dense Component's
+    ``StoreQuery`` (on-panel variants) and to the Ragged Overflow CSR (off-panel
+    variants), remaps the Dense Component's panel-local ``variant_index`` onto the
+    shared variant index space, and concatenates. A variant is in exactly one
+    component (on-panel xor off-panel), so results are a plain union with no dedup.
+    """
+
+    def __init__(self, store: OpenGWASDBStore):
+        self.store = store
+        self._dense_store = open_store(dense_component_path(store.path))
+        self._dense = StoreQuery(self._dense_store)
+        self._dense_to_shared = np.load(dense_to_shared_path(store.path)).astype("int32")
+        self._csr = RaggedCSRReader(store.path)  # overflow at store/data.zarr/ragged
+        self._connection = connect(store.index_path)  # shared analyses
+        self._variant_axis = VariantAxis(store.path, self._connection)  # shared union table
+
+    def close(self) -> None:
+        self._dense.close()
+        self._variant_axis.close()
+        self._connection.close()
+
+    def __enter__(self) -> HybridStoreQuery:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    # ── shared-table tables ──────────────────────────────────────────────────
+    def analyses_table(self) -> dict[int, dict]:
+        return self._dense.analyses_table()
+
+    def variants_table(self) -> dict[int, dict]:
+        return {
+            r.variant_index: {
+                "alid": r.alid,
+                "chromosome": r.chromosome,
+                "position": r.position,
+                "effect_allele": r.effect_allele,
+                "other_allele": r.other_allele,
+                "rsid": r.rsid,
+            }
+            for r in self._variant_axis.all()
+        }
+
+    # ── dispatch helpers ─────────────────────────────────────────────────────
+    def _remap_dense(self, result: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Translate a Dense Component result's panel-local variant_index to shared."""
+        if len(result["variant_index"]):
+            result["variant_index"] = self._dense_to_shared[
+                result["variant_index"].astype("int64")
+            ].astype("int32")
+        return result
+
+    def _shared_is_on_panel(self, shared_idx: int) -> bool:
+        pos = int(np.searchsorted(self._dense_to_shared, shared_idx))
+        return pos < len(self._dense_to_shared) and int(self._dense_to_shared[pos]) == shared_idx
+
+    def _overflow_for_analysis(self, col: int) -> dict[str, np.ndarray]:
+        offsets = self._csr._offsets[col: col + 2]
+        s, e = int(offsets[0]), int(offsets[1])
+        if s == e:
+            return _empty_result()
+        vi = self._csr._variant_index[s:e].astype("int32")
+        z = self._csr._z[s:e].astype("float32")
+        se = self._csr._se[s:e].astype("float32")
+        return {
+            "variant_index": vi,
+            "analysis_index": np.full(len(z), col, dtype="int32"),
+            "z": z,
+            "se": se,
+            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z),
+        }
+
+    def _overflow_by_variants(self, shared_indices: set[int]) -> dict[str, np.ndarray]:
+        """All overflow associations whose (off-panel) variant is in the set."""
+        if not shared_indices:
+            return _empty_result()
+        offsets = self._csr._offsets[:]
+        vi_all = self._csr._variant_index[:]
+        wanted = np.fromiter(shared_indices, dtype=np.int32, count=len(shared_indices))
+        mask = np.isin(vi_all, wanted)
+        hits = np.where(mask)[0]
+        if len(hits) == 0:
+            return _empty_result()
+        analysis_indices = np.searchsorted(offsets[1:], hits, side="right").astype("int32")
+        z = self._csr._z[:][hits].astype("float32")
+        se = self._csr._se[:][hits].astype("float32")
+        return {
+            "variant_index": vi_all[hits].astype("int32"),
+            "analysis_index": analysis_indices,
+            "z": z,
+            "se": se,
+            "association_status": _status_array(np.zeros(len(hits), dtype=np.uint8), z),
+        }
+
+    # ── public query surface ─────────────────────────────────────────────────
+    def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
+        dense = self._remap_dense(self._dense.analysis(analysis_id, observed_only=observed_only))
+        analysis = analysis_by_id(self._connection, analysis_id)
+        overflow = (
+            self._overflow_for_analysis(int(analysis["analysis_index"]))
+            if analysis is not None else _empty_result()
+        )
+        return _concat_results([dense, overflow])
+
+    def phewas(self, identifier: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
+        variant = self._variant_axis.by_identifier(identifier)
+        if variant is None:
+            return _empty_result()
+        if self._shared_is_on_panel(variant.variant_index):
+            return self._remap_dense(
+                self._dense.phewas(variant.alid, observed_only=observed_only)
+            )
+        return self._overflow_by_variants({int(variant.variant_index)})
+
+    def range_phewas(
+        self, chromosome: str, start: int, end: int, *, observed_only: bool = False
+    ) -> dict[str, np.ndarray]:
+        dense = self._remap_dense(
+            self._dense.range_phewas(chromosome, start, end, observed_only=observed_only)
+        )
+        shared_idx = self._variant_axis.range_indices(chromosome, start, end)
+        off_panel = {
+            int(i) for i in shared_idx.tolist() if not self._shared_is_on_panel(int(i))
+        }
+        overflow = self._overflow_by_variants(off_panel)
+        return _concat_results([dense, overflow])
+
+    def lookup(
+        self,
+        identifiers: list[str],
+        analysis_ids: list[str],
+        *,
+        observed_only: bool = False,
+    ) -> dict[str, np.ndarray]:
+        dense = self._remap_dense(
+            self._dense.lookup(identifiers, analysis_ids, observed_only=observed_only)
+        )
+        # Off-panel identifiers: resolve on the shared table, keep off-panel ones.
+        off_shared: set[int] = set()
+        for id_ in identifiers:
+            rec = self._variant_axis.by_identifier(id_)
+            if rec is not None and not self._shared_is_on_panel(rec.variant_index):
+                off_shared.add(int(rec.variant_index))
+        wanted_cols = {
+            int(a["analysis_index"])
+            for aid in analysis_ids
+            if (a := analysis_by_id(self._connection, aid)) is not None
+        }
+        overflow = self._overflow_by_variants(off_shared)
+        if len(overflow["z"]) and wanted_cols:
+            keep = np.isin(overflow["analysis_index"], np.fromiter(
+                wanted_cols, dtype="int32", count=len(wanted_cols)))
+            overflow = {k: v[keep] for k, v in overflow.items()}
+        elif not wanted_cols:
+            overflow = _empty_result()
+        return _concat_results([dense, overflow])
+
+    def _overflow_top_hits(self, threshold: float) -> dict[str, np.ndarray]:
+        key = threshold_key(threshold)
+        root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
+        path = f"top_hits/{key}"
+        if path not in root:
+            return _empty_result()
+        group = root[path]
+        vi = group["variant_index"][:].astype("int32")
+        ai = group["analysis_index"][:].astype("int32")
+        z = group["z"][:].astype("float32")
+        se = group["se"][:].astype("float32")
+        return {
+            "variant_index": vi,
+            "analysis_index": ai,
+            "z": z,
+            "se": se,
+            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z),
+        }
+
+    def top_hits(
+        self,
+        *,
+        threshold: float = 5e-8,
+        limit: int | None = None,
+        observed_only: bool = False,
+    ) -> dict[str, np.ndarray]:
+        dense = self._remap_dense(
+            self._dense.top_hits(threshold=threshold, observed_only=observed_only)
+        )
+        overflow = self._overflow_top_hits(threshold)  # overflow is always observed
+        merged = _concat_results([dense, overflow])
+        if len(merged["z"]):
+            order = np.argsort(-np.abs(merged["z"]), kind="stable")
+            merged = {k: v[order] for k, v in merged.items()}
+        if limit is not None:
+            merged = {k: v[:limit] for k, v in merged.items()}
+        return merged
+
+
+def query_store(path: str | Path) -> StoreQuery | RaggedStoreQuery | HybridStoreQuery:
     """Open a store and return the layout-independent query facade."""
     store = open_store(path)
     if store.manifest.primary_layout is PrimaryStorageLayout.RAGGED:
         return RaggedStoreQuery(store)
+    if store.manifest.primary_layout is PrimaryStorageLayout.HYBRID:
+        return HybridStoreQuery(store)
     return StoreQuery(store)

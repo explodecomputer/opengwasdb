@@ -6,6 +6,7 @@ from enum import StrEnum
 class PrimaryStorageLayout(StrEnum):
     DENSE = "dense"
     RAGGED = "ragged"
+    HYBRID = "hybrid"
 
 
 class AssociationCoverage(StrEnum):

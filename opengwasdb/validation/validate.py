@@ -13,6 +13,7 @@ import zarr
 
 from opengwasdb.index import connect, count_rows
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
+from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout, StoredEffectScale
 from opengwasdb.model.manifest import StoreManifest
@@ -70,6 +71,12 @@ def validate_store(
 
     if manifest.primary_layout is PrimaryStorageLayout.RAGGED:
         _validate_ragged_store(store_path, manifest, errors)
+        if source is not None:
+            errors.append("source-fidelity check is only supported for dense stores")
+        return ValidationResult(errors=errors)
+
+    if manifest.primary_layout is PrimaryStorageLayout.HYBRID:
+        _validate_hybrid_store(store_path, manifest, errors)
         if source is not None:
             errors.append("source-fidelity check is only supported for dense stores")
         return ValidationResult(errors=errors)
@@ -405,6 +412,169 @@ def _validate_ragged_top_hits(
             if p_value_from_z(stored_z) > threshold:
                 errors.append(f"top-hit index {key} contains association above threshold")
                 break
+
+
+def _validate_hybrid_store(
+    store_path: Path,
+    manifest: StoreManifest,
+    errors: list[str],
+) -> ValidationResult:
+    """Validate a Hybrid store (ADR 0026 / issue 059).
+
+    Reuses the dense component validator on ``<store>/dense`` and adds only the
+    hybrid-specific invariants: the shared union table covers both components, the
+    on-panel/off-panel partition is disjoint, and the overflow is observed-only.
+    """
+    from opengwasdb.model.enums import AssociationCoverage
+
+    if manifest.association_coverage is not AssociationCoverage.FULL:
+        errors.append(
+            "hybrid store must have association_coverage=full "
+            f"(got {manifest.association_coverage.value})"
+        )
+
+    dense_dir = dense_component_path(store_path)
+    ragged_path = store_path / "data.zarr" / "ragged"
+    for label, p in [
+        ("dense/ (Dense Component)", dense_dir),
+        ("dense/manifest.json", dense_dir / "manifest.json"),
+        ("dense/dense_to_shared.npy", dense_to_shared_path(store_path)),
+        ("index.sqlite", store_path / "index.sqlite"),
+        ("variants.tsv.gz", variant_table_path(store_path)),
+        ("variants.tsv.gz.tbi", variant_tabix_path(store_path)),
+        ("variant_alid_bytes.npy", variant_alid_bytes_path(store_path)),
+        ("variant_alid_rows.npy", variant_alid_rows_path(store_path)),
+        ("data.zarr/ragged (Ragged Overflow)", ragged_path),
+    ]:
+        if not p.exists():
+            errors.append(f"missing {label}")
+    if errors:
+        return ValidationResult(errors=errors)
+
+    # 1. Dense Component — reuse the dense validator unchanged.
+    dense_manifest = _load_manifest(dense_dir, errors)
+    if dense_manifest is None:
+        return ValidationResult(errors=errors)
+    if dense_manifest.primary_layout is not PrimaryStorageLayout.DENSE:
+        errors.append(
+            f"Dense Component manifest must be primary_layout=dense "
+            f"(got {dense_manifest.primary_layout.value})"
+        )
+        return ValidationResult(errors=errors)
+    before = len(errors)
+    _validate_dense_store(dense_dir, dense_manifest, errors)
+    if len(errors) > before:
+        return ValidationResult(errors=errors)
+
+    # 2. Shared union table structural checks.
+    try:
+        with connect(store_path / "index.sqlite") as connection:
+            variant_axis = VariantAxis(store_path, connection)
+            try:
+                n_shared = _validate_variant_axis(variant_axis, errors)
+                _validate_sqlite(connection, n_shared, errors)
+            finally:
+                variant_axis.close()
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"hybrid shared-table validation failed: {exc}")
+        return ValidationResult(errors=errors)
+    if errors:
+        return ValidationResult(errors=errors)
+
+    # 3. Ragged Overflow structural checks + observed-only invariant.
+    _validate_overflow(store_path, ragged_path, n_shared, errors)
+    if errors:
+        return ValidationResult(errors=errors)
+
+    # 4. Hybrid cross-component invariants (coverage + disjoint partition).
+    _validate_hybrid_invariants(store_path, dense_dir, n_shared, errors)
+    return ValidationResult(errors=errors)
+
+
+def _validate_overflow(
+    store_path: Path, ragged_path: Path, n_shared: int, errors: list[str]
+) -> None:
+    """Validate the Ragged Overflow CSR: array lengths, se sign, shared-index
+    bounds, and that it is observed-only (never imputed, even after completion)."""
+    try:
+        root = zarr.open_group(str(ragged_path), mode="r")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"cannot open Ragged Overflow CSR: {exc}")
+        return
+    for name in ("offsets", "variant_index", "z", "se"):
+        if name not in root:
+            errors.append(f"missing data.zarr/ragged/{name}")
+    if errors:
+        return
+    offsets = root["offsets"][:]
+    n_assoc = int(offsets[-1])
+    for name in ("variant_index", "z", "se"):
+        if len(root[name]) != n_assoc:
+            errors.append(
+                f"data.zarr/ragged/{name} has {len(root[name])} entries but "
+                f"offsets imply {n_assoc}"
+            )
+    if "imputed" in root:
+        errors.append(
+            "Ragged Overflow has an imputed array — the overflow is off-panel and "
+            "must never be imputed (always observed)"
+        )
+    if errors:
+        return
+    vi = root["variant_index"][:]
+    if n_assoc and (int(vi.min()) < 0 or int(vi.max()) >= n_shared):
+        errors.append(
+            "Ragged Overflow variant_index falls outside the shared variant table "
+            f"[0, {n_shared})"
+        )
+    se_vals = root["se"][:].astype("float32")
+    if np.any(np.isfinite(se_vals) & (se_vals < 0)):
+        errors.append("Ragged Overflow se contains negative finite values")
+
+
+def _validate_hybrid_invariants(
+    store_path: Path, dense_dir: Path, n_shared: int, errors: list[str]
+) -> None:
+    """Coverage + disjoint-partition invariants over the shared variant index space."""
+    dense_to_shared = np.load(dense_to_shared_path(store_path))
+    n_panel = len(dense_to_shared)
+
+    # dense_to_shared must be a strictly-increasing set of valid shared rows.
+    if n_panel and (int(dense_to_shared.min()) < 0 or int(dense_to_shared.max()) >= n_shared):
+        errors.append("dense_to_shared references rows outside the shared variant table")
+        return
+    if n_panel != len(np.unique(dense_to_shared)):
+        errors.append("dense_to_shared maps two Dense Component rows to one shared row")
+        return
+
+    # Disjoint partition: no overflow variant is also a Dense Component (on-panel) row.
+    ragged_root = zarr.open_group(str(store_path / "data.zarr" / "ragged"), mode="r")
+    overflow_vi = np.unique(ragged_root["variant_index"][:])
+    on_panel = np.zeros(n_shared, dtype=bool)
+    on_panel[dense_to_shared] = True
+    if len(overflow_vi) and np.any(on_panel[overflow_vi]):
+        errors.append(
+            "disjoint-partition violated: an overflow association references an "
+            "on-panel (Dense Component) variant"
+        )
+
+    # Coverage: the shared table row each dense row maps to must carry the same
+    # ALID as the Dense Component's own variant (sampled for large stores).
+    dense_axis = VariantAxis(dense_dir)
+    shared_axis = VariantAxis(store_path)
+    try:
+        for r in _representative_variant_indices(n_panel):
+            dense_rec = dense_axis.by_index(r)
+            shared_rec = shared_axis.by_index(int(dense_to_shared[r]))
+            if dense_rec is None or shared_rec is None or dense_rec.alid != shared_rec.alid:
+                errors.append(
+                    "dense_to_shared coverage violated: Dense Component row "
+                    f"{r} does not match its shared variant table row"
+                )
+                break
+    finally:
+        dense_axis.close()
+        shared_axis.close()
 
 
 def _load_manifest(store_path: Path, errors: list[str]) -> StoreManifest | None:

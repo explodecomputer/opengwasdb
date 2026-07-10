@@ -52,3 +52,63 @@ def test_cli_build_validate_info_and_query_workflow(tmp_path, source_path):
     top_hits = runner.invoke(app, ["query-top-hits", str(store_path)])
     assert top_hits.exit_code == 0, top_hits.output
     assert [row["z"] for row in json.loads(top_hits.output)] == [6.0, 6.0]
+
+
+def _hybrid_vcf(tmp_path, name, rows):
+    header = (
+        "##fileformat=VCFv4.2\n"
+        "##FORMAT=<ID=ES,Number=A,Type=Float,Description=\"Effect size\">\n"
+        "##FORMAT=<ID=SE,Number=A,Type=Float,Description=\"Standard error\">\n"
+        "##FORMAT=<ID=EZ,Number=A,Type=Float,Description=\"Z-score\">\n"
+        "##SAMPLE=<ID=S,StudyType=Continuous>\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n"
+    )
+    p = tmp_path / f"{name}.vcf"
+    p.write_text(header + "".join(rows), encoding="utf-8")
+    return p
+
+
+def test_cli_build_hybrid_validate_and_query(tmp_path):
+    runner = CliRunner()
+    vcf = _hybrid_vcf(
+        tmp_path,
+        "trait_a",
+        [
+            "1\t100000\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",   # on-panel
+            "1\t1000000\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n",  # OFF-panel -> overflow
+            "1\t1500000\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n",  # on-panel
+        ],
+    )
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\n" f"trait_a\t{vcf}\tTrait A\t1000\n",
+        encoding="utf-8",
+    )
+    panel = tmp_path / "panel.txt"
+    panel.write_text("1:100000:A:G\n1:1564620:A:G\n", encoding="utf-8")
+
+    store = tmp_path / "hybrid-cli.opengwasdb"
+    build = runner.invoke(
+        app,
+        [
+            "build-hybrid", str(manifest), str(store),
+            "--reference-panel", str(panel),
+            "--store-id", "hyb-cli", "--release-id", "v1",
+        ],
+    )
+    assert build.exit_code == 0, build.output
+    out = json.loads(build.output.strip().splitlines()[-1])
+    assert out["n_panel"] == 2 and out["n_off_panel"] == 1
+
+    validate = runner.invoke(app, ["validate", str(store)])
+    assert validate.exit_code == 0, validate.output
+
+    info = runner.invoke(app, ["info", str(store)])
+    assert "primary_layout: hybrid" in info.output
+
+    # Off-panel variant is served from the overflow.
+    lookup = runner.invoke(
+        app, ["query-lookup", str(store), "1:1064620:C:T", "trait_a"]
+    )
+    assert lookup.exit_code == 0, lookup.output
+    assert len(json.loads(lookup.output.strip().splitlines()[-1])) == 1
