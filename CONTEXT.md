@@ -49,6 +49,24 @@ Whether a Store Release contains only source-observed associations or has also b
 **LD Reference Panel**:
 The declared ancestry-specific LD resource used for reference completion. It defines the **Reference Variant Set** and provides LD information used to infer imputed associations.
 
+**Analysis Catalogue**:
+The complete list of candidate **Analyses** for ingestion, each recorded with its annotations (including **Assigned Ancestry** and **Ancestry Composition**), independent of any store. A build consumes a *subset view* of the Catalogue — e.g. all EUR-assigned Analyses — rather than a bespoke manifest, so annotation happens once for every Analysis and store selection is just a filter over the Catalogue.
+
+**Assigned Ancestry**:
+The single ancestry label attached to an **Analysis**, recovered from that Analysis's summary-statistic allele frequencies rather than declared by the source. It selects which ancestry-specific **LD Reference Panel** the Analysis may be reference-completed against; an Analysis whose composition matches no single ancestry confidently is left *Unassigned* rather than forced into a label.
+
+**Ancestry Composition**:
+The estimated mixture proportions of an Analysis across a set of reference ancestries (summing to one), from which its **Assigned Ancestry** is derived. Retained as provenance so an Unassigned or later-reroutable Analysis keeps the evidence behind its label.
+
+**Ancestry Reference Panel**:
+Per-population reference allele frequencies over a common variant set, used to estimate an Analysis's **Ancestry Composition** by matching its summary-statistic allele frequencies. Distinct from the **LD Reference Panel**: this provides population frequencies for ancestry assignment, not LD structure for completion. It may be defined at a finer population granularity than the ancestries an Analysis is ultimately routed by.
+
+**Reported Population**:
+The ancestry a source declares for an Analysis (e.g. an OpenGWAS metadata `population` field). It is treated as untrusted — used only to calibrate and audit **Assigned Ancestry**, never to route an Analysis. Assigned Ancestry, recovered from allele frequencies, governs routing.
+
+**Ancestry-Matched Completion**:
+The rule that reference completion imputes an Analysis only when its **Assigned Ancestry** matches the ancestry of the **LD Reference Panel** being applied; Analyses of other ancestries in the same store are left observed-only. A store therefore need not be ancestry-homogeneous, and may be completed against more than one panel, each panel imputing only its matching Analyses.
+
 **Reference Variant Set**:
 The canonical variant set defined by an LD Reference Panel for a Reference-Completed release. Reference completion attempts to provide associations on this set, subject to missingness where imputation fails or is out of scope.
 
