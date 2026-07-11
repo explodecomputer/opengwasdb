@@ -24,6 +24,11 @@ from opengwasdb.ancestry.mixture import (
     assign_ancestry,
     assign_from_vcf,
 )
+from opengwasdb.ancestry.pipeline import (
+    SourceRow,
+    annotate_catalogue,
+    read_source_manifest,
+)
 from opengwasdb.ancestry.reference import AncestryReference, load_reference
 
 __all__ = [
@@ -32,6 +37,8 @@ __all__ = [
     "BUILD_COLUMNS",
     "CatalogueRow",
     "Gates",
+    "SourceRow",
+    "annotate_catalogue",
     "assign_ancestry",
     "assign_from_vcf",
     "catalogue_fieldnames",
@@ -39,5 +46,6 @@ __all__ = [
     "is_palindromic",
     "load_reference",
     "read_catalogue",
+    "read_source_manifest",
     "write_catalogue",
 ]

@@ -7,6 +7,9 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from opengwasdb.ancestry.mixture import Gates
+from opengwasdb.ancestry.pipeline import annotate_catalogue, read_source_manifest
+from opengwasdb.ancestry.reference import load_reference
 from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
 from opengwasdb.layouts.dense.complete import (
@@ -181,6 +184,62 @@ def build_hybrid_command(
                 "n_panel": result.n_panel,
                 "n_off_panel": result.n_off_panel,
                 "n_overflow": result.n_overflow,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("assign-ancestry")
+def assign_ancestry_command(
+    manifest_path: Path,
+    catalogue_path: Path,
+    ancestry_reference: Path = typer.Option(
+        ..., help="Ancestry Reference Panel: ref_freqs.hg38.tsv.gz"
+    ),
+    ancestry_groups: Path = typer.Option(
+        ..., help="Fine→super-population map: ancestry_groups.tsv"
+    ),
+    maf_floor: float = typer.Option(0.01, help="Drop reference variants below this MAF"),
+    tau: float = typer.Option(0.90, help="Gate: min dominant super-population proportion"),
+    delta: float = typer.Option(0.20, help="Gate: min margin over the runner-up"),
+    n_min: int = typer.Option(20_000, help="Gate: min overlapping reference sites"),
+    residual_max: float = typer.Option(0.06, help="Gate: max RMS NNLS residual"),
+    workers: int = typer.Option(1, help="Fork-based process pool size"),
+    catalogue_version: str = typer.Option("v1", help="Recorded in the Catalogue"),
+    reference_version: str = typer.Option(
+        "", help="Reference version stamp (default: reference filename)"
+    ),
+) -> None:
+    """Annotate a raw source manifest into the versioned Analysis Catalogue.
+
+    MANIFEST_PATH is a TSV with columns trait_id, file_path, trait_name, n and an
+    optional reported_population. AF is extracted at the reference sites (targeted,
+    parallel), fit to the fine reference by NNLS, aggregated to super-populations,
+    and gated into an Assigned Ancestry or Unassigned. Non-EUR/Unassigned Analyses
+    are retained (parked) in the Catalogue.
+    """
+    reference = load_reference(ancestry_reference, ancestry_groups, maf_floor=maf_floor)
+    gates = Gates(tau=tau, delta=delta, n_min=n_min, residual_max=residual_max)
+    source_rows = read_source_manifest(manifest_path)
+    rows = annotate_catalogue(
+        source_rows,
+        reference,
+        gates,
+        catalogue_path,
+        catalogue_version=catalogue_version,
+        ancestry_reference_version=reference_version or ancestry_reference.name,
+        n_workers=workers,
+    )
+    n_assigned = sum(1 for r in rows if r.assignment.assigned_ancestry is not None)
+    typer.echo(
+        json.dumps(
+            {
+                "catalogue_path": str(catalogue_path),
+                "n_analyses": len(rows),
+                "n_assigned": n_assigned,
+                "n_parked": len(rows) - n_assigned,
+                "superpops": reference.superpops,
             },
             sort_keys=True,
         )
