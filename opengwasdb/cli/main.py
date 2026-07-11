@@ -190,6 +190,54 @@ def build_hybrid_command(
     )
 
 
+@app.command("build-hybrid-from-catalogue")
+def build_hybrid_from_catalogue_command(
+    catalogue_path: Path,
+    output_path: Path,
+    reference_panel: Path = typer.Option(..., help="Dense Component axis: reference-panel ALIDs"),
+    store_id: str = typer.Option(...),
+    release_id: str = typer.Option(...),
+    ancestry: str = typer.Option("EUR", help="Assigned Ancestry to subset the Catalogue to"),
+    overwrite: bool = typer.Option(False),
+    n_workers: int = typer.Option(1, help="Fork-based process pool size for Pass 2"),
+    chunk_variants: int = typer.Option(DEFAULT_CHUNK_SHAPE[0]),
+    chunk_analyses: int = typer.Option(DEFAULT_CHUNK_SHAPE[1]),
+) -> None:
+    """Subset the Catalogue to one ancestry and build a Hybrid store from it.
+
+    Row-filters the Catalogue to ``assigned_ancestry == ANCESTRY`` (a manifest the
+    unchanged build reads), runs build-hybrid, and records per-Analysis Assigned
+    Ancestry + Catalogue provenance in the store sidecar. Non-matching Analyses are
+    absent from the store (still parked in the Catalogue).
+    """
+    from opengwasdb.ancestry.subset import build_hybrid_from_catalogue
+
+    subset = build_hybrid_from_catalogue(
+        catalogue_path,
+        output_path,
+        reference_panel=reference_panel,
+        store_id=store_id,
+        release_id=release_id,
+        ancestry=ancestry,
+        overwrite=overwrite,
+        n_workers=n_workers,
+        chunk_shape=(chunk_variants, chunk_analyses),
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(output_path),
+                "ancestry": subset.ancestry,
+                "subset_filter": subset.subset_filter,
+                "n_total": subset.n_total,
+                "n_kept": subset.n_kept,
+                "catalogue_version": subset.catalogue_version,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 @app.command("assign-ancestry")
 def assign_ancestry_command(
     manifest_path: Path,
