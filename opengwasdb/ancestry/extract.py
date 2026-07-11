@@ -10,7 +10,7 @@ a bcftools ``-R`` regions file so a full genome scan is never performed per stud
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, KeysView
 from pathlib import Path
 
 from opengwasdb.build.vcf_source import _require_bcftools
@@ -47,7 +47,13 @@ def extract_af_at_sites(
     excluded by default; records with missing/invalid AF, unliftable coordinates,
     or non-canonical alleles are skipped.
     """
-    wanted = wanted_alids if isinstance(wanted_alids, (set, frozenset)) else set(wanted_alids)
+    # Accept containers that already support O(1) membership (a reference index dict
+    # or its keys) without rebuilding a multi-million-element set per call.
+    wanted = (
+        wanted_alids
+        if isinstance(wanted_alids, (set, frozenset, dict, KeysView))
+        else set(wanted_alids)
+    )
     bcftools = _require_bcftools()
     cmd = [bcftools, "query", "-f", "%CHROM\t%POS\t%REF\t%ALT\t[%AF]\n"]
     if regions_file is not None:

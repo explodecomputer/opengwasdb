@@ -110,8 +110,12 @@ def build_reference(
     from_build: str,
     to_build: str,
     chain_file: str | None,
+    no_liftover: bool = False,
 ) -> None:
-    lo = _load_liftover(from_build, to_build, chain_file)
+    # When ``no_liftover`` the raw hg19 coordinates are kept as-is — used to build a
+    # hg19-keyed reference for ancestry assignment, where study VCFs are themselves
+    # hg19, so study and reference join without any liftover.
+    lo = None if no_liftover else _load_liftover(from_build, to_build, chain_file)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_in = n_out = n_fail_lift = n_nonstd = n_bad = 0
@@ -147,15 +151,21 @@ def build_reference(
                 n_bad += 1
                 continue
 
-            mapped = lo.convert_coordinate(f"chr{chrom}", pos - 1)  # 1-based → 0-based
-            if not mapped:
-                n_fail_lift += 1
-                continue
-            new_chrom = _bare_chrom(mapped[0][0])
-            if new_chrom not in _STANDARD_CHROMS:
-                n_nonstd += 1
-                continue
-            new_pos = int(mapped[0][1]) + 1  # 0-based → 1-based
+            if lo is None:
+                new_chrom, new_pos = chrom, pos  # keep raw hg19 coordinates
+                if new_chrom not in _STANDARD_CHROMS:
+                    n_nonstd += 1
+                    continue
+            else:
+                mapped = lo.convert_coordinate(f"chr{chrom}", pos - 1)  # 1-based → 0-based
+                if not mapped:
+                    n_fail_lift += 1
+                    continue
+                new_chrom = _bare_chrom(mapped[0][0])
+                if new_chrom not in _STANDARD_CHROMS:
+                    n_nonstd += 1
+                    continue
+                new_pos = int(mapped[0][1]) + 1  # 0-based → 1-based
 
             # Canonical A1 = min(a0, a1); orient every group's freq (freq of a1) to A1.
             allele_1, allele_2 = (a0, a1) if a0 < a1 else (a1, a0)
@@ -211,6 +221,10 @@ def main() -> None:
     ap.add_argument("--from-build", default="hg19")
     ap.add_argument("--to-build", default="hg38")
     ap.add_argument("--chain", default=None, help="Optional liftover chain file (overrides builds)")
+    ap.add_argument(
+        "--no-liftover", action="store_true",
+        help="Keep raw hg19 coordinates (build a hg19-keyed reference for assignment)",
+    )
     args = ap.parse_args()
 
     raw = args.raw_cache or args.out.with_name("ref_freqs.csv.gz")
@@ -220,6 +234,7 @@ def main() -> None:
     build_reference(
         raw, args.out, groups_out,
         from_build=args.from_build, to_build=args.to_build, chain_file=args.chain,
+        no_liftover=args.no_liftover,
     )
 
 
