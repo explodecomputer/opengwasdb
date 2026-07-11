@@ -1,0 +1,208 @@
+---
+title: "Ancestry assignment across ieu-a / ieu-b / bbj-a"
+subtitle: "815 GWAS · genome-wide · AF-recovered ancestry vs reported population"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import csv
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+plt.rcParams.update({
+    "font.size": 11, "axes.edgecolor": "#8a94a6", "axes.linewidth": 0.8,
+    "axes.grid": True, "grid.color": "#e9ecf1", "grid.linewidth": 0.8,
+    "axes.axisbelow": True, "figure.dpi": 130,
+})
+
+rows = list(csv.DictReader(open(Path(".") / "ancestry_ieu_catalogue.tsv"), delimiter="\t"))
+N = len(rows)
+
+SUPERPOP_COLOR = {
+    "EUR": "#3B6EA5", "EAS": "#D9843B", "AFR": "#4E9A6B", "AMR": "#B0473E",
+    "SAS": "#8B6BB1", "MID": "#C9A227", "NAF": "#9AA0AA", "Unassigned": "#c3c9d2",
+}
+SP_ORDER = ["EUR", "EAS", "AFR", "AMR", "SAS", "MID", "Unassigned"]
+
+def collection(tid):
+    return tid.rsplit("-", 1)[0]
+
+def norm_reported(p):
+    p = (p or "").lower()
+    if "europ" in p: return "European"
+    if "east asian" in p or "japan" in p or "chin" in p or "korea" in p: return "East Asian"
+    if "african" in p: return "African"
+    if "hispanic" in p or "latin" in p: return "Hispanic / Latino"
+    if "south asian" in p or "indian" in p: return "South Asian"
+    if "iran" in p: return "Iranian"
+    if "mixed" in p: return "Mixed"
+    return p or "(none)"
+
+def md_table(headers, body):
+    sep = "|" + "|".join(["---"] * len(headers)) + "|"
+    return "\n".join(["| " + " | ".join(headers) + " |", sep] +
+                     ["| " + " | ".join(str(c) for c in r) + " |" for r in body])
+
+assigned = Counter(r["assigned_ancestry"] for r in rows)
+n_assigned = sum(v for k, v in assigned.items() if k != "Unassigned")
+gate = Counter(r["gate_reason"] for r in rows)
+```
+
+## Overview
+
+Every GWAS in the **`ieu-a` (464), `ieu-b` (225) and `bbj-a` (126)** collections —
+`{python} N` studies — assigned an ancestry from its **summary-statistic allele
+frequencies**, genome-wide (ADR [0028](../adr/0028-ancestry-assignment-from-allele-frequencies.md)).
+The studies are GRCh37, so they are matched against a **hg19** reference (the raw
+Privé 2022 UK-Biobank 21-group panel, 5.8 M variants, kept on hg19) — study and
+reference share coordinates, so no liftover is involved. Each study's frequencies
+are fit as an NNLS mixture, aggregated to super-populations, and admitted only if
+they clear the calibrated gates: **τ ≥ 0.50, δ ≥ 0.20, overlap ≥ 5,000, residual ≤ 0.06**.
+
+```{python}
+#| echo: false
+#| output: asis
+print(md_table(
+    ["", "count", "share"],
+    [
+        ["**Assigned**", n_assigned, f"{n_assigned/N:.0%}"],
+        ["Unassigned", assigned["Unassigned"], f"{assigned['Unassigned']/N:.0%}"],
+        ["— no usable allele frequencies (overlap gate)", gate.get("overlap", 0),
+         f"{gate.get('overlap',0)/N:.0%}"],
+        ["— allele frequencies inconsistent w/ reference (residual gate)", gate.get("residual", 0),
+         f"{gate.get('residual',0)/N:.0%}"],
+    ],
+))
+```
+
+## Assigned-ancestry distribution
+
+```{python}
+#| echo: false
+#| fig-cap: "Assigned super-population across all 815 studies (Unassigned shown for scale)."
+labels = [k for k in SP_ORDER if assigned.get(k, 0)]
+vals = [assigned[k] for k in labels]
+fig, ax = plt.subplots(figsize=(8.2, 3.6))
+y = np.arange(len(labels))
+ax.barh(y, vals, color=[SUPERPOP_COLOR[k] for k in labels], height=0.66, zorder=3)
+for yi, v in zip(y, vals):
+    ax.text(v + N * 0.006, yi, str(v), va="center", fontsize=9.5, color="#33404f")
+ax.set_yticks(y); ax.set_yticklabels(labels); ax.invert_yaxis()
+ax.set_xlim(0, max(vals) * 1.12); ax.set_xlabel("studies")
+ax.grid(axis="y", visible=False)
+ax.set_title("Assigned ancestry", fontsize=12.5, loc="left")
+fig.tight_layout(); plt.show()
+```
+
+Of the **`{python} n_assigned` assigned** studies, EUR and EAS dominate (the
+collections are European and Biobank-Japan heavy), with small numbers of AFR, AMR,
+SAS and MID recovered directly from the frequencies.
+
+## Reported vs Assigned — the audit
+
+The declared population never routes; it only audits. Every row of this cross-tab
+that lands off the Unassigned column sits on the **matching** super-population —
+there are **no misassignments**. The declared-`"Mixed"` studies resolve to EUR
+(European-dominant consortia), and `ieu-*` labels like *Iranian* and *South Asian*
+are recovered as MID and SAS.
+
+```{python}
+#| echo: false
+#| output: asis
+ct = defaultdict(Counter)
+for r in rows:
+    ct[norm_reported(r["reported_population"])][r["assigned_ancestry"]] += 1
+cols = [c for c in SP_ORDER if any(ct[rep].get(c, 0) for rep in ct)]
+body = []
+for rep in sorted(ct, key=lambda k: -sum(ct[k].values())):
+    tot = sum(ct[rep].values())
+    body.append([rep] + [ct[rep].get(c, 0) or "·" for c in cols] + [f"**{tot}**"])
+print(md_table(["Reported ＼ Assigned"] + cols + ["total"], body))
+```
+
+## Assignment by collection
+
+```{python}
+#| echo: false
+#| fig-cap: "Per-collection outcome: assigned super-populations vs Unassigned."
+colls = ["ieu-a", "ieu-b", "bbj-a"]
+by_coll = {c: Counter(r["assigned_ancestry"] for r in rows if collection(r["trait_id"]) == c)
+           for c in colls}
+fig, ax = plt.subplots(figsize=(8.2, 3.8))
+y = np.arange(len(colls))
+left = np.zeros(len(colls))
+for sp in SP_ORDER:
+    vals = np.array([by_coll[c].get(sp, 0) for c in colls])
+    if vals.sum() == 0:
+        continue
+    ax.barh(y, vals, left=left, color=SUPERPOP_COLOR[sp], height=0.6,
+            edgecolor="white", linewidth=0.6, label=sp, zorder=3)
+    left += vals
+ax.set_yticks(y)
+ax.set_yticklabels([f"{c}  (n={sum(by_coll[c].values())})" for c in colls])
+ax.invert_yaxis(); ax.set_xlabel("studies"); ax.grid(axis="y", visible=False)
+ax.legend(ncol=len(SP_ORDER), frameon=False, fontsize=8.4, loc="lower right",
+          bbox_to_anchor=(1.0, 1.02))
+ax.set_title("Outcome by collection", fontsize=12.5, loc="left")
+fig.tight_layout(); plt.show()
+```
+
+## Why the Unassigned are Unassigned
+
+No study was rejected for being admixed (no proportion/margin failures at τ = 0.50);
+**every Unassigned study failed on data quality**, in two buckets:
+
+- **`{python} gate.get("overlap", 0)` — no usable allele frequencies (overlap gate).**
+  Overwhelmingly older `ieu-a` studies that declare a `FORMAT/AF` field but leave its
+  values empty (`.`) — deposited without allele frequencies — so nothing overlaps the
+  reference (every `ieu-a` overlap failure sampled had an entirely empty AF column). A
+  small number of others carry AF that still fails to overlap. Genuinely unassignable
+  without usable AF.
+- **`{python} gate.get("residual", 0)` — allele frequencies inconsistent with the
+  reference (residual gate).** These overlap the reference fully (millions of sites)
+  but their AF is **variant-specifically mis-oriented** relative to the reference
+  (a harmonisation defect in those source VCFs), so no mixture fits and the residual
+  gate refuses to force-label them. The residuals are bimodal — assigned studies sit
+  at ≈ 0.02–0.05, these at 0.11–0.57 — so this is a clean separation, not a threshold
+  that is merely too tight.
+
+```{python}
+#| echo: false
+#| fig-cap: "NNLS residual by outcome — assigned studies are tightly clustered; residual-gate failures are far out."
+ok = [float(r["nnls_residual"]) for r in rows if r["gate_reason"] == "ok"]
+res = [float(r["nnls_residual"]) for r in rows
+       if r["gate_reason"] == "residual" and r["nnls_residual"] not in ("", "nan")]
+fig, ax = plt.subplots(figsize=(8.2, 3.2))
+ax.hist(ok, bins=np.linspace(0, 0.6, 61), color="#3B6EA5", alpha=0.9, label=f"assigned (n={len(ok)})")
+ax.hist(res, bins=np.linspace(0, 0.6, 61), color="#B0473E", alpha=0.85,
+        label=f"residual-gate failures (n={len(res)})")
+ax.axvline(0.06, color="#5b6472", ls="--", lw=1.1)
+ax.text(0.065, ax.get_ylim()[1] * 0.9, "residual gate = 0.06", fontsize=9, color="#5b6472")
+ax.set_xlabel("NNLS residual (RMS)"); ax.set_ylabel("studies")
+ax.legend(frameon=False, fontsize=9); ax.grid(axis="x", visible=False)
+fig.tight_layout(); plt.show()
+```
+
+## Notes
+
+- **The catalogue** (`ancestry_ieu_catalogue.tsv`) carries one annotated row per
+  study — assigned ancestry, composition, gate results, reported population, and the
+  gate provenance — and is a superset of the build manifest, so a EUR (or EAS) store
+  is now a one-line filter.
+- **Reproduce**: `scripts/build_ancestry_reference.py --no-liftover` (hg19 reference),
+  `scripts/build_ieu_manifest.py` (manifest), then `benchmarks/ancestry_ieu_batch.py`
+  (this catalogue). The 815-study run took ~16 min on 32 workers.
+- **Next**: the residual-gate studies could be revisited with strand/allele
+  re-harmonisation; the no-AF studies need allele frequencies sourced elsewhere.
+```
