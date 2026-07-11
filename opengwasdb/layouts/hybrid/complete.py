@@ -94,6 +94,27 @@ def complete_hybrid_store(
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
 
+    # Per-Analysis ancestry-match filter (ADR 0028): if the store carries an
+    # ancestry sidecar, only impute Analyses whose Assigned Ancestry matches the
+    # applied panel; the rest are carried through observed-only. Absent sidecar =
+    # impute everything (no behaviour change).
+    from opengwasdb.ancestry.store import (
+        read_ancestry_provenance,
+        read_ancestry_sidecar,
+        write_ancestry_provenance,
+        write_ancestry_sidecar,
+    )
+
+    src_ancestry = read_ancestry_sidecar(src)
+    impute_ids: set[str] | None = None
+    if src_ancestry:
+        matched = {r["trait_id"] for r in src_ancestry if r["assigned_ancestry"] == ancestry}
+        impute_ids = matched
+        log.info(
+            "Ancestry-matched completion: %d/%d analyses match panel ancestry %s",
+            len(matched), len(src_ancestry), ancestry,
+        )
+
     try:
         # ── 1. Complete the Dense Component (dense pipeline, unchanged) ────────
         log.info("Completing Dense Component via the dense reference-completion pipeline")
@@ -107,6 +128,7 @@ def complete_hybrid_store(
             release_id=release_id,
             n_workers=n_workers,
             overwrite=True,
+            impute_analysis_ids=impute_ids,
         )
 
         # ── 2. Rebuild the shared union table from the completed dense axis ────
@@ -176,6 +198,25 @@ def complete_hybrid_store(
             dst, src_manifest, new_release, n_shared, n_analyses, n_panel, n_off_panel,
             csr.n_associations, dense_result.n_imputed,
         )
+
+        # ── 7. Carry the ancestry sidecar forward, recording completed_against ─
+        if src_ancestry:
+            analyses_ancestry = [(r["trait_id"], r["assigned_ancestry"]) for r in src_ancestry]
+            completed_against = {
+                r["trait_id"]: (ancestry if r["assigned_ancestry"] == ancestry else "")
+                for r in src_ancestry
+            }
+            write_ancestry_sidecar(dst, analyses_ancestry, completed_against=completed_against)
+            prov = read_ancestry_provenance(src)
+            if prov:
+                prov_n = prov.get("n_analyses")
+                write_ancestry_provenance(
+                    dst,
+                    catalogue_version=str(prov.get("catalogue_version", "")),
+                    subset_filter=str(prov.get("subset_filter", "")),
+                    ancestry_reference_version=str(prov.get("ancestry_reference_version", "")),
+                    n_analyses=prov_n if isinstance(prov_n, int) else len(src_ancestry),
+                )
 
         log.info(
             "Hybrid completion complete: %d shared variants (%d panel + %d off-panel), "

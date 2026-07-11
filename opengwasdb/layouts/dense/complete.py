@@ -330,6 +330,7 @@ def complete_dense_store(
     ld_panel_id: str = _LD_PANEL_ID,
     n_workers: int = 1,
     overwrite: bool = False,
+    impute_analysis_ids: set[str] | None = None,
 ) -> CompletionResult:
     """Produce a Dense Reference-Completed Store Release from a Full Coverage
     Dense Observed-Only source.
@@ -337,6 +338,9 @@ def complete_dense_store(
     source_path: existing Dense Observed-Only, Full Coverage store.
     dest_path:   new store directory to create.
     ld_dir:      root of LD panel; blocks at ld_dir/{ancestry}/{chr}/{block}.*
+    impute_analysis_ids: if given, only these analyses are imputed (the
+        ancestry-match filter, ADR 0028); others are carried through
+        observed-only. ``None`` imputes every analysis (no behaviour change).
     """
     dst = Path(dest_path)
     checkpoint_dir = _checkpoint_dir_for(dst)
@@ -364,6 +368,9 @@ def complete_dense_store(
         "thresh": thresh,
         "release_id": release_id,
         "ld_panel_id": ld_panel_id,
+        "impute_analysis_ids": sorted(impute_analysis_ids)
+        if impute_analysis_ids is not None
+        else None,
     }
     (checkpoint_dir / "build_params.json").write_text(
         json.dumps(build_params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -374,6 +381,7 @@ def complete_dense_store(
         ancestry=ancestry, min_cor=min_cor, thresh=thresh,
         release_id=release_id, ld_panel_id=ld_panel_id,
         n_workers=n_workers, checkpoint_dir=checkpoint_dir,
+        impute_analysis_ids=impute_analysis_ids,
     )
     shutil.rmtree(checkpoint_dir)
     return result
@@ -394,11 +402,13 @@ def resume_dense_completion(
     checkpoint_dir = Path(checkpoint_dir)
     params = json.loads((checkpoint_dir / "build_params.json").read_text(encoding="utf-8"))
 
+    impute_ids = params.get("impute_analysis_ids")
     result = _run_completion(
         Path(params["source_path"]), Path(params["dest_path"]), Path(params["ld_dir"]),
         ancestry=params["ancestry"], min_cor=params["min_cor"], thresh=params["thresh"],
         release_id=params["release_id"], ld_panel_id=params["ld_panel_id"],
         n_workers=n_workers, checkpoint_dir=checkpoint_dir,
+        impute_analysis_ids=set(impute_ids) if impute_ids is not None else None,
     )
     shutil.rmtree(checkpoint_dir)
     return result
@@ -419,6 +429,7 @@ def _run_completion(
     ld_panel_id: str,
     n_workers: int,
     checkpoint_dir: Path,
+    impute_analysis_ids: set[str] | None = None,
 ) -> CompletionResult:
     src = Path(source_path)
     dst = Path(dest_path)
@@ -456,6 +467,17 @@ def _run_completion(
             ).fetchall()]
         n_analyses = len(src_analyses)
         print(f"Source: {len(src_variants):,} variants, {n_analyses:,} analyses")
+
+        # Per-Analysis ancestry-match filter (ADR 0028): only imputable analyses
+        # get fills; the rest are carried through observed-only. None = impute all.
+        if impute_analysis_ids is None:
+            impute_mask = None
+        else:
+            impute_mask = np.array(
+                [row["analysis_id"] in impute_analysis_ids for row in src_analyses], dtype=bool
+            )
+            n_match = int(impute_mask.sum())
+            print(f"Ancestry-match filter: imputing {n_match:,}/{n_analyses:,} analyses")
 
         print("Enumerating genome-wide LD blocks...")
         tsv_paths: list[Path] = []
@@ -616,6 +638,7 @@ def _run_completion(
             work, src_root, out_to_src, on_panel,
             fill_shard_dir,
             effective_chunks, n_variants, n_analyses,
+            impute_mask=impute_mask,
         )
         shutil.rmtree(fill_shard_dir, ignore_errors=True)
         n_missing_off_panel_total = int(n_missing_off_panel.sum())
@@ -875,6 +898,7 @@ def _write_completed_bands(
     effective_chunks: tuple[int, int],
     n_variants: int,
     n_analyses: int,
+    impute_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, int, int]:
     """Seed z/se from the source, apply the imputed fills, and write z/se/imputed
     one row-band at a time. ``z`` and ``se`` are written in two passes over a
@@ -885,6 +909,11 @@ def _write_completed_bands(
     Returns ``(n_missing_off_panel[n_analyses], n_missing_imputation_failed,
     total_imputed)``. Fill records are read from per-band shard files in bounded
     chunks.
+
+    ``impute_mask`` (bool per analysis; ``None`` = impute all) is the per-Analysis
+    ancestry-match filter (ADR 0028): fills for a masked-out analysis are dropped,
+    so its cells stay observed-only (NaN, ``imputed=0``) — never imputed against a
+    non-matching-ancestry panel.
     """
     root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
     z_arr, se_arr, imp_arr = root["z"], root["se"], root["imputed"]
@@ -918,6 +947,8 @@ def _write_completed_bands(
             lr = records["row"] - r0
             ai = records["ai"]
             fillable = ~np.isfinite(zb[lr, ai])
+            if impute_mask is not None:
+                fillable &= impute_mask[ai]
             if fillable.any():
                 lrm, aim = lr[fillable], ai[fillable]
                 zb[lrm, aim] = records["z"][fillable]
@@ -948,6 +979,8 @@ def _write_completed_bands(
             lr = records["row"] - r0
             ai = records["ai"]
             fillable = ~np.isfinite(sb[lr, ai])
+            if impute_mask is not None:
+                fillable &= impute_mask[ai]
             if fillable.any():
                 sb[lr[fillable], ai[fillable]] = records["se"][fillable]
 
