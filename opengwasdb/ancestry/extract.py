@@ -30,20 +30,30 @@ def extract_af_at_sites(
     wanted_alids: Iterable[str],
     *,
     regions_file: str | Path | None = None,
+    region: str | None = None,
+    liftover: object | None = None,
     exclude_palindromic: bool = True,
 ) -> dict[str, float]:
     """Return ``{canonical_alid: A1-oriented AF}`` for reference sites in the VCF.
 
     ``wanted_alids`` restricts the result to the reference panel. ``regions_file``,
     when given, is passed to ``bcftools query -R`` so only those regions are read
-    (targeted, not a full scan). Palindromic variants are excluded by default;
-    records with missing/invalid AF or non-canonical alleles are skipped.
+    (targeted, not a full scan). ``region`` is a bcftools ``-r`` region string
+    (e.g. ``"1"``) for cheap chromosome subsetting. ``liftover`` is a pyliftover
+    ``LiftOver`` object (see :func:`load_liftover`): when the study is on a
+    different assembly than the reference (GWAS-VCF is typically GRCh37, the
+    reference GRCh38), each variant is lifted before its canonical ALID is formed,
+    so study and reference join in one coordinate system. Palindromic variants are
+    excluded by default; records with missing/invalid AF, unliftable coordinates,
+    or non-canonical alleles are skipped.
     """
     wanted = wanted_alids if isinstance(wanted_alids, (set, frozenset)) else set(wanted_alids)
     bcftools = _require_bcftools()
     cmd = [bcftools, "query", "-f", "%CHROM\t%POS\t%REF\t%ALT\t[%AF]\n"]
     if regions_file is not None:
         cmd += ["-R", str(regions_file)]
+    if region is not None:
+        cmd += ["-r", region]
     cmd.append(str(vcf_path))
 
     out: dict[str, float] = {}
@@ -64,8 +74,14 @@ def extract_af_at_sites(
             af = _parse_af(af_str)
             if af is None:
                 continue
+            chrom, pos = chrom_raw, pos_str
+            if liftover is not None:
+                lifted = _lift(liftover, chrom_raw, pos_str)
+                if lifted is None:
+                    continue
+                chrom, pos = lifted
             try:
-                orientation = orient_to_canonical(chrom_raw, pos_str, alt, ref)
+                orientation = orient_to_canonical(chrom, pos, alt, ref)
             except VariantNormalisationError:
                 continue
             alid = orientation.variant.alid
@@ -78,6 +94,29 @@ def extract_af_at_sites(
         proc.stdout.close()  # type: ignore[union-attr]
         proc.wait()
     return out
+
+
+def load_liftover(
+    from_build: str = "hg19", to_build: str = "hg38", chain_file: str | None = None
+) -> object:
+    """Load a pyliftover ``LiftOver`` for orienting study AF onto the reference build."""
+    from pyliftover import LiftOver  # type: ignore[import-untyped]
+
+    return LiftOver(chain_file) if chain_file else LiftOver(from_build, to_build)
+
+
+def _lift(liftover: object, chrom: str, pos_str: str) -> tuple[str, str] | None:
+    """Lift ``(chrom, 1-based pos)`` to the target build; None if unmapped/non-standard."""
+    bare = chrom[3:] if chrom.lower().startswith("chr") else chrom
+    try:
+        mapped = liftover.convert_coordinate(f"chr{bare}", int(pos_str) - 1)  # type: ignore[attr-defined]
+    except (ValueError, KeyError):
+        return None
+    if not mapped:
+        return None
+    new_chrom = mapped[0][0]
+    new_chrom = new_chrom[3:] if new_chrom.lower().startswith("chr") else new_chrom
+    return new_chrom, str(int(mapped[0][1]) + 1)
 
 
 def write_regions_file(alids: Iterable[str], path: str | Path) -> Path:

@@ -131,6 +131,27 @@ def test_is_palindromic():
     assert not is_palindromic("A", "C") and not is_palindromic("A", "G")
 
 
+class _FakeLiftover:
+    """Stand-in for pyliftover.LiftOver: shifts chr1 positions by +64620."""
+
+    def convert_coordinate(self, chrom, pos0):  # noqa: D401
+        if chrom != "chr1":
+            return []
+        return [("chr1", pos0 + 64620, "+", 0)]
+
+
+def test_extract_applies_liftover(tmp_path):
+    # Study is on an older build; the reference ALIDs are on the lifted build.
+    vcf = _af_vcf(
+        tmp_path,
+        ["1\t1000\t.\tC\tA\t.\tPASS\t.\tAF\t0.25\n"],  # pos 1000 → 65620 after lift
+    )
+    wanted = {"1:65620:A:C"}  # canonical A1=A (ALT), lifted position
+    afs = extract_af_at_sites(vcf, wanted, liftover=_FakeLiftover())
+    assert set(afs) == {"1:65620:A:C"}
+    assert afs["1:65620:A:C"] == pytest.approx(0.25)  # unflipped (A is canonical A1)
+
+
 # --- mixture + gates -------------------------------------------------------
 
 

@@ -128,9 +128,22 @@ def assign_from_vcf(
     gates: Gates | None = None,
     *,
     regions_file: str | Path | None = None,
+    region: str | None = None,
+    liftover: object | None = None,
 ) -> AncestryAssignment:
-    """Extract AF at reference sites from a GWAS-VCF, then assign ancestry."""
-    study_af = extract_af_at_sites(vcf_path, reference.index.keys(), regions_file=regions_file)
+    """Extract AF at reference sites from a GWAS-VCF, then assign ancestry.
+
+    ``liftover`` (a pyliftover ``LiftOver``) orients a study on a different
+    assembly than the reference (e.g. GRCh37 GWAS-VCF → GRCh38 reference);
+    ``region`` restricts the bcftools read to one chromosome.
+    """
+    study_af = extract_af_at_sites(
+        vcf_path,
+        reference.index.keys(),
+        regions_file=regions_file,
+        region=region,
+        liftover=liftover,
+    )
     return assign_ancestry(study_af, reference, gates)
 
 

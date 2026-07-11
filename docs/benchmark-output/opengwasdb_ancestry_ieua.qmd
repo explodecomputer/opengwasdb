@@ -1,0 +1,293 @@
+---
+title: "Ancestry assignment from allele frequencies — ieu-a / bbj (chr1)"
+subtitle: "Reported population vs AF-recovered ancestry · the τ/δ admission gate · development data"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+---
+
+```{python}
+#| echo: false
+import csv
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+
+plt.rcParams.update({
+    "font.size": 11,
+    "axes.edgecolor": "#8a94a6",
+    "axes.linewidth": 0.8,
+    "axes.grid": True,
+    "grid.color": "#e6e9ef",
+    "grid.linewidth": 0.8,
+    "axes.axisbelow": True,
+    "figure.dpi": 130,
+})
+
+HERE = Path(".")
+rows = list(csv.DictReader(open(HERE / "ancestry_ieua_chr1_catalogue.tsv"), delimiter="\t"))
+
+# Fixed categorical hue per labelled (reported) population — assigned in a stable
+# order, never cycled. Mixed/undeclared are the calibration categories.
+REPORTED_COLOR = {
+    "Mixed":            "#3B6EA5",   # blue
+    "East Asian":       "#D9843B",   # amber
+    "Japanese":         "#E0A458",   # lighter amber (an East-Asian label)
+    "African American": "#4E9A6B",   # green
+    "Hispanic":         "#B0473E",   # red
+    "European":         "#5B8AC0",
+}
+SUPERPOPS = [c.replace("ancestry_prop_", "") for c in rows[0] if c.startswith("ancestry_prop_")]
+SUPERPOP_COLOR = {
+    "EUR": "#3B6EA5", "EAS": "#D9843B", "AFR": "#4E9A6B",
+    "AMR": "#B0473E", "SAS": "#8B6BB1", "MID": "#C9A227", "NAF": "#9AA0AA",
+}
+
+TAU = float(rows[0]["gate_tau"])
+DELTA = float(rows[0]["gate_delta"])
+N_MIN = int(rows[0]["gate_n_min"])
+
+def f(row, key):
+    return float(row[key])
+
+def md_table(headers, body):
+    sep = "|" + "|".join(["---"] * len(headers)) + "|"
+    head = "| " + " | ".join(headers) + " |"
+    rows_md = "\n".join("| " + " | ".join(str(c) for c in r) + " |" for r in body)
+    return f"{head}\n{sep}\n{rows_md}"
+```
+
+## What this is
+
+The [ancestry-assignment pipeline](../adr/0028-ancestry-assignment-from-allele-frequencies.md)
+recovers each GWAS's ancestry from its **summary-statistic allele frequencies**
+(GWAS-VCF `FORMAT/AF`), because the source-declared *Reported Population* is coarse
+— often literally `"Mixed"` — and sometimes wrong. Each study's frequencies are
+lifted GRCh37→GRCh38, fit as a non-negative sum-to-one **NNLS mixture** of the
+Privé (2022) UK-Biobank 21-group reference, aggregated to super-populations, and
+admitted to an **Assigned Ancestry** only if the dominant super-population clears a
+multi-gate rule: proportion **τ ≥ 0.90**, runner-up margin **δ ≥ 0.20**, overlap **≥ 20,000** reference
+sites, and a residual gate. Otherwise it is left **Unassigned**.
+
+::: {.callout-note}
+## Development data — chromosome 1 only
+This runs on **chr1** of a handful of real `ieu-a` / `bbj` studies, so the whole
+sweep takes seconds while still overlapping ~10⁵ reference sites per study. It is a
+development fixture for the pipeline, not a production catalogue: a genome-wide run
+would raise every study's overlap (see the overlap gate below). Reported Population
+comes from each study's OpenGWAS metadata and **never routes** — it only labels the
+points here.
+:::
+
+## Studies
+
+```{python}
+#| echo: false
+#| output: asis
+body = []
+for r in rows:
+    body.append([
+        f"`{r['trait_id']}`", r["trait_name"], r["reported_population"],
+        f"**{r['assigned_ancestry']}**",
+        f"{f(r,'dominant_proportion'):.3f}", f"{f(r,'runner_up_margin'):.3f}",
+        f"{int(r['af_overlap']):,}", f"{f(r,'nnls_residual'):.3f}",
+        r["gate_reason"],
+    ])
+print(md_table(
+    ["Study", "Trait", "Reported", "Assigned", "τ (dom.)", "δ (margin)",
+     "Overlap", "Residual", "Gate"],
+    body,
+))
+```
+
+## The τ / δ admission gate
+
+Each study is a point at its **dominant-super-population proportion (τ)** and
+**runner-up margin (δ)**, coloured by its *labelled* (Reported) population. The
+shaded corner is the admission region (τ ≥ 0.90 **and** δ ≥ 0.20); filled points were **assigned**, hollow points were
+left **Unassigned**. A study can sit inside the τ/δ corner yet still be Unassigned
+if it fails the orthogonal *overlap* gate (next section) — those are ringed in red.
+
+```{python}
+#| echo: false
+#| fig-cap: "Dominant-ancestry proportion (τ) vs runner-up margin (δ), by labelled population. Shaded = admission region."
+fig, ax = plt.subplots(figsize=(8.2, 5.6))
+
+# Admission region + threshold lines.
+ax.axvspan(TAU, 1.02, ymin=0, ymax=1, color="#eaf3ec", zorder=0)
+ax.axhspan(DELTA, 1.05, xmin=0, xmax=1, color="#eaf3ec", zorder=0)
+ax.fill_between([TAU, 1.02], DELTA, 1.05, color="#d3e8d8", zorder=0)
+ax.axvline(TAU, color="#9aa0aa", ls="--", lw=1.1, zorder=1)
+ax.axhline(DELTA, color="#9aa0aa", ls="--", lw=1.1, zorder=1)
+ax.text(TAU + 0.004, 0.02, f"τ = {TAU:.2f}", color="#5b6472", fontsize=9)
+ax.text(0.505, DELTA + 0.006, f"δ = {DELTA:.2f}", color="#5b6472", fontsize=9)
+
+# Many clean single-ancestry studies pile at τ≈δ≈1 (several exactly 1.000), so
+# fan them onto a small circle and give each a leader-line label stacked to the
+# left — the scatter stays legible without fabricating spread.
+def draw_point(r, x, y):
+    col = REPORTED_COLOR.get(r["reported_population"], "#5b6472")
+    assigned = r["assigned_ancestry"] != "Unassigned"
+    overlap_fail = r["gate_reason"] == "overlap"
+    ax.scatter(x, y, s=150, zorder=5,
+               facecolor=col if assigned else "white",
+               edgecolor="#c0392b" if overlap_fail else col,
+               linewidths=2.2 if overlap_fail else 1.8)
+
+corner = [r for r in rows if f(r, "dominant_proportion") > 0.985 and f(r, "runner_up_margin") > 0.985]
+non_corner = [r for r in rows if r not in corner]
+
+# Non-corner (the interesting Unassigned outliers): inline labels.
+for r in non_corner:
+    x, y = f(r, "dominant_proportion"), f(r, "runner_up_margin")
+    draw_point(r, x, y)
+    lab = r["trait_id"] + ("" if r["assigned_ancestry"] != "Unassigned"
+                           else f"\n(unassigned: {r['gate_reason']})")
+    ax.annotate(lab, (x, y), textcoords="offset points", xytext=(10, -4),
+                fontsize=8.4, color="#33404f")
+
+# Corner cluster: jitter on a small circle, labels stacked left with leader lines.
+cx, cy, rad = 0.995, 0.99, 0.007
+ang = np.linspace(-0.35 * np.pi, 1.15 * np.pi, max(len(corner), 1))
+label_ys = np.linspace(0.90, 0.42, max(len(corner), 1))
+for r, a, ly in zip(sorted(corner, key=lambda r: r["trait_id"]), ang, label_ys):
+    x, y = cx + rad * np.cos(a), cy + rad * np.sin(a)
+    draw_point(r, x, y)
+    col = REPORTED_COLOR.get(r["reported_population"], "#5b6472")
+    tag = r["trait_id"] + (f" ({r['gate_reason']})" if r["assigned_ancestry"] == "Unassigned" else "")
+    ax.annotate(tag, xy=(x, y), xytext=(0.66, ly), fontsize=8.4, color="#33404f",
+                va="center", ha="left",
+                arrowprops=dict(arrowstyle="-", color=col, lw=0.9, alpha=0.7,
+                                connectionstyle="arc3,rad=-0.15"))
+
+ax.set_xlim(0.5, 1.05)
+ax.set_ylim(-0.02, 1.08)
+ax.set_xlabel("τ — dominant super-population proportion")
+ax.set_ylabel("δ — margin over runner-up")
+ax.set_title("AF-recovered ancestry confidence, by labelled population", fontsize=12.5, loc="left")
+
+legend_pops = [p for p in REPORTED_COLOR if any(r["reported_population"] == p for r in rows)]
+handles = [Line2D([0],[0], marker="o", color="w", markerfacecolor=REPORTED_COLOR[p],
+                  markersize=10, label=p) for p in legend_pops]
+handles += [
+    Line2D([0],[0], marker="o", color="w", markerfacecolor="#5b6472", markersize=10, label="assigned (filled)"),
+    Line2D([0],[0], marker="o", color="w", markerfacecolor="white", markeredgecolor="#5b6472",
+           markersize=10, label="unassigned (hollow)"),
+]
+ax.legend(handles=handles, loc="lower left", frameon=False, fontsize=8.6, ncol=2)
+fig.tight_layout()
+plt.show()
+```
+
+Reading it: the clean single-ancestry studies (European BMI/LDL, Japanese/East-Asian,
+African-American) pile in the admission corner and are assigned; the genuinely
+**admixed or trans-ethnic** studies fall to the left of τ and are correctly left
+Unassigned rather than force-labelled.
+
+## The overlap gate (orthogonal)
+
+Overlap is a separate gate: a study can be confidently single-ancestry (τ = δ = 1)
+yet still be Unassigned if too few of its variants intersect the reference on this
+chromosome. On chr1 alone that catches the smaller studies — a genome-wide run
+would clear most of them.
+
+```{python}
+#| echo: false
+#| fig-cap: "Reference-site overlap per study (chr1). Studies below the N_min line are Unassigned by the overlap gate."
+order = sorted(rows, key=lambda r: int(r["af_overlap"]))
+ids = [r["trait_id"] for r in order]
+ov = [int(r["af_overlap"]) for r in order]
+cols = [REPORTED_COLOR.get(r["reported_population"], "#5b6472") for r in order]
+fail = [r["gate_reason"] == "overlap" for r in order]
+
+fig, ax = plt.subplots(figsize=(8.2, 3.6))
+y = np.arange(len(ids))
+ax.barh(y, ov, color=cols, height=0.62,
+        edgecolor=["#c0392b" if fl else "none" for fl in fail],
+        linewidth=[2.0 if fl else 0 for fl in fail], zorder=3)
+ax.axvline(N_MIN, color="#c0392b", ls="--", lw=1.2, zorder=4)
+ax.text(N_MIN * 1.05, len(ids) - 0.5, f"N_min = {N_MIN:,}", color="#c0392b", fontsize=9, va="top")
+ax.set_yticks(y); ax.set_yticklabels(ids, fontsize=9)
+ax.set_xlabel("overlapping reference sites (chr1)")
+ax.set_title("Overlap gate", fontsize=12, loc="left")
+ax.grid(axis="y", visible=False)
+fig.tight_layout()
+plt.show()
+```
+
+## Ancestry composition
+
+The full NNLS mixture behind each label — the super-population proportions each
+study's allele frequencies decompose into.
+
+```{python}
+#| echo: false
+#| fig-cap: "Super-population composition per study (NNLS mixture, aggregated from 21 fine groups)."
+order = sorted(rows, key=lambda r: (r["assigned_ancestry"], -f(r, "dominant_proportion")))
+ids = [r["trait_id"] for r in order]
+y = np.arange(len(ids))
+fig, ax = plt.subplots(figsize=(8.4, 4.2))
+left = np.zeros(len(ids))
+present = [sp for sp in SUPERPOPS if any(f(r, f"ancestry_prop_{sp}") > 0.005 for r in order)]
+for sp in present:
+    vals = np.array([f(r, f"ancestry_prop_{sp}") for r in order])
+    ax.barh(y, vals, left=left, height=0.66, color=SUPERPOP_COLOR.get(sp, "#9aa0aa"),
+            edgecolor="white", linewidth=0.6, label=sp, zorder=3)
+    left += vals
+ax.set_yticks(y)
+ax.set_yticklabels([f"{r['trait_id']}  →  {r['assigned_ancestry']}" for r in order], fontsize=9)
+ax.set_xlim(0, 1); ax.set_xlabel("mixture proportion")
+ax.set_title("Ancestry composition", fontsize=12, loc="left")
+ax.grid(axis="y", visible=False)
+ax.legend(loc="lower right", ncol=len(present), frameon=False, fontsize=8.6,
+          bbox_to_anchor=(1.0, 1.02))
+fig.tight_layout()
+plt.show()
+```
+
+## Reported vs Assigned — the audit
+
+Reported Population calibrates and audits; it never routes. Every study here
+declared as `"Mixed"` is in fact strongly European (or falls just short of the τ
+gate), and the non-European labels are recovered directly from the allele
+frequencies — the disagreement the AF method exists to surface.
+
+```{python}
+#| echo: false
+#| output: asis
+body = []
+for r in rows:
+    agree = "—"
+    rep = r["reported_population"]
+    asg = r["assigned_ancestry"]
+    note = ""
+    if rep == "Mixed":
+        note = "declared Mixed → " + (asg if asg != "Unassigned" else "Unassigned")
+    elif asg != "Unassigned":
+        note = "recovered from AF"
+    else:
+        note = f"Unassigned ({r['gate_reason']})"
+    body.append([f"`{r['trait_id']}`", rep, f"**{asg}**", note])
+print(md_table(["Study", "Reported", "Assigned", "Note"], body))
+```
+
+## Method notes
+
+- **τ / δ / overlap / residual** are the four admission gates (ADR 0028). A failure
+  on any one leaves the study Unassigned rather than force-labelled.
+- **Reported Population never routes.** It is shown here only to colour the points
+  and to audit disagreements; the τ/δ thresholds are calibrated against it
+  separately (issue 064).
+- **chr1 development slice.** Overlap counts are per-chromosome; a genome-wide run
+  multiplies them ~20×, clearing the overlap gate for the smaller studies while
+  leaving the τ/δ verdicts essentially unchanged.
+- Regenerate with `benchmarks/ancestry_ieua_chr1.py` → this Catalogue TSV.
+```

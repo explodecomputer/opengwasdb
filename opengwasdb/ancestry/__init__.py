@@ -17,7 +17,11 @@ from opengwasdb.ancestry.catalogue import (
     read_catalogue,
     write_catalogue,
 )
-from opengwasdb.ancestry.extract import extract_af_at_sites, is_palindromic
+from opengwasdb.ancestry.extract import (
+    extract_af_at_sites,
+    is_palindromic,
+    load_liftover,
+)
 from opengwasdb.ancestry.mixture import (
     AncestryAssignment,
     Gates,
@@ -44,6 +48,7 @@ __all__ = [
     "catalogue_fieldnames",
     "extract_af_at_sites",
     "is_palindromic",
+    "load_liftover",
     "load_reference",
     "read_catalogue",
     "read_source_manifest",
