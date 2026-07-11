@@ -2252,7 +2252,7 @@ vertical-align: -.125em;
 </section>
 <section id="assigned-ancestry-distribution" class="level2">
 <h2 class="anchored" data-anchor-id="assigned-ancestry-distribution">Assigned-ancestry distribution</h2>
-<div id="673d4ed8" class="cell" data-execution_count="3">
+<div id="5a20f3d7" class="cell" data-execution_count="3">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">
@@ -2375,7 +2375,7 @@ vertical-align: -.125em;
 </section>
 <section id="assignment-by-collection" class="level2">
 <h2 class="anchored" data-anchor-id="assignment-by-collection">Assignment by collection</h2>
-<div id="0a4f8726" class="cell" data-execution_count="5">
+<div id="3e00a61c" class="cell" data-execution_count="5">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">
@@ -2390,10 +2390,10 @@ vertical-align: -.125em;
 <h2 class="anchored" data-anchor-id="why-the-unassigned-are-unassigned">Why the Unassigned are Unassigned</h2>
 <p>No study was rejected for being admixed (no proportion/margin failures at τ = 0.50); <strong>every Unassigned study failed on data quality</strong>, in two buckets:</p>
 <ul>
-<li><strong>193 — no usable allele frequencies (overlap gate).</strong> Overwhelmingly older <code>ieu-a</code> studies that declare a <code>FORMAT/AF</code> field but leave its values empty (<code>.</code>) — deposited without allele frequencies — so nothing overlaps the reference (every <code>ieu-a</code> overlap failure sampled had an entirely empty AF column). A small number of others carry AF that still fails to overlap. Genuinely unassignable without usable AF.</li>
+<li><strong>193 — no usable allele frequencies (overlap gate).</strong> <strong>Every one</strong> of these declares a <code>FORMAT/AF</code> field but leaves its values empty (<code>.</code>) — older <code>ieu-a</code>/<code>ieu-b</code> studies deposited without allele frequencies, so nothing overlaps the reference (verified exhaustively across all <code>ieu-b</code> overlap failures and a large <code>ieu-a</code> sample). Genuinely unassignable without AF.</li>
 <li><strong>95 — allele frequencies inconsistent with the reference (residual gate).</strong> These overlap the reference fully (millions of sites) but their AF is <strong>variant-specifically mis-oriented</strong> relative to the reference (a harmonisation defect in those source VCFs), so no mixture fits and the residual gate refuses to force-label them. The residuals are bimodal — assigned studies sit at ≈ 0.02–0.05, these at 0.11–0.57 — so this is a clean separation, not a threshold that is merely too tight.</li>
 </ul>
-<div id="18bc21e7" class="cell" data-execution_count="6">
+<div id="9411f45b" class="cell" data-execution_count="6">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">

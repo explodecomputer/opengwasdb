@@ -164,11 +164,10 @@ No study was rejected for being admixed (no proportion/margin failures at τ = 0
 **every Unassigned study failed on data quality**, in two buckets:
 
 - **`{python} gate.get("overlap", 0)` — no usable allele frequencies (overlap gate).**
-  Overwhelmingly older `ieu-a` studies that declare a `FORMAT/AF` field but leave its
-  values empty (`.`) — deposited without allele frequencies — so nothing overlaps the
-  reference (every `ieu-a` overlap failure sampled had an entirely empty AF column). A
-  small number of others carry AF that still fails to overlap. Genuinely unassignable
-  without usable AF.
+  **Every one** of these declares a `FORMAT/AF` field but leaves its values empty
+  (`.`) — older `ieu-a`/`ieu-b` studies deposited without allele frequencies, so
+  nothing overlaps the reference (verified exhaustively across all `ieu-b` overlap
+  failures and a large `ieu-a` sample). Genuinely unassignable without AF.
 - **`{python} gate.get("residual", 0)` — allele frequencies inconsistent with the
   reference (residual gate).** These overlap the reference fully (millions of sites)
   but their AF is **variant-specifically mis-oriented** relative to the reference
