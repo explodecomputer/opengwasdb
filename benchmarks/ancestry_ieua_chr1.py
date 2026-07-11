@@ -65,9 +65,9 @@ def main() -> None:
     ap.add_argument("--igd", type=Path, default=Path("/local-scratch/data/opengwas/igd"))
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--region", default="1", help="chromosome to assign on")
-    ap.add_argument("--tau", type=float, default=0.90)
+    ap.add_argument("--tau", type=float, default=0.50)
     ap.add_argument("--delta", type=float, default=0.20)
-    ap.add_argument("--n-min", type=int, default=20_000)
+    ap.add_argument("--n-min", type=int, default=5_000)
     ap.add_argument("--residual-max", type=float, default=0.06)
     args = ap.parse_args()
 

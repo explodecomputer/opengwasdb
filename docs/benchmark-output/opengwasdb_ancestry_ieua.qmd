@@ -74,7 +74,7 @@ recovers each GWAS's ancestry from its **summary-statistic allele frequencies**
 lifted GRCh37→GRCh38, fit as a non-negative sum-to-one **NNLS mixture** of the
 Privé (2022) UK-Biobank 21-group reference, aggregated to super-populations, and
 admitted to an **Assigned Ancestry** only if the dominant super-population clears a
-multi-gate rule: proportion **τ ≥ 0.90**, runner-up margin **δ ≥ 0.20**, overlap **≥ 20,000** reference
+multi-gate rule: proportion **τ ≥ 0.50**, runner-up margin **δ ≥ 0.20**, overlap **≥ 5,000** reference
 sites, and a residual gate. Otherwise it is left **Unassigned**.
 
 ::: {.callout-note}
@@ -112,9 +112,10 @@ print(md_table(
 
 Each study is a point at its **dominant-super-population proportion (τ)** and
 **runner-up margin (δ)**, coloured by its *labelled* (Reported) population. The
-shaded corner is the admission region (τ ≥ 0.90 **and** δ ≥ 0.20); filled points were **assigned**, hollow points were
-left **Unassigned**. A study can sit inside the τ/δ corner yet still be Unassigned
-if it fails the orthogonal *overlap* gate (next section) — those are ringed in red.
+shaded region is the admission zone (τ ≥ 0.50 **and** δ ≥ 0.20); filled points were
+**assigned**, hollow points would be left **Unassigned**. A study could still be
+Unassigned if it failed the orthogonal *overlap* gate (next section) — such points
+are ringed in red. Under these thresholds all eight studies clear every gate.
 
 ```{python}
 #| echo: false
@@ -168,7 +169,7 @@ for r, a, ly in zip(sorted(corner, key=lambda r: r["trait_id"]), ang, label_ys):
                 arrowprops=dict(arrowstyle="-", color=col, lw=0.9, alpha=0.7,
                                 connectionstyle="arc3,rad=-0.15"))
 
-ax.set_xlim(0.5, 1.05)
+ax.set_xlim(0.45, 1.05)
 ax.set_ylim(-0.02, 1.08)
 ax.set_xlabel("τ — dominant super-population proportion")
 ax.set_ylabel("δ — margin over runner-up")
@@ -188,16 +189,20 @@ plt.show()
 ```
 
 Reading it: the clean single-ancestry studies (European BMI/LDL, Japanese/East-Asian,
-African-American) pile in the admission corner and are assigned; the genuinely
-**admixed or trans-ethnic** studies fall to the left of τ and are correctly left
-Unassigned rather than force-labelled.
+African-American, Biobank-Japan) pile in the top-right corner at τ ≈ δ ≈ 1. The two
+**admixed / trans-ethnic** studies sit lower-left — CAD (EUR 0.76) and the Hispanic
+study (AMR 0.60) — but under **τ = 0.50** they still clear the gate and are assigned
+to their dominant super-population. A stricter τ (e.g. 0.90) would instead leave
+those two Unassigned: that is exactly the calibration trade-off the threshold
+controls.
 
 ## The overlap gate (orthogonal)
 
 Overlap is a separate gate: a study can be confidently single-ancestry (τ = δ = 1)
 yet still be Unassigned if too few of its variants intersect the reference on this
-chromosome. On chr1 alone that catches the smaller studies — a genome-wide run
-would clear most of them.
+chromosome. At **N_min = 5,000** every study clears it on chr1 alone — even the
+smallest (ieu-a-11, ~8k overlapping sites); a genome-wide run raises all of these
+~20×.
 
 ```{python}
 #| echo: false
@@ -255,10 +260,11 @@ plt.show()
 
 ## Reported vs Assigned — the audit
 
-Reported Population calibrates and audits; it never routes. Every study here
-declared as `"Mixed"` is in fact strongly European (or falls just short of the τ
-gate), and the non-European labels are recovered directly from the allele
-frequencies — the disagreement the AF method exists to surface.
+Reported Population calibrates and audits; it never routes. All three studies
+declared `"Mixed"` are recovered as **European** from their allele frequencies, and
+the labelled non-European studies land on the matching super-population
+(Japanese / East-Asian → EAS, African-American → AFR, Hispanic → AMR) — the
+disagreement the AF method exists to surface.
 
 ```{python}
 #| echo: false

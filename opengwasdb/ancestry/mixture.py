@@ -24,9 +24,9 @@ from opengwasdb.ancestry.reference import AncestryReference
 class Gates:
     """Multi-gate admission thresholds (ADR 0028)."""
 
-    tau: float = 0.90  # min dominant super-population proportion
+    tau: float = 0.50  # min dominant super-population proportion
     delta: float = 0.20  # min margin of dominant over runner-up
-    n_min: int = 20_000  # min overlapping reference sites
+    n_min: int = 5_000  # min overlapping reference sites
     residual_max: float = 0.06  # max RMS NNLS residual (mis-oriented/corrupt AF)
     sum_to_one_penalty: float = 10.0  # weight of the soft Σα = 1 constraint row
 

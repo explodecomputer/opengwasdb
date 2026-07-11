@@ -249,9 +249,9 @@ def assign_ancestry_command(
         ..., help="Fine→super-population map: ancestry_groups.tsv"
     ),
     maf_floor: float = typer.Option(0.01, help="Drop reference variants below this MAF"),
-    tau: float = typer.Option(0.90, help="Gate: min dominant super-population proportion"),
+    tau: float = typer.Option(0.50, help="Gate: min dominant super-population proportion"),
     delta: float = typer.Option(0.20, help="Gate: min margin over the runner-up"),
-    n_min: int = typer.Option(20_000, help="Gate: min overlapping reference sites"),
+    n_min: int = typer.Option(5_000, help="Gate: min overlapping reference sites"),
     residual_max: float = typer.Option(0.06, help="Gate: max RMS NNLS residual"),
     workers: int = typer.Option(1, help="Fork-based process pool size"),
     catalogue_version: str = typer.Option("v1", help="Recorded in the Catalogue"),
