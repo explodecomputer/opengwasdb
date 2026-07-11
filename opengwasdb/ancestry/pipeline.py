@@ -138,6 +138,7 @@ def annotate_catalogue(
         reference.superpops,
         catalogue_version=catalogue_version,
         ancestry_reference_version=ancestry_reference_version,
+        gates=gates,
     )
 
     n_assigned = sum(1 for r in rows if r.assignment.assigned_ancestry is not None)

@@ -246,6 +246,65 @@ def assign_ancestry_command(
     )
 
 
+@app.command("calibrate-ancestry")
+def calibrate_ancestry_command(
+    catalogue_path: Path,
+    tau: float = typer.Option(None, help="If set with --out, relabel with this τ"),
+    delta: float = typer.Option(None, help="If set with --out, relabel with this δ"),
+    n_min: int = typer.Option(None, help="Overlap gate for relabel (default: keep)"),
+    residual_max: float = typer.Option(None, help="Residual gate for relabel (default: keep)"),
+    out: Path = typer.Option(None, help="Write a relabelled Catalogue with chosen gates"),
+    report: Path = typer.Option(None, help="Write the disagreement report TSV"),
+) -> None:
+    """Cross-tabulate Assigned vs Reported Population and (optionally) relabel.
+
+    Prints the Assigned×Reported cross-tab and operating-point counts and lists the
+    Analyses where a routable Reported ancestry disagrees with the Assigned one.
+    With --out and --tau/--delta it re-applies the chosen gates from the stored
+    statistics (no AF re-extraction) and writes a relabelled, gate-stamped
+    Catalogue. Reported Population calibrates/audits only — it never routes.
+    """
+    from opengwasdb.ancestry import calibrate
+
+    with open(catalogue_path, newline="", encoding="utf-8") as fh:
+        import csv as _csv
+
+        reader = _csv.DictReader(fh, delimiter="\t")
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    typer.echo(calibrate.format_crosstab(calibrate.crosstab(rows)))
+    typer.echo("")
+    op = calibrate.operating_point(rows)
+    typer.echo(
+        f"reported-EUR admitted as EUR: {op['reported_eur_admitted_eur']}/{op['reported_eur']}; "
+        f"reported-Mixed → Unassigned: {op['reported_mixed_unassigned']}/{op['reported_mixed']}"
+    )
+
+    conflicts = calibrate.disagreements(rows)
+    typer.echo(f"disagreements (Assigned ≠ Reported): {len(conflicts)}")
+    if report is not None:
+        calibrate.write_disagreements(report, conflicts)
+        typer.echo(f"disagreement report → {report}")
+
+    if out is not None:
+        if tau is None or delta is None:
+            raise typer.BadParameter("--tau and --delta are required with --out")
+        base = Gates()
+        gates = Gates(
+            tau=tau,
+            delta=delta,
+            n_min=n_min if n_min is not None else base.n_min,
+            residual_max=residual_max if residual_max is not None else base.residual_max,
+        )
+        relabelled = calibrate.relabel(rows, gates)
+        calibrate.write_rows(out, relabelled, fieldnames)
+        n_assigned = sum(1 for r in relabelled if r["assigned_ancestry"] != "Unassigned")
+        typer.echo(
+            f"relabelled with τ={tau} δ={delta}: {n_assigned}/{len(relabelled)} assigned → {out}"
+        )
+
+
 @app.command("complete-hybrid")
 def complete_hybrid_command(
     source_path: Path,

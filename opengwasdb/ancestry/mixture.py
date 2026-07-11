@@ -100,7 +100,13 @@ def assign_ancestry(
     runner_up = float(sp_props[order[1]]) if sp_props.size > 1 else 0.0
     margin = dominant_proportion - runner_up
 
-    gate_reason = _gate(gates, overlap, residual, dominant_proportion, margin)
+    gate_reason = apply_gates(
+        gates,
+        overlap=overlap,
+        residual=residual,
+        dominant_proportion=dominant_proportion,
+        margin=margin,
+    )
     assigned = dominant_superpop if gate_reason == "ok" else None
 
     return AncestryAssignment(
@@ -144,14 +150,19 @@ def _fit_mixture(A: np.ndarray, b: np.ndarray, penalty: float) -> np.ndarray:
     return alpha
 
 
-def _gate(
+def apply_gates(
     gates: Gates,
+    *,
     overlap: int,
     residual: float,
     dominant_proportion: float,
     margin: float,
 ) -> str:
-    """Return the first failing gate, or ``"ok"``. Order matters (ADR 0028)."""
+    """Return the first failing gate, or ``"ok"``. Order matters (ADR 0028).
+
+    Pure function of the summary statistics, so a calibrated τ/δ pick can relabel
+    a Catalogue from its stored numbers without re-extracting allele frequencies.
+    """
     if overlap < gates.n_min:
         return "overlap"
     if not np.isfinite(residual) or residual > gates.residual_max:

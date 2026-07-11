@@ -13,7 +13,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from opengwasdb.ancestry.mixture import AncestryAssignment
+from opengwasdb.ancestry.mixture import AncestryAssignment, Gates
 
 # The build-manifest columns, first and in this order (superset invariant).
 BUILD_COLUMNS = ["trait_id", "file_path", "trait_name", "n"]
@@ -31,8 +31,12 @@ _ANNOTATION_COLUMNS = [
     "gate_reason",
 ]
 _VERSION_COLUMNS = ["catalogue_version", "ancestry_reference_version"]
+# Gate provenance: the admission thresholds that produced this Catalogue's labels.
+# Recorded so a calibrated τ/δ pick (issue 064) is explicit and reproducible.
+_GATE_COLUMNS = ["gate_tau", "gate_delta", "gate_n_min", "gate_residual_max"]
 
-_UNASSIGNED = "Unassigned"
+UNASSIGNED = "Unassigned"
+_UNASSIGNED = UNASSIGNED
 
 
 @dataclass(frozen=True)
@@ -58,12 +62,14 @@ def catalogue_fieldnames(superpops: list[str]) -> list[str]:
         *_ANNOTATION_COLUMNS,
         *[_prop_column(sp) for sp in superpops],
         *_VERSION_COLUMNS,
+        *_GATE_COLUMNS,
     ]
 
 
 def _row_to_dict(
     row: CatalogueRow,
     superpops: list[str],
+    gates: Gates,
     *,
     catalogue_version: str,
     ancestry_reference_version: str,
@@ -74,7 +80,7 @@ def _row_to_dict(
         "file_path": row.file_path,
         "trait_name": row.trait_name,
         "n": str(row.n),
-        "assigned_ancestry": a.assigned_ancestry or _UNASSIGNED,
+        "assigned_ancestry": a.assigned_ancestry or UNASSIGNED,
         "reported_population": row.reported_population,
         "af_overlap": str(a.af_overlap),
         "nnls_residual": _fmt(a.residual),
@@ -84,6 +90,10 @@ def _row_to_dict(
         "gate_reason": a.gate_reason,
         "catalogue_version": catalogue_version,
         "ancestry_reference_version": ancestry_reference_version,
+        "gate_tau": _fmt(gates.tau),
+        "gate_delta": _fmt(gates.delta),
+        "gate_n_min": str(gates.n_min),
+        "gate_residual_max": _fmt(gates.residual_max),
     }
     for sp in superpops:
         out[_prop_column(sp)] = _fmt(a.superpop_composition.get(sp, 0.0))
@@ -97,9 +107,15 @@ def write_catalogue(
     *,
     catalogue_version: str,
     ancestry_reference_version: str,
+    gates: Gates | None = None,
 ) -> Path:
-    """Write the Catalogue TSV (superset of the build manifest)."""
+    """Write the Catalogue TSV (superset of the build manifest).
+
+    ``gates`` (the admission thresholds that produced the labels) are recorded as
+    provenance columns; a default ``Gates()`` is used when not supplied.
+    """
     path = Path(path)
+    gates = gates or Gates()
     fieldnames = catalogue_fieldnames(superpops)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter="\t")
@@ -109,6 +125,7 @@ def write_catalogue(
                 _row_to_dict(
                     row,
                     superpops,
+                    gates,
                     catalogue_version=catalogue_version,
                     ancestry_reference_version=ancestry_reference_version,
                 )
