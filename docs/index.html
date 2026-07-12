@@ -90,9 +90,11 @@
           <br>
           Every study in the ieu-a, ieu-b and bbj-a collections assigned an ancestry
           from its allele frequencies against a hg19 reference: 527 assigned with
-          zero reported-vs-assigned misassignments (EUR/EAS-dominant, plus AFR/AMR/
-          SAS/MID), and the 288 Unassigned traced entirely to data quality — empty
-          AF fields (overlap gate) or mis-oriented AF (residual gate), not admixture.
+          zero reported-vs-assigned misassignments, and the 288 Unassigned traced
+          entirely to data quality (empty or mis-oriented AF), not admixture. Store
+          routing then folds in a reported-ancestry fallback and a genome-wide
+          coverage gate (≥500k variants, all autosomes) to leave 721 store-eligible
+          studies (578 EUR, 137 EAS).
         </li>
         <li>
           <a href="benchmark-output/opengwasdb_ancestry_ieua.html">

@@ -193,15 +193,78 @@ ax.legend(frameon=False, fontsize=9); ax.grid(axis="x", visible=False)
 fig.tight_layout(); plt.show()
 ```
 
+## Store routing — from assignment to eligibility
+
+The Catalogue is annotated once; membership of a store is a **filter**. Two decisions
+turn the 815 assignments into store routing:
+
+1. **Ancestry with a reported fallback** — use the AF-recovered ancestry where it
+   exists; otherwise fall back to the **Reported Population** mapped to a
+   super-population. Analyses whose reported label maps to none (`"Mixed"`) get no
+   routing ancestry. This rescues the no-AF and mis-oriented-AF studies whose
+   reported label *is* trustworthy.
+2. **Coverage gate (independent of ancestry)** — a genome-wide store needs
+   genome-wide input: **≥ 500,000 variants, all 22 autosomes present, no single
+   chromosome holding > 20 %**. Array-based / sparse studies keep their ancestry but
+   are flagged `store_eligible = false` (**not dropped** — recoverable for an
+   array-specific store or via imputation).
+
+`store_eligible = has a routing ancestry AND passes coverage`, so a build is the
+one-line filter `routing_ancestry == EUR and store_eligible`.
+
+```{python}
+#| echo: false
+#| output: asis
+elig = [r for r in rows if r.get("store_eligible") == "True"]
+by_anc = Counter(r["routing_ancestry"] for r in elig)
+resc = sum(1 for r in elig if r.get("routing_source") == "reported-fallback")
+drop_anc = sum(1 for r in rows if not r.get("routing_ancestry"))
+drop_cov = sum(1 for r in rows if r.get("routing_ancestry") and r.get("store_eligible") == "False")
+print(md_table(
+    ["outcome", "studies"],
+    [
+        ["**Store-eligible**", f"**{len(elig)}**"],
+        ["— EUR / EAS / AFR / AMR",
+         f"{by_anc['EUR']} / {by_anc['EAS']} / {by_anc['AFR']} / {by_anc['AMR']}"],
+        ["— of which rescued via reported ancestry", resc],
+        ["Dropped — reported \"Mixed\", no super-population", drop_anc],
+        ["Dropped — below coverage gate (flagged, not deleted)", drop_cov],
+    ],
+))
+```
+
+```{python}
+#| echo: false
+#| fig-cap: "Genome coverage per study (log scale); the 500k eligibility floor and the low-coverage tail."
+tot = np.array([int(r.get("total_variants", 0) or 0) for r in rows])
+tot = tot[tot > 0]
+fig, ax = plt.subplots(figsize=(8.2, 3.0))
+ax.hist(np.log10(tot), bins=40, color="#3B6EA5", alpha=0.9)
+ax.axvline(np.log10(500_000), color="#c0392b", ls="--", lw=1.2)
+ax.text(np.log10(500_000) * 1.002, ax.get_ylim()[1] * 0.85, "500k floor", color="#c0392b", fontsize=9)
+ax.set_xlabel("variants per study (log10)"); ax.set_ylabel("studies")
+ax.grid(axis="x", visible=False)
+fig.tight_layout(); plt.show()
+```
+
+Only **`{python} drop_anc`** studies are lost purely to ancestry (all reported
+`"Mixed"`); the coverage gate flags **`{python} drop_cov`** more — including
+`{python} sum(1 for r in rows if r.get("routing_source")=="af-assigned" and r.get("store_eligible")=="False")`
+that had good AF-recovered ancestry but are array-based — leaving
+**`{python} len(elig)`** genome-wide, ancestry-routed studies ready to build
+(`{python} by_anc['EUR']` EUR, `{python} by_anc['EAS']` EAS).
+
 ## Notes
 
 - **The catalogue** (`ancestry_ieu_catalogue.tsv`) carries one annotated row per
-  study — assigned ancestry, composition, gate results, reported population, and the
-  gate provenance — and is a superset of the build manifest, so a EUR (or EAS) store
-  is now a one-line filter.
+  study — assigned + routing ancestry, composition, gate results, coverage, reported
+  population, and `store_eligible` — a superset of the build manifest, so a EUR (or
+  EAS) store is the filter `routing_ancestry == EUR and store_eligible`.
 - **Reproduce**: `scripts/build_ancestry_reference.py --no-liftover` (hg19 reference),
-  `scripts/build_ieu_manifest.py` (manifest), then `benchmarks/ancestry_ieu_batch.py`
-  (this catalogue). The 815-study run took ~16 min on 32 workers.
-- **Next**: the residual-gate studies could be revisited with strand/allele
-  re-harmonisation; the no-AF studies need allele frequencies sourced elsewhere.
+  `scripts/build_ieu_manifest.py` (manifest), `benchmarks/ancestry_ieu_batch.py`
+  (assignment, ~16 min / 32 workers), `scripts/compute_vcf_coverage.py` (coverage),
+  then `opengwasdb route-catalogue` (routing columns).
+- **Parked, not lost**: the residual-gate studies could be revisited with strand/allele
+  re-harmonisation; the no-AF studies need allele frequencies sourced elsewhere; the
+  low-coverage studies remain in the Catalogue for an array store or imputation.
 ```

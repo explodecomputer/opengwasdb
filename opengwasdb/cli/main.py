@@ -294,6 +294,42 @@ def assign_ancestry_command(
     )
 
 
+@app.command("route-catalogue")
+def route_catalogue_command(
+    catalogue_path: Path,
+    coverage_path: Path,
+    out_path: Path,
+    min_variants: int = typer.Option(
+        500_000, help="Genome-wide coverage floor for store eligibility"
+    ),
+) -> None:
+    """Add routing + coverage columns to an assignment Catalogue.
+
+    Combines AF-recovered ancestry with a Reported-Population fallback and a
+    genome-wide coverage gate (min variants, all autosomes, no single-chromosome
+    concentration). Writes routing_ancestry, routing_source, and store_eligible so a
+    build is the filter ``routing_ancestry == EUR and store_eligible``. Low-coverage
+    Analyses keep their ancestry but are flagged store_eligible=false (not dropped).
+    """
+    from opengwasdb.ancestry.routing import finalize_catalogue
+
+    tally = finalize_catalogue(
+        catalogue_path, coverage_path, out_path, min_variants=min_variants
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "out_path": str(out_path),
+                "store_eligible": tally["kept"],
+                "rescued_via_reported": tally["reported_fallback"],
+                "dropped_no_ancestry": tally["dropped_ancestry"],
+                "dropped_low_coverage": tally["dropped_coverage"],
+            },
+            sort_keys=True,
+        )
+    )
+
+
 @app.command("calibrate-ancestry")
 def calibrate_ancestry_command(
     catalogue_path: Path,

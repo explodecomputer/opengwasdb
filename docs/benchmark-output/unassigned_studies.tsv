@@ -1,0 +1,289 @@
+trait_id	trait_name	reported	n	year	nsnps	reason
+ieu-a-777	Fasting glucose	European	133010	2012	64432	harmonisation
+ieu-a-778	Fasting insulin	European	108557	2013	64421	harmonisation
+ieu-a-779	Fasting insulin	European	108557	2013	64375	harmonisation
+ieu-a-1162	Breast cancer (iCOGS)	European	89677	2015	191058	harmonisation
+bbj-a-67	Smoking behaviors : Cigarettes per day	East Asian	72655	2019	5961480	harmonisation
+ieu-a-1161	ER+ Breast cancer (iCOGS)	European	69970	2015	191058	harmonisation
+bbj-a-62	Menarche	East Asian	67029	2019	9290560	harmonisation
+ieu-a-1008	Platelet count	European	66867	2011	2672817	harmonisation
+bbj-a-68	Smoking behaviors : Cigarettes per day	East Asian	58784	2019	6127591	harmonisation
+ieu-a-772	Fasting glucose	European	58074	2012	2632388	harmonisation
+ieu-a-773	Fasting glucose	European	58074	2012	2625495	harmonisation
+ieu-a-774	Fasting insulin	European	51750	2012	2631521	harmonisation
+ieu-a-775	Fasting insulin	European	51750	2012	2624472	harmonisation
+ieu-a-1160	ER- Breast cancer (iCOGS)	European	50225	2015	191057	harmonisation
+ieu-a-758	HbA1C	European	46368	2010	2529804	harmonisation
+ieu-a-757	Fasting glucose	European	46186	2010	2467715	harmonisation
+ieu-a-770	HOMA-B	European	46186	2011	2454220	harmonisation
+ieu-a-771	HOMA-IR	European	46186	2011	2455342	harmonisation
+bbj-a-63	Menopause	East Asian	43861	2019	9290560	harmonisation
+ieu-a-776	2hr glucose	European	42854	2013	63922	harmonisation
+ieu-a-1	Adiponectin	Mixed	39883	2012	2631751	harmonisation
+ieu-a-768	Fasting insulin	European	38238	2010	2458361	harmonisation
+ieu-a-1086	Amyotrophic lateral sclerosis	European	36052	2016	8418092	harmonisation
+ieu-b-5114	Common schizophrenia alleles are enriched in mutation-intolerant genes and in regions under strong background selection, CLOZUK+PGC2	Mixed	35802	2018	8171059	harmonisation
+bbj-a-64	Smoking behaviors : Age of smoking initiation	East Asian	30418	2019	5961480	harmonisation
+bbj-a-65	Smoking behaviors : Age of smoking initiation	East Asian	23039	2019	6124892	harmonisation
+ieu-a-756	2hr glucose	European	15234	2010	2399126	harmonisation
+bbj-a-69	Smoking behaviors : Cigarettes per day	East Asian	13871	2019	6107575	harmonisation
+ieu-a-769	Fasting proinsulin	European	10701	2011	2493157	harmonisation
+ieu-a-1114	Monocyte chemotactic protein-1 (CCL2)	European	8293	2016	10315339	harmonisation
+ieu-a-1220	Platelet derived growth factor BB	European	8293	0	10311202	harmonisation
+ieu-a-1113	Hepatocyte growth factor	European	8292	2016	10320015	harmonisation
+ieu-a-1222	Stem cell factor	European	8290	0	10318017	harmonisation
+ieu-a-1201	Interleukin-12p70	European	8270	0	10311918	harmonisation
+ieu-a-1219	Macrophage inflammatory protein-1<ce><b2> (CCL4)	European	8243	0	10313756	harmonisation
+ieu-a-1211	Interleukin-6	European	8189	0	10299740	harmonisation
+ieu-a-1116	TNF-related apoptosis inducing ligand	European	8186	2016	10315344	harmonisation
+ieu-a-1195	Eotaxin (CCL11)	European	8153	0	10299906	harmonisation
+ieu-a-1209	Interleukin-4	European	8124	0	10288358	harmonisation
+ieu-a-1197	Granulocyte colony-stimulating factor	European	7904	0	10293140	harmonisation
+ieu-a-1203	Interleukin-17	European	7760	0	10281481	harmonisation
+ieu-a-1199	Interferon-gamma	European	7701	0	10283253	harmonisation
+ieu-a-1200	Interleukin-10	European	7681	0	10293520	harmonisation
+ieu-a-1005	Percent emphysema	Mixed	7667	2014	2958886	harmonisation
+ieu-a-1196	Basic fibroblast growth factor	European	7565	0	10772607	harmonisation
+bbj-a-66	Smoking behaviors : Age of smoking initiation	East Asian	7379	2019	6107564	harmonisation
+ieu-a-1226	Vascular endothelial growth factor	European	7118	0	10279023	harmonisation
+ieu-a-1224	Stromal cell-derived factor-1 alpha (CXCL12)	European	5998	0	10268870	harmonisation
+ieu-a-761	Corrected insulin response	European	5318	2014	2424177	harmonisation
+ieu-a-763	Insulin disposition index	European	5130	2014	2425038	harmonisation
+ieu-b-4900	Anti-Cytomegalovirus IgG levels	European	5010	2021	7002835	harmonisation
+ieu-b-4901	Anti-Epstein-Barr virus IgG levels	European	5010	2021	7002835	harmonisation
+ieu-b-4910	Anti-Toxoplasma gondii IgG levels	European	5010	2021	7247045	harmonisation
+ieu-a-762	Corrected insulin response	European	4789	2014	2423853	harmonisation
+ieu-a-767	Insulin sensitivity index	European	4769	2014	2416954	harmonisation
+ieu-b-4905	Anti-Helicobacter pylori IgG levels	European	4683	2021	7247045	harmonisation
+ieu-a-766	Insulin at 30 minutes	European	4483	2014	2426242	harmonisation
+ieu-a-764	Incremental insulin at 30 minutes	European	4447	2014	2426245	harmonisation
+ieu-a-765	Insulin at 30 minutes	European	4409	2014	2431063	harmonisation
+ieu-a-760	AUCins	European	4324	2014	2432924	harmonisation
+ieu-a-759	AUCins/AUCglu	European	4213	2014	2433069	harmonisation
+ieu-a-1215	Interferon gamma-induced protein 10 (CXCL10)	European	3685	0	9809963	harmonisation
+ieu-a-1217	Monokine induced by interferon-gamma (CXCL9)	European	3685	0	9814732	harmonisation
+ieu-a-1223	Stem cell growth factor beta	European	3682	0	9814584	harmonisation
+ieu-a-1208	Interleukin-2 receptor, alpha subunit	European	3677	0	9818603	harmonisation
+ieu-a-1206	Interleukin-1 receptor antagonist	European	3638	0	9808843	harmonisation
+ieu-a-1204	Interleukin-18	European	3636	0	9816276	harmonisation
+ieu-a-1214	Interleukin-9	European	3634	0	9815072	harmonisation
+ieu-a-1194	Cutaneous T-cell attracting (CCL27)	European	3631	0	9810370	harmonisation
+ieu-a-1119	Interleukin-13	European	3557	2016	9796856	harmonisation
+ieu-a-1193	Beta nerve growth factor	European	3531	0	9788468	harmonisation
+ieu-a-1213	Interleukin-8 (CXCL8)	European	3526	0	9774535	harmonisation
+ieu-a-1218	Macrophage inflammatory protein-1<ce><b1> (CCL3)	European	3522	0	9779247	harmonisation
+ieu-a-1198	Growth regulated oncogene-<ce><b1> (CXCL1)	European	3505	0	9785464	harmonisation
+ieu-a-1118	Macrophage migration inhibitory factor (glycosylation-inhibiting factor)	European	3494	2016	9802317	harmonisation
+ieu-a-1202	Interleukin-16	European	3483	0	9800258	harmonisation
+ieu-a-1207	Interleukin-2	European	3475	0	9780755	harmonisation
+ieu-a-1117	Tumor necrosis factor-alpha	European	3454	2016	9774252	harmonisation
+ieu-a-1221	Regulated on Activation, Normal T Cell Expressed and Secreted (CCL5)	European	3421	0	9784852	harmonisation
+ieu-a-1212	Interleukin-7	European	3409	0	9772582	harmonisation
+ieu-a-1210	Interleukin-5	European	3364	0	9732259	harmonisation
+ieu-a-1205	Interleukin-1-beta	European	3309	0	9734647	harmonisation
+ieu-b-4902	Anti-Feline herpes virus IgG levels	European	2764	2021	7002835	harmonisation
+ieu-a-1225	Tumor necrosis factor-beta	European	1559	0	7955998	harmonisation
+ieu-b-4909	Anti-SAG1 protein domain IgG levels	European	1288	2021	7247045	harmonisation
+ieu-a-1115	Monocyte specific chemokine 3 (CCL7)	European	843	2016	8777381	harmonisation
+ieu-a-1216	Macrophage colony-stimulating factor	European	840	0	9559343	harmonisation
+ieu-b-4898	Anti-Alpha-casein protein IgG levels	European	683	2021	7247045	harmonisation
+ieu-b-4899	Anti-Beta-casein protein IgG levels	European	683	2021	7002835	harmonisation
+ieu-b-4903	Anti-Influenza virus subtype H1N1 IgG levels	European	683	2021	7247045	harmonisation
+ieu-b-4904	Anti-Influenza virus subtype H3N2 IgG levels	European	683	2021	7247045	harmonisation
+ieu-b-4906	Anti-Herpes simplex virus 1 IgG levels	European	683	2021	7002835	harmonisation
+ieu-b-4907	Anti-Measles virus IgG levels	European	683	2021	7247045	harmonisation
+ieu-b-4911	Anti-Theiler's virus IgG levels	European	683	2021	7247045	harmonisation
+ieu-b-4908	Anti-Saccharomyces cerevisiae IgA levels	European	357	2021	7246993	harmonisation
+ieu-a-1180	Parkinson's Disease	European	514588	0	5770548	no AF
+ieu-a-1175	Alzheimer's disease	European	490305	2018	6849391	no AF
+ieu-a-1187	Major Depressive Disorder	European	480359	2018	9855	no AF
+ieu-a-1178	Alzheimer's disease	European	460801	0	6629421	no AF
+ieu-b-5110	Bipolar disorder bip2021	European	413466	2021	7608183	no AF
+ieu-a-1172	Educational attainment (years of schooling)	European	405072	2016	4919	no AF
+ieu-b-112	Cognitive function	European	373617	2021	2529804	no AF
+ieu-b-5106	Age at menarche	European	252514	2017	10548750	no AF
+ieu-a-1188	Major Depressive Disorder	European	173005	2018	12023246	no AF
+ieu-a-118	Neuroticism	European	160958	2014	6818268	no AF
+ieu-a-24	Type 2 diabetes	Mixed	149821	2012	117531	no AF
+ieu-a-1173	Intelligence	European	147194	NULL	7695621	no AF
+ieu-b-26	Amyotrophic Lateral Sclerosis	Mixed	143562	2020	10461755	no AF
+ieu-b-114	Fasting glucose	European	133010	2012	64432	no AF
+ieu-b-5	multiple sclerosis	European	115803	2019	6303724	no AF
+ieu-b-18	multiple sclerosis	European	115803	2019	6304358	no AF
+ieu-a-23	Type 2 diabetes	Mixed	110452	2014	2869354	no AF
+ieu-a-1055	Urate	European	110347	2013	2447621	no AF
+ieu-b-116	Fasting insulin	European	108557	2012	64421	no AF
+ieu-a-755	Years of schooling	European	106736	2014	2278626	no AF
+ieu-b-4816	Body mass index	European	99998	2022	7191598	no AF
+ieu-b-4814	Height	European	99997	2022	7190052	no AF
+ieu-b-4858	Ever smoked	European	99996	2022	7933812	no AF
+ieu-b-4836	Years of schooling	European	99970	2022	7210025	no AF
+ieu-b-4818	Systolic blood pressure	European	97656	2022	8029645	no AF
+ieu-b-4830	Waist-hip ratio	European	85978	2022	7908954	no AF
+ieu-b-4834	Alcohol consumption	European	83626	2022	7914324	no AF
+ieu-a-22	Schizophrenia	Mixed	82315	2014	8492846	no AF
+ieu-a-833	Rheumatoid arthritis	Mixed	80799	2014	6619924	no AF
+ieu-b-4848	Neuroticism	European	79004	2022	7908033	no AF
+ieu-b-4850	Triglycerides	European	78700	2022	7892037	no AF
+ieu-b-4860	Physical activity	European	78007	2022	7987053	no AF
+ieu-b-4844	HDL cholesterol	European	77409	2022	7892377	no AF
+ieu-b-4832	Estimated glomerular filtration rate	European	76511	2022	7892788	no AF
+ieu-b-4813	Height	European	75030	2022	7190052	no AF
+ieu-a-298	Alzheimer's disease	European	74046	2013	10684	no AF
+ieu-a-270	Haemoglobin concentration	Mixed	71861	2012	2552734	no AF
+ieu-b-4846	LDL cholesterol	European	70814	2022	7892997	no AF
+ieu-a-1054	Gout	European	69374	2013	2534842	no AF
+ieu-a-273	Mean cell volume	Mixed	69335	2012	2550799	no AF
+ieu-a-26	Type 2 diabetes	European	69033	2012	2431734	no AF
+ieu-a-272	Mean cell haemoglobin concentration	Mixed	67852	2012	2548538	no AF
+ieu-a-1006	Mean platelet volume	European	66867	2011	2660409	no AF
+ieu-a-275	Red blood cell count	Mixed	66214	2012	2549148	no AF
+ieu-a-271	Mean cell haemoglobin	Mixed	64731	2012	2546456	no AF
+ieu-a-976	Type 2 diabetes	Mixed	64171	2012	2609901	no AF
+ieu-b-2	Alzheimer's disease	European	63926	2019	10528610	no AF
+ieu-a-274	Packed cell volume	Mixed	63511	2012	2550739	no AF
+ieu-b-4852	Wellbeing	European	63392	2022	7465013	no AF
+ieu-b-4764	C-reactive protein	European	61308	2021	8036590	no AF
+ieu-b-4828	Number of children ever born measurement	European	60430	2022	7974403	no AF
+ieu-a-832	Rheumatoid arthritis	European	58284	2014	5482719	no AF
+ieu-b-113	Fasting glucose	European	58074	2012	2625495	no AF
+ieu-a-1183	ADHD	European	55374	2017	7468461	no AF
+ieu-b-4835	Years of schooling	European	54986	2022	7210025	no AF
+ieu-a-297	Alzheimer's disease	European	54162	2013	6895634	no AF
+ieu-b-4815	Body mass index	European	51852	2022	7191598	no AF
+ieu-b-115	Fasting insulin	European	51750	2012	2624472	no AF
+ieu-b-4856	FEV1/FVC	European	51396	2022	9703538	no AF
+ieu-b-4840	Depressive symptoms	European	47517	2022	8281388	no AF
+ieu-b-103	HbA1C	European	46368	2010	2529804	no AF
+ieu-b-104	HbA1C	European	46368	2010	2529804	no AF
+ieu-a-1185	Autism Spectrum Disorder	European	46351	2017	8370010	no AF
+ieu-b-5008	Autism Spectrum Disorder	European	46350	2019	9073951	no AF
+ieu-b-4761	Fasting glucose	European	46186	2010	2529804	no AF
+ieu-b-4842	HbA1c	European	45734	2022	9696819	no AF
+ieu-b-4854	Forced expiratory volume in 1-second	European	44671	2022	9703526	no AF
+ieu-b-4857	Ever smoked	European	44052	2022	7933812	no AF
+ieu-a-786	Urate	European	42741	2015	2386197	no AF
+ieu-a-787	Urate	European	42741	2015	2388251	no AF
+ieu-a-788	Urate	European	42741	2015	2407396	no AF
+ieu-a-280	Multiple sclerosis	European	38589	2013	117618	no AF
+ieu-b-4817	Systolic blood pressure	European	38434	2022	8029645	no AF
+ieu-b-4843	HDL cholesterol	European	37120	2022	7892377	no AF
+ieu-b-118	HOMA-IR	European	37037	2011	2455342	no AF
+ieu-b-117	HOMA-B	European	36466	2011	2454220	no AF
+ieu-a-1189	Obsessive Compulsive Disorder	European	33925	2017	8269796	no AF
+ieu-a-282	Psoriasis	European	33394	2012	137555	no AF
+ieu-a-46	Femoral neck bone mineral density	Mixed	32961	2012	0	no AF
+ieu-a-47	Lumbar spine bone mineral density	Mixed	32961	2012	0	no AF
+ieu-b-4820	Age at first birth	European	32696	2022	6047010	no AF
+ieu-a-1002	Leptin	European	32161	2016	2471034	no AF
+ieu-a-1003	Leptin	European	32161	2016	2470889	no AF
+ieu-b-4829	Waist-hip ratio	European	31740	2022	7908954	no AF
+ieu-b-4831	Estimated glomerular filtration rate	European	31287	2022	7892788	no AF
+ieu-b-4849	Triglycerides	European	30515	2022	7892037	no AF
+ieu-b-4833	Alcohol consumption	European	29540	2022	7914324	no AF
+ieu-b-4822	Age at menarche	European	29346	2022	7890254	no AF
+ieu-b-4845	LDL cholesterol	European	29212	2022	7892997	no AF
+ieu-a-29	Birth length	European	28459	2015	2199355	no AF
+ieu-b-4847	Neuroticism	European	28130	2022	7908033	no AF
+ieu-a-283	Rheumatoid arthritis	European	27345	2012	57084	no AF
+ieu-a-286	Multiple sclerosis	European	27148	2011	463908	no AF
+ieu-a-27	Birth weight	European	26836	2013	2636604	no AF
+ieu-a-973	Ulcerative colitis	European	26405	2011	1243166	no AF
+ieu-a-834	Rheumatoid arthritis	European	25708	2010	2216398	no AF
+ieu-b-4826	Cigarettes smoked per day	European	24784	2022	7227329	no AF
+ieu-a-285	Type 1 diabetes	European	24341	2015	54933	no AF
+ieu-a-278	Celiac disease	European	24269	2011	47940	no AF
+ieu-b-4859	Physical activity	European	24264	2022	7987053	no AF
+ieu-a-1049	Iron	European	23986	2014	2093989	no AF
+ieu-a-1050	Ferritin	European	23986	2014	2033871	no AF
+ieu-a-1051	Transferrin Saturation	European	23986	2014	2099763	no AF
+ieu-a-1052	Transferrin	European	23986	2014	2101774	no AF
+ieu-a-288	Systemic lupus erythematosus	European	23210	2015	7614111	no AF
+ieu-b-4851	Wellbeing	European	22656	2022	7465013	no AF
+ieu-b-4838	Cognitive function	European	22593	2022	6719302	no AF
+ieu-a-831	Rheumatoid arthritis	East Asian	22515	2014	5223744	no AF
+ieu-a-1070	Sitting height ratio	European	21590	2015	6976796	no AF
+ieu-b-4763	C-reactive protein	European	20623	2021	8036590	no AF
+ieu-b-4827	Number of children ever born measurement	European	20095	2022	7974403	no AF
+ieu-a-284	Type 1 diabetes	European	18932	2015	56052	no AF
+ieu-a-804	Major depressive disorder	European	18759	2013	122937	no AF
+ieu-a-45	Anorexia nervosa	European	17767	2014	1147529	no AF
+ieu-b-4841	HbA1c	European	17724	2022	9696819	no AF
+ieu-a-113	Neo-agreeableness	European	17375	2012	2302799	no AF
+ieu-a-114	Neo-conscientiousness	European	17375	2012	2303018	no AF
+ieu-a-115	Neo-extraversion	European	17375	2012	2303160	no AF
+ieu-a-116	Neo-neuroticism	European	17375	2012	2303078	no AF
+ieu-a-117	Neo-openness to experience	European	17375	2012	2302977	no AF
+ieu-a-792	Urate	European	17078	2015	2592921	no AF
+ieu-b-4839	Depressive symptoms	European	16782	2022	8281388	no AF
+ieu-a-800	Bipolar disorder	European	16731	2011	108724	no AF
+ieu-b-4855	FEV1/FVC	European	15946	2022	9703538	no AF
+ieu-a-276	Celiac disease	European	15283	2010	522975	no AF
+ieu-a-1059	Celiac disease	European	15283	2010	292060	no AF
+ieu-a-1170	Knee and hip osteoarthritis	European	14507	2012	1276844	no AF
+ieu-a-789	Urate	European	14504	2015	2591281	no AF
+ieu-a-1186	Anorexia Nervosa	European	14477	2017	9538880	no AF
+ieu-b-4853	Forced expiratory volume in 1-second	European	14444	2022	9703526	no AF
+ieu-a-1169	Hip osteoarthritis	European	14275	2012	1273620	no AF
+ieu-a-1034	Height	European	13960	2013	2308147	no AF
+ieu-a-1096	Childhood obesity	European	13848	2012	2439810	no AF
+ieu-a-290	Type 1 diabetes	European	13254	NULL	398963	no AF
+ieu-a-287	Primary biliary cirrhosis	European	13239	2015	1126028	no AF
+ieu-a-1071	Sitting height ratio	European	12965	2015	6974336	no AF
+ieu-a-1181	Frontotemporal Dementia	European	12928	0	2399644	no AF
+ieu-a-1098	Narcolepsy	European	12307	2013	101879	no AF
+ieu-a-1060	Celiac disease	European	11950	2010	231128	no AF
+ieu-b-4824	Age at menopause	European	11859	2022	6972488	no AF
+ieu-a-1171	Knee osteoarthritis	European	11655	2012	1274364	no AF
+ieu-a-281	Primary biliary cirrhosis	European	11375	2012	115820	no AF
+ieu-a-1037	Difference in height between childhood and adulthood	European	10799	2013	2382082	no AF
+ieu-a-1184	Autism Spectrum Disorder	European	10610	2015	8493725	no AF
+ieu-a-793	Urate	European	10058	2015	2594484	no AF
+ieu-b-4819	Age at first birth	European	9999	2022	6047010	no AF
+ieu-b-4837	Cognitive function	European	9997	2022	6719302	no AF
+ieu-a-791	Urate	European	9753	2015	2591961	no AF
+ieu-b-4821	Age at menarche	European	9653	2022	7890254	no AF
+ieu-a-795	Urate	European	9445	2015	2590804	no AF
+ieu-a-1040	Difference in height between adolescence and adulthood	European	9228	2013	2398512	no AF
+ieu-b-4825	Cigarettes smoked per day	European	9000	2022	7227329	no AF
+ieu-a-1072	Sitting height ratio	European	8625	2015	6919141	no AF
+ieu-a-794	Urate	European	7189	2015	2618579	no AF
+ieu-a-1033	Height	European	6986	2013	2327453	no AF
+ieu-a-1032	Height	European	6974	2013	2390858	no AF
+ieu-a-1035	Difference in height between childhood and adulthood	European	5756	2013	2388077	no AF
+ieu-a-812	Parkinson's disease	European	5691	2009	453110	no AF
+ieu-a-790	Urate	European	5529	2015	2593088	no AF
+ieu-a-1036	Difference in height between childhood and adulthood	European	5043	2013	2388958	no AF
+ieu-a-1038	Difference in height between adolescence and adulthood	European	4946	2013	2398150	no AF
+ieu-a-816	Neuroblastoma	European	4881	2013	468370	no AF
+ieu-a-797	Urate	European	4690	2015	2477403	no AF
+ieu-a-1287	Interleukin-6	European (Sardinian)	4621	2012	2350940	no AF
+ieu-a-796	Urate	European	4613	2015	2591328	no AF
+ieu-a-1029	Internalizing problems	European	4596	2014	2818242	no AF
+ieu-b-4823	Age at menopause	European	4476	2022	6972488	no AF
+ieu-a-1039	Difference in height between adolescence and adulthood	European	4282	2013	2398512	no AF
+ieu-a-822	Pancreatic cancer	European	3835	2009	521777	no AF
+ieu-a-813	Alcohol dependence	Mixed	3829	2012	915829	no AF
+ieu-a-1069	Sitting height ratio	African American	3545	2015	12911905	no AF
+ieu-a-815	Systemic lupus erythematosus	European	3094	2008	489461	no AF
+ieu-a-808	Bipolar disorder	Mixed	3049	2009	362832	no AF
+ieu-a-1016	Oligoclonal band status	European	3026	2015	269777	no AF
+ieu-a-1182	Frontotemporal Dementia	European	3024	0	486538	no AF
+ieu-a-1075	Selenium	European	2874	2013	2448565	no AF
+ieu-a-1076	Selenium	European	2874	2013	36654	no AF
+ieu-a-820	Multiple sclerosis	European	2793	2007	155972	no AF
+ieu-a-1073	Copper	European	2603	2013	2540357	no AF
+ieu-a-1074	Copper	European	2603	2013	13761	no AF
+ieu-a-1077	Selenium	European	2603	2013	2540331	no AF
+ieu-a-1078	Selenium	European	2603	2013	13761	no AF
+ieu-a-1079	Zinc	European	2603	2013	2540325	no AF
+ieu-a-1080	Zinc	European	2603	2013	13761	no AF
+ieu-a-810	Schizophrenia	Mixed	2149	NULL	414806	no AF
+ieu-a-1176	Huntington's disease progression	European	1989	2017	7453498	no AF
+ieu-a-819	Inflammatory bowel disease	European	1963	2006	150446	no AF
+ieu-a-821	Multiple sclerosis	European	1861	2009	514423	no AF
+ieu-a-818	Parkinson's disease	European	1672	2011	159846	no AF
+ieu-a-824	Alzheimer's disease	European	1489	2008	390802	no AF
+ieu-a-1017	Immunoglobulin G index levels	European	938	2015	241978	no AF
+ieu-a-814	Ischaemic stroke	European	517	2007	373476	no AF
+ieu-a-817	Alcohol dependence	Mixed	0	NULL	827281	no AF
