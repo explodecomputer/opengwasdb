@@ -18,6 +18,8 @@ A Store Release is a self-contained directory.
 ```text
 manifest.json
 index.sqlite
+analyses.tsv
+overview.html
 data.zarr/
 variants.tsv.gz
 variants.tsv.gz.tbi
@@ -25,11 +27,17 @@ variant_offsets.npy
 ```
 
 `manifest.json` identifies the release and declares how to interpret it.
-`index.sqlite` stores compact relational metadata such as analyses, key/value
-metadata, and small alias maps. `data.zarr/` stores compressed numerical
-association arrays and layout-specific numerical indexes. Dense Observed-Only
-releases store their high-cardinality variant axis in `variants.tsv.gz`, indexed
-by `variants.tsv.gz.tbi`, with `variant_offsets.npy` mapping Store-local Variant
+`index.sqlite` stores compact relational metadata such as key/value metadata,
+small alias maps, and large fine-grained tables that are not practical as flat
+text (such as Reference Completion Quality — see §12). `analyses.tsv` is the
+sole source of truth for Analytical Metadata (§7a) — one row per Analysis;
+`index.sqlite` MUST NOT also contain an `analyses` table. `overview.html` is a
+generated, store-wide human-browsable rendering of `analyses.tsv`; it MAY be
+regenerated from `analyses.tsv` and MUST NOT be treated as a second source of
+truth. `data.zarr/` stores compressed numerical association arrays and
+layout-specific numerical indexes. Dense Observed-Only releases store their
+high-cardinality variant axis in `variants.tsv.gz`, indexed by
+`variants.tsv.gz.tbi`, with `variant_offsets.npy` mapping Store-local Variant
 Indices to BGZF row offsets.
 
 Build and query commands operate on an explicit Store Release path. Directory naming, multi-store catalogues, default release selection, and remote API deployment are outside the store-format contract.
@@ -173,7 +181,48 @@ log_hazard
 
 There is no `other`, `unknown`, or original-units Stored Effect Scale in v0.1. Unsupported stored scales MUST fail ingestion until the vocabulary is deliberately extended.
 
-Original Effect Scale MAY be recorded as free-text provenance. For continuous traits, builders SHOULD store effects in SD Units when phenotype standard deviation is available or can be derived with acceptable provenance.
+Original Effect Scale MAY be recorded as free-text provenance. For continuous traits, builders SHOULD store effects in SD Units when phenotype standard deviation is available or can be derived with acceptable provenance, by rescaling the source statistics with a per-study phenotype SD rather than reconstructing them from Z, N, and allele frequency (ADR 0029). The method used to obtain that SD (`original_sd_method`) and a dispersion diagnostic over its supporting evidence MUST be recorded as Analytical Metadata (§7a).
+
+## 7a. Analytical Metadata and `analyses.tsv`
+
+A Store Release MUST carry its own Analytical Metadata — metadata affecting the
+interpretation of association statistics — so a downloaded or mirrored copy
+remains interpretable without a catalogue service (ADR 0030). Analytical Metadata
+lives entirely in `analyses.tsv`, one row per Analysis, keyed by `analysis_index`
+matching the release's `index.sqlite` positional indexing:
+
+```text
+analysis_index
+analysis_id
+phenotype_id
+phenotype_label
+analysis_label
+stored_effect_scale
+assigned_ancestry
+ancestry_assignment_method
+ancestry_prop_<population>   (repeated, one column per reference population)
+sample_size_kind
+sample_size_scope
+sample_size
+n_cases
+n_controls
+original_effect_scale
+original_sd
+original_sd_method
+original_sd_dispersion
+completion_median_pearson_r   (Reference-Completed releases only)
+completion_n_imputed_total
+completion_n_missing_total
+```
+
+`analyses.tsv` MUST be sufficient on its own to interpret every Analysis's stored
+effect scale, sample-size semantics, and ancestry — this supersedes the general
+requirement in §3 that "Analysis metadata MUST be sufficient to interpret stored
+effect scales, sample-size semantics, and source provenance," which this section
+makes concrete. `index.sqlite` MUST NOT duplicate any column of `analyses.tsv`;
+large, fine-grained, tooling-only evidence (such as Reference Completion Quality
+at LD-block-by-Analysis granularity, §12) stays SQLite-only, with only its
+per-Analysis rollup appearing in `analyses.tsv`.
 
 ## 8. Sample size metadata
 
@@ -440,7 +489,10 @@ Validators MUST check at least:
 - Reference-Completed Dense axes match the Reference Variant Set;
 - imputed mask is consistent with Z and SE;
 - Ragged Reference-Completed regions include all Reference Variant Set variants within completed boundaries;
-- top-hit indexes, when present, are consistent with stored Z values.
+- top-hit indexes, when present, are consistent with stored Z values;
+- `analyses.tsv` contains exactly one row per Analysis, covering every `analysis_index` referenced by `index.sqlite` (this is the one place SQLite cannot enforce the relationship as a foreign key, since `analyses.tsv` is a separate file);
+- `index.sqlite` does not contain an `analyses` table;
+- `original_sd_method` and `ancestry_assignment_method` values are in their controlled vocabularies (ADR 0029, ADR 0030).
 
 ## 21. Compatibility
 

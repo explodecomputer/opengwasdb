@@ -14,7 +14,11 @@ A measured or derived outcome, such as disease status, LDL cholesterol, gene exp
 A self-contained logical distribution unit containing one or more Analyses and everything required to interpret and query them. A Store has a stable identity and one **Primary Storage Layout**.
 
 **Store Release**:
-An immutable, self-identifying published version of a Store. A release records Store identity, release identity, format version, creation time, completion state, and provenance so downloaded or mirrored copies remain interpretable without a catalogue service.
+An immutable, self-identifying published version of a Store. A release records Store identity, release identity, format version, creation time, completion state, provenance, and **Analytical Metadata** so downloaded or mirrored copies remain interpretable without a catalogue service.
+
+**Analytical Metadata**:
+Metadata that affects the interpretation of association statistics in a Store Release — Assigned Ancestry, Ancestry Composition, sample-size kind/scope/counts, Original Effect Scale and its derivation method and dispersion diagnostic, and a Reference Completion Quality rollup. Lives entirely in `analyses.tsv` (ADR 0030), one row per Analysis; never duplicated into `index.sqlite`. Distinct from a Trait Annotation (descriptive metadata curated after release) or build provenance (checksums, generator versions) — those stay registry-scoped, not store-scoped.
+_Avoid_: trait annotation, display metadata.
 
 **Format Version**:
 The version of the OpenGWASDB storage contract required to interpret a Store Release. It describes representation compatibility, not the version of the biological data.
@@ -49,8 +53,8 @@ Whether a Store Release contains only source-observed associations or has also b
 **LD Reference Panel**:
 The declared ancestry-specific LD resource used for reference completion. It defines the **Reference Variant Set** and provides LD information used to infer imputed associations.
 
-**Analysis Catalogue**:
-The complete list of candidate **Analyses** for ingestion, each recorded with its annotations (including **Assigned Ancestry** and **Ancestry Composition**), independent of any store. A build consumes a *subset view* of the Catalogue — e.g. all EUR-assigned Analyses — rather than a bespoke manifest, so annotation happens once for every Analysis and store selection is just a filter over the Catalogue.
+**Analysis Catalogue** _(superseded, ADR 0027)_:
+Formerly: the complete list of candidate Analyses for ingestion, persisted by OpenGWASDB itself. Superseded by the `opengwasdb-stores` registry, which performs the same annotate-then-subset selection in a separate repository. OpenGWASDB retains the annotator functions (ancestry assignment, effect-scale standardisation) as reusable logic, but no longer persists a Catalogue of its own — a Store Release no longer depends on one to be interpretable (see **Analytical Metadata**).
 
 **Assigned Ancestry**:
 The single ancestry label attached to an **Analysis**, recovered from that Analysis's summary-statistic allele frequencies rather than declared by the source. It selects which ancestry-specific **LD Reference Panel** the Analysis may be reference-completed against; an Analysis whose composition matches no single ancestry confidently is left *Unassigned* rather than forced into a label.

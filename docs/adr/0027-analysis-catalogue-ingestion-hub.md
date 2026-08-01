@@ -1,5 +1,16 @@
 # Analysis Catalogue as the ingestion hub; stores are subset views
 
+Status: superseded by the `opengwasdb-stores` registry (Source Collection → Store
+Family → Manifest Generator → Release Manifest), and by ADR 0030. That registry
+does the same job — annotate-then-subset selection of which Analyses go in which
+store — in a separate repository, better specified, and versioned. This ADR's
+premise that `opengwasdb` itself must persist the Catalogue TSV as "the source of
+truth for per-Analysis facts" no longer holds once a Store Release carries its own
+Analytical Metadata (ADR 0030): a downloaded store no longer needs a catalogue
+service, of either repo's design, to be interpretable. `opengwasdb`'s role narrows
+to reusable annotator functions (ancestry assignment, effect-scale standardisation)
+callable by `opengwasdb-stores`' Manifest Generators, with no TSV of its own.
+
 OpenGWAS is large and heterogeneous (tens of thousands of Analyses across many
 consortia, ancestries, and shapes). The long-term intent is to split it into
 several **right-shaped, manageable stores** — dense where a shared panel fits,
