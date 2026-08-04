@@ -128,7 +128,7 @@ def _latencies(
         "bulk": lambda: q.analysis(exp),
         "phewas": lambda: q.phewas(phewas_alid),
         "regional": lambda: q.range_phewas(*region),
-        "tophits": lambda: q.top_hits(threshold=5e-8),
+        "tophits": lambda: q.top_hits(analysis_id=exp, threshold=5e-8),
         "random_lookup": lambda: q.lookup(rand_alids, rand_analyses),
     }
     out = []

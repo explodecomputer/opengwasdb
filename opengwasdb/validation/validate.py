@@ -372,19 +372,58 @@ def _validate_ragged_top_hits(
 
     for key in top:
         group = top[key]
+        required = {
+            "analysis_offsets", "variant_index", "analysis_index", "abs_z",
+            "z", "se", "p_value",
+        }
+        missing = sorted(required.difference(group.keys()))
+        if missing:
+            errors.append(f"top-hit index {key} is missing {', '.join(missing)}")
+            continue
         threshold = float(group.attrs.get("threshold", 0))
         vis = group["variant_index"][:].astype(np.int32)
         ais = group["analysis_index"][:].astype(np.int32)
         zs = group["z"][:].astype(np.float32)
         abs_zs = group["abs_z"][:].astype(np.float32)
+        analysis_offsets = group["analysis_offsets"][:].astype(np.int64)
+        imputed = group["imputed"][:].astype(np.uint8) if "imputed" in group else None
 
-        if not (len(vis) == len(ais) == len(zs) == len(abs_zs)):
+        if not (
+            len(vis) == len(ais) == len(zs) == len(abs_zs)
+            == len(group["se"]) == len(group["p_value"])
+            and (imputed is None or len(imputed) == len(vis))
+        ):
             errors.append(f"top-hit index {key} has inconsistent array lengths")
             continue
 
-        # Exhaustive: check sort order is non-increasing |z|
-        if len(abs_zs) > 1 and np.any(np.diff(abs_zs) > 1e-4):
-            errors.append(f"top-hit index {key} is not ranked by descending |z|")
+        n_analyses = len(offsets) - 1
+        if (
+            len(analysis_offsets) != n_analyses + 1
+            or analysis_offsets[0] != 0
+            or np.any(analysis_offsets[:-1] > analysis_offsets[1:])
+            or analysis_offsets[-1] != len(vis)
+        ):
+            errors.append(f"top-hit index {key} has invalid analysis offsets")
+            continue
+        ordered = True
+        for analysis_index in range(n_analyses):
+            start = int(analysis_offsets[analysis_index])
+            end = int(analysis_offsets[analysis_index + 1])
+            if np.any(ais[start:end] != analysis_index):
+                ordered = False
+                break
+            if end - start > 1 and np.any(vis[start : end - 1] >= vis[start + 1 : end]):
+                ordered = False
+                break
+        if not ordered:
+            errors.append(f"top-hit index {key} has incorrect or non-genomic analysis slices")
+            continue
+        if "imputed" in csr._root and imputed is None:
+            errors.append(f"top-hit index {key} is missing imputed completion status")
+            continue
+        if imputed is not None and not np.all((imputed == 0) | (imputed == 1)):
+            errors.append(f"top-hit index {key} has invalid imputed completion status")
+            continue
 
         # Exhaustive: all abs_z must match |z|
         if not np.allclose(abs_zs, np.abs(zs), rtol=1e-3, atol=1e-3):
@@ -485,9 +524,15 @@ def _validate_hybrid_store(
     _validate_overflow(store_path, ragged_path, n_shared, errors)
     if errors:
         return ValidationResult(errors=errors)
-
     # 4. Hybrid cross-component invariants (coverage + disjoint partition).
     _validate_hybrid_invariants(store_path, dense_dir, n_shared, errors)
+    if errors:
+        return ValidationResult(errors=errors)
+
+    # 5. Overflow top-hit addressing and CSR consistency.
+    data_root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+    if "top_hits" in data_root:
+        _validate_ragged_top_hits(store_path, data_root, errors)
     return ValidationResult(errors=errors)
 
 

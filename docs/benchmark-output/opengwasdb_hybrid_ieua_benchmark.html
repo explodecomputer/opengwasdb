@@ -6,7 +6,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
-<meta name="dcterms.date" content="2026-07-10">
+<meta name="dcterms.date" content="2026-08-04">
 
 <title>OpenGWASDB Hybrid Layout — Hybrid vs Dense-of-union</title>
 <style>
@@ -2198,7 +2198,7 @@ vertical-align: -.125em;
     <div>
     <div class="quarto-title-meta-heading">Published</div>
     <div class="quarto-title-meta-contents">
-      <p class="date">July 10, 2026</p>
+      <p class="date">August 4, 2026</p>
     </div>
   </div>
   
@@ -2350,9 +2350,9 @@ vertical-align: -.125em;
 </tr>
 <tr class="even">
 <td>tophits</td>
-<td>2.6 ms</td>
+<td>2.4 ms</td>
 <td>1.7 ms</td>
-<td>Genome-wide significant index read (<code>top_hits</code>)</td>
+<td><code>ieu-a-300</code> significant hits from addressed Dense + overflow slices</td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
@@ -2363,6 +2363,7 @@ vertical-align: -.125em;
 </tbody>
 </table>
 <p>On-panel point queries are served by the Dense Component and stay in the low-millisecond range; the Hybrid facade adds only a dispatch + concatenate over the two components. Off-panel PheWAS inherits the ragged O(n) scan (a variant-centric overflow index is deferred, ADR 0026).</p>
+<p>Hybrid <code>top_hits(analysis_id=...)</code> delegates the selector to both component indexes, remaps Dense component rows to the shared variant axis, and merges in genomic order without materialising either global tier. For <code>ieu-a-300</code>, the selected query returned 7,909 hits in <strong>2.36 ms</strong> median (2.46 ms p95), versus the previous 2.61 ms global read over 14,753 hits. The modest <strong>1.1×</strong> speedup is expected for this three-analysis fixture; importantly, the selected path did not regress and exactly matched the corresponding global subset. Rebuilding the completed fixture took 6.72 seconds for the Dense component and 0.09 seconds for the overflow index.</p>
 <hr>
 </section>
 <section id="mr-validation-imputed-only-positive-controls" class="level2">
@@ -2393,7 +2394,7 @@ vertical-align: -.125em;
 </tbody>
 </table>
 <p>The imputed-only estimates are <strong>positive</strong> for LDL cholesterol → CAD, BMI → CAD — the expected direction, and consistent with the observed-only estimate. The completed Hybrid store’s imputed dense cells reproduce the causal signal.</p>
-<div id="69455b14" class="cell" data-execution_count="8">
+<div id="d25160ee" class="cell" data-execution_count="8">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">
@@ -2413,7 +2414,7 @@ vertical-align: -.125em;
 <li><strong>Region</strong>: chr19:44,409,976-45,409,976 (centre z=58.03)</li>
 <li><strong>Associations plotted</strong>: 3,962 total; 591 observed, 3,371 imputed.</li>
 </ul>
-<div id="39301ef2" class="cell" data-execution_count="10">
+<div id="b000cdbf" class="cell" data-execution_count="10">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">

@@ -214,6 +214,19 @@ class TestValidation:
 
 
 class TestQuery:
+    def test_selected_top_hits_match_global_and_filter_imputed(self, completed_store):
+        q = query_store(completed_store)
+        global_result = q.top_hits(threshold=5e-4)
+        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=5e-4)
+        observed = q.top_hits(
+            analysis_id="ENSG00000000001", threshold=5e-4, observed_only=True
+        )
+        expected = global_result["analysis_index"] == 0
+        for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
+            np.testing.assert_array_equal(selected[name], global_result[name][expected])
+        assert "imputed" not in set(observed["association_status"].tolist())
+        q.close()
+
     def test_analysis_returns_imputed_by_default(self, completed_store):
         q = query_store(completed_store)
         result = q.analysis("ENSG00000000001")

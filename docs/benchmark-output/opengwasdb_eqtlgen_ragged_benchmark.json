@@ -129,49 +129,62 @@
     "region_chrom": "6",
     "region_end": 32795752,
     "region_start": 30795752,
+    "top_hit_analysis_id": "ENSG00000198502",
     "top_hit_threshold": 5e-08
   },
   "storage": {
-    "compression_ratio": 1.757,
+    "compression_ratio": 1.486,
     "source_bytes": 2329134078,
     "source_mb": 2329.13,
-    "store_bytes": 1325540176,
-    "store_mb": 1325.54
+    "store_bytes": 1567772558,
+    "store_mb": 1567.77
+  },
+  "top_hit_experiment": {
+    "analysis_id": "ENSG00000198502",
+    "threshold": 5e-08,
+    "repetitions": 5,
+    "baseline_global_index_median_ms": 146.947,
+    "selected_median_ms": 1.709,
+    "selected_p95_ms": 1.796,
+    "result_count": 10,
+    "speedup": 85.98,
+    "rebuild_seconds": 12.116,
+    "matches_global_subset": true
   },
   "timings": [
     {
-      "median_ms": 2.339,
-      "p95_ms": 2.668,
+      "median_ms": 3.732,
+      "p95_ms": 3.951,
       "query": "analysis",
       "result_count": 33744
     },
     {
-      "median_ms": 131.184,
-      "p95_ms": 152.966,
-      "query": "range_by_probe",
+      "median_ms": 311.133,
+      "p95_ms": 325.408,
+      "query": "range_by_analysis",
       "result_count": 2059387
     },
     {
-      "median_ms": 2000.154,
-      "p95_ms": 2032.296,
-      "query": "range",
+      "median_ms": 1091.282,
+      "p95_ms": 1113.242,
+      "query": "range_phewas",
       "result_count": 2624081
     },
     {
-      "median_ms": 1243.01,
-      "p95_ms": 1426.938,
+      "median_ms": 687.928,
+      "p95_ms": 755.847,
       "query": "phewas",
       "result_count": 108
     },
     {
-      "median_ms": 146.947,
-      "p95_ms": 222.623,
+      "median_ms": 1.709,
+      "p95_ms": 1.796,
       "query": "tophits",
       "result_count": 10
     },
     {
-      "median_ms": 40.659,
-      "p95_ms": 41.785,
+      "median_ms": 36.228,
+      "p95_ms": 36.443,
       "query": "random_lookup",
       "result_count": 1
     }
