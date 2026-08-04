@@ -49,9 +49,9 @@
     },
     {
       "query": "tophits",
-      "median_ms": 499.623,
-      "p95_ms": 596.35,
-      "result_count": 5493678
+      "median_ms": 304.436,
+      "p95_ms": 438.237,
+      "result_count": 7390
     },
     {
       "query": "random_lookup",

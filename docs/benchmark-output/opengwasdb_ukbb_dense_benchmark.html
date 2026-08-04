@@ -6,7 +6,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
-<meta name="dcterms.date" content="2026-07-06">
+<meta name="dcterms.date" content="2026-08-04">
 
 <title>OpenGWASDB ukb-b Dense Store — Performance &amp; Validation</title>
 <style>
@@ -2199,7 +2199,7 @@ vertical-align: -.125em;
     <div>
     <div class="quarto-title-meta-heading">Published</div>
     <div class="quarto-title-meta-contents">
-      <p class="date">July 6, 2026</p>
+      <p class="date">August 4, 2026</p>
     </div>
   </div>
   
@@ -2336,7 +2336,7 @@ vertical-align: -.125em;
 <th>Pattern</th>
 <th>Observed median</th>
 <th>Completed median</th>
-<th>Ratio</th>
+<th>Completed / observed</th>
 <th>Result cells</th>
 <th>What it reads</th>
 </tr>
@@ -2368,11 +2368,11 @@ vertical-align: -.125em;
 </tr>
 <tr class="even">
 <td>tophits</td>
-<td>499.6 ms</td>
-<td>606.6 ms</td>
-<td>1.21×</td>
-<td>5,493,678 → 6,441,285</td>
-<td>Genome-wide significant index read (<code>top_hits</code>, p&lt;5e-8)</td>
+<td>304.4 ms</td>
+<td>397.9 ms</td>
+<td>1.31×</td>
+<td>7,390 → 8,580</td>
+<td>Significant hits for <code>ukb-b-10912</code> (filter of global <code>top_hits</code> index, p&lt;5e-8)</td>
 </tr>
 <tr class="odd">
 <td>random_lookup</td>
@@ -2384,7 +2384,7 @@ vertical-align: -.125em;
 </tr>
 </tbody>
 </table>
-<p>Point and index queries (<code>phewas</code>, <code>top_hits</code>, <code>lookup</code>) stay in the low-millisecond range even across 2,514 analyses; <code>bulk</code> and <code>regional</code> scale with the number of cells returned. The reference-completed <code>top_hits</code> path is also served entirely by the precomputed index: the top-hit index now stores the <code>imputed</code> flag alongside <code>z</code>/<code>se</code>, avoiding millions of random reads into <code>data.zarr/imputed</code>.</p>
+<p><code>phewas</code> is a low-millisecond point query. <code>bulk</code> and <code>regional</code> scale with the number of cells returned. The <code>top_hits</code> row returns hits for one analysis, but the current index is global: the query first materialises all pre-indexed significant associations and then filters to <code>ukb-b-10912</code>. Its latency therefore reflects the 5.5–6.4 million-entry global index read, not merely the 7–9 thousand cells returned. The reference-completed index stores the <code>imputed</code> flag alongside <code>z</code>/<code>se</code>, avoiding millions of random reads into <code>data.zarr/imputed</code>.</p>
 <hr>
 </section>
 <section id="mr-validation-imputed-high-cholesterol-heart-attack" class="level2">
@@ -2429,7 +2429,7 @@ vertical-align: -.125em;
 </tbody>
 </table>
 <p>The imputed-only estimate is <strong>positive</strong> — genetically higher cholesterol liability is associated with higher heart-attack risk, the expected direction for this positive-control sanity check.</p>
-<div id="bbd6cfbe" class="cell" data-execution_count="8">
+<div id="73a15b4c" class="cell" data-execution_count="8">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">
@@ -2449,7 +2449,7 @@ vertical-align: -.125em;
 <li><strong>Region</strong>: chr19:44,409,976-45,409,976 centred on <code>19:44909976:G:T</code> (z=28.53)</li>
 <li><strong>Associations plotted</strong>: 4,017 total; 3,302 observed and 715 imputed.</li>
 </ul>
-<div id="9c2d834a" class="cell" data-execution_count="10">
+<div id="675d3168" class="cell" data-execution_count="10">
 <div class="cell-output cell-output-display">
 <div class="quarto-figure quarto-figure-center">
 <figure class="figure">

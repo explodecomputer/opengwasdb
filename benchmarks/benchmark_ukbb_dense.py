@@ -57,6 +57,18 @@ def _median_ms(fn, reps: int) -> tuple[float, float, int]:
     return med, p95, count
 
 
+def _analysis_top_hits(q, analysis_index: int) -> dict[str, np.ndarray]:
+    """Return genome-wide significant hits for one analysis.
+
+    The current top-hit index is global, so selecting an analysis is a filter
+    over the indexed result. Keeping this in the benchmark makes the measured
+    access pattern match the usual user query without disguising that cost.
+    """
+    result = q.top_hits(threshold=5e-8)
+    keep = result["analysis_index"] == analysis_index
+    return {name: values[keep] for name, values in result.items()}
+
+
 def _dir_bytes(path: Path) -> int:
     out = subprocess.run(["du", "-sb", str(path)], capture_output=True, text=True, check=True)
     return int(out.stdout.split()[0])
@@ -282,7 +294,7 @@ def main() -> None:
         "bulk": lambda: q.analysis(EXPOSURE),
         "phewas": lambda: q.phewas(phewas_alid),
         "regional": lambda: q.range_phewas(*REGION),
-        "tophits": lambda: q.top_hits(threshold=5e-8),
+        "tophits": lambda: _analysis_top_hits(q, analyses_by_id[EXPOSURE]),
         "random_lookup": lambda: q.lookup(rand_alids, rand_analyses),
     }
     timings = []

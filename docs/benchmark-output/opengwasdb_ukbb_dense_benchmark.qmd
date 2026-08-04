@@ -124,7 +124,7 @@ DESC = {
     "bulk": "One analysis, all variants (`analysis`)",
     "phewas": "One variant × all 2,514 analyses (`phewas`)",
     "regional": "All associations in a 1 Mb window (`range_phewas`)",
-    "tophits": "Genome-wide significant index read (`top_hits`, p<5e-8)",
+    "tophits": "Significant hits for `ukb-b-10912` (filter of global `top_hits` index, p<5e-8)",
     "random_lookup": "100 variants × 10 analyses (`lookup`)",
 }
 rows = []
@@ -142,16 +142,18 @@ for name in obs_t:
         DESC.get(name, ""),
     ))
 print(md_table([
-    "Pattern", "Observed median", "Completed median", "Ratio",
+    "Pattern", "Observed median", "Completed median", "Completed / observed",
     "Result cells", "What it reads",
 ], rows))
 ```
 
-Point and index queries (`phewas`, `top_hits`, `lookup`) stay in the low-millisecond
-range even across 2,514 analyses; `bulk` and `regional` scale with the number of
-cells returned. The reference-completed `top_hits` path is also served entirely
-by the precomputed index: the top-hit index now stores the `imputed` flag
-alongside `z`/`se`, avoiding millions of random reads into `data.zarr/imputed`.
+`phewas` is a low-millisecond point query. `bulk` and `regional` scale with the
+number of cells returned. The `top_hits` row returns hits for one analysis, but
+the current index is global: the query first materialises all pre-indexed
+significant associations and then filters to `ukb-b-10912`. Its latency therefore
+reflects the 5.5–6.4 million-entry global index read, not merely the 7–9 thousand
+cells returned. The reference-completed index stores the `imputed` flag alongside
+`z`/`se`, avoiding millions of random reads into `data.zarr/imputed`.
 
 ---
 
