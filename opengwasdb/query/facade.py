@@ -9,7 +9,7 @@ import numpy as np
 import zarr
 
 from opengwasdb.index import analysis_by_id, connect
-from opengwasdb.layouts.dense.top_hits import threshold_key
+from opengwasdb.layouts.dense.top_hits import DenseTopHitReader, threshold_key
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
@@ -248,21 +248,30 @@ class StoreQuery:
     def top_hits(
         self,
         *,
+        analysis_id: str | None = None,
         threshold: float = 5e-8,
         limit: int | None = None,
         observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
-        """Return ranked top-hit associations using the dense top-hit index."""
+        """Return genomic-order top hits, optionally for one analysis."""
         key = threshold_key(threshold)
         path = f"top_hits/{key}"
         if path not in self._root:
             return _empty_result()
         group = self._root[path]
-        variant_indices = group["variant_index"][:].astype("int32")
-        analysis_indices = group["analysis_index"][:].astype("int32")
-        z_values = group["z"][:].astype("float32")
+        analysis_index: int | None = None
+        if analysis_id is not None:
+            analysis = analysis_by_id(self._connection, analysis_id)
+            if analysis is None or "analysis_offsets" not in group:
+                return _empty_result()
+            analysis_index = int(analysis["analysis_index"])
+        reader = DenseTopHitReader(group)
+        bounds = reader.bounds(analysis_index)
+        variant_indices = reader.read("variant_index", bounds, "int32")
+        analysis_indices = reader.read("analysis_index", bounds, "int32")
+        z_values = reader.read("z", bounds, "float32")
         if "se" in group:
-            se_values = group["se"][:].astype("float32")
+            se_values = reader.read("se", bounds, "float32")
         else:
             # Pointwise (coordinate) read: fetch se at exactly the index cells,
             # not the full analysis width per row (issue 052).
@@ -270,7 +279,7 @@ class StoreQuery:
                 variant_indices.astype("int64"), analysis_indices.astype("int64")
             ].astype("float32")
         if "imputed" in group:
-            imp = group["imputed"][:].astype(np.uint8)
+            imp = reader.read("imputed", bounds, "uint8")
         else:
             imp = self._imputed_pairs(variant_indices, analysis_indices)
         if observed_only:

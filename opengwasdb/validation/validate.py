@@ -772,23 +772,58 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
     for key in top:
         group = top[key]
         threshold = float(group.attrs.get("threshold", key.replace("p_", "").replace("_", "-")))
+        required = {
+            "analysis_offsets", "variant_index", "analysis_index", "abs_z",
+            "z", "se", "p_value",
+        }
+        missing = sorted(required.difference(group.keys()))
+        if missing:
+            errors.append(f"top-hit index {key} is missing {', '.join(missing)}")
+            continue
         rows = group["variant_index"][:].astype(np.int64)
         cols = group["analysis_index"][:].astype(np.int64)
         z_values = group["z"][:].astype("float32")
         abs_z = group["abs_z"][:].astype("float32")
+        offsets = group["analysis_offsets"][:].astype(np.int64)
         imputed_values = (
             group["imputed"][:].astype(np.uint8) if "imputed" in group else None
         )
+        if imputed_arr is not None and imputed_values is None:
+            errors.append(f"top-hit index {key} is missing imputed completion status")
+            continue
         if (
             len(rows) != len(cols)
             or len(rows) != len(z_values)
             or len(rows) != len(abs_z)
+            or len(rows) != len(group["se"])
+            or len(rows) != len(group["p_value"])
             or (imputed_values is not None and len(rows) != len(imputed_values))
         ):
             errors.append(f"top-hit index {key} has inconsistent array lengths")
             continue
-        if len(abs_z) > 1 and np.any(abs_z[:-1] < abs_z[1:]):
-            errors.append(f"top-hit index {key} is not ranked by descending significance")
+        if (
+            len(offsets) != n_analyses + 1
+            or len(offsets) == 0
+            or offsets[0] != 0
+            or np.any(offsets[:-1] > offsets[1:])
+            or offsets[-1] != len(rows)
+        ):
+            errors.append(f"top-hit index {key} has invalid analysis offsets")
+            continue
+        ordered = True
+        for analysis_index in range(n_analyses):
+            start, stop = int(offsets[analysis_index]), int(offsets[analysis_index + 1])
+            if np.any(cols[start:stop] != analysis_index):
+                ordered = False
+                break
+            if stop - start > 1 and np.any(rows[start : stop - 1] >= rows[start + 1 : stop]):
+                ordered = False
+                break
+        if not ordered:
+            errors.append(f"top-hit index {key} has incorrect or non-genomic analysis slices")
+            continue
+        if imputed_values is not None and not np.all((imputed_values == 0) | (imputed_values == 1)):
+            errors.append(f"top-hit index {key} has invalid imputed completion status")
             continue
         if len(rows):
             flat = rows * n_analyses + cols

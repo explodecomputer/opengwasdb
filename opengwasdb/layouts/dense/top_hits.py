@@ -12,6 +12,28 @@ from scipy.special import erfc, erfcinv  # type: ignore[import-untyped]
 
 from opengwasdb.layouts.dense.constants import TOP_HIT_THRESHOLDS
 
+TOP_HIT_CHUNK_SIZE = 16_384
+
+
+class DenseTopHitReader:
+    """Address one threshold tier without exposing its physical arrays."""
+
+    def __init__(self, group: zarr.Group):
+        self.group = group
+
+    def bounds(self, analysis_index: int | None) -> tuple[int, int]:
+        if analysis_index is None:
+            return 0, int(self.group["z"].shape[0])
+        offsets = self.group["analysis_offsets"]
+        if analysis_index < 0 or analysis_index + 1 >= int(offsets.shape[0]):
+            return 0, 0
+        pair = offsets[analysis_index : analysis_index + 2]
+        return int(pair[0]), int(pair[1])
+
+    def read(self, name: str, bounds: tuple[int, int], dtype: str) -> np.ndarray:
+        start, stop = bounds
+        return np.asarray(self.group[name][start:stop], dtype=dtype)
+
 
 def threshold_key(threshold: float) -> str:
     """Stable Zarr group key for a p-value threshold."""
@@ -39,6 +61,7 @@ def write_top_hit_indexes(
     se: np.ndarray,
     thresholds: tuple[float, ...] = TOP_HIT_THRESHOLDS,
     imputed: np.ndarray | None = None,
+    chunk_size: int = TOP_HIT_CHUNK_SIZE,
 ) -> None:
     """Write ranked top-hit groups from pre-collected candidate cells.
 
@@ -47,7 +70,7 @@ def write_top_hit_indexes(
     every threshold are harmless; each tier re-filters by its own ``z_critical``.
     Because candidates are a tiny fraction of a dense matrix, only the
     significant cells are ever held in memory — there is no full-matrix scan
-    here. Cells are ranked within each analysis by descending ``|z|``. When
+    here. Cells are ordered by analysis index and canonical genomic position. When
     present, ``imputed`` is written in the same order so completed-store queries
     can label top hits without random reads back into ``data.zarr/imputed``.
     """
@@ -61,6 +84,7 @@ def write_top_hit_indexes(
 
     root = zarr.open_group(str(Path(store_path) / "data.zarr"), mode="a")
     top = root.require_group("top_hits")
+    n_analyses = int(root["z"].shape[1])
     compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 
     for threshold in thresholds:
@@ -76,7 +100,7 @@ def write_top_hit_indexes(
         kept_se = se[keep]
         kept_imputed = None if imputed_values is None else imputed_values[keep]
         kept_p = erfc(kept_abs_z.astype("float64") / math.sqrt(2.0))
-        order = np.lexsort((kept_cols, kept_rows, -kept_abs_z))
+        order = np.lexsort((kept_rows, kept_cols))
         kept_rows = kept_rows[order]
         kept_cols = kept_cols[order]
         kept_abs_z = kept_abs_z[order]
@@ -84,7 +108,18 @@ def write_top_hit_indexes(
         kept_se = kept_se[order]
         kept_imputed = None if kept_imputed is None else kept_imputed[order]
         kept_p = kept_p[order]
-        chunk = max(1, min(len(kept_rows), 100_000))
+        offsets = np.empty(n_analyses + 1, dtype="uint64")
+        offsets[0] = 0
+        np.cumsum(
+            np.bincount(kept_cols, minlength=n_analyses),
+            dtype=np.uint64,
+            out=offsets[1:],
+        )
+        chunk = max(1, min(len(kept_rows), chunk_size))
+        group.create_dataset(
+            "analysis_offsets", data=offsets, chunks=(len(offsets),),
+            compressor=compressor, dtype="uint64"
+        )
         group.create_dataset(
             "variant_index", data=kept_rows, chunks=(chunk,), compressor=compressor, dtype="uint32"
         )
@@ -112,6 +147,7 @@ def write_top_hit_indexes(
                 dtype="uint8",
             )
         group.attrs["threshold"] = threshold
+        group.attrs["order"] = "analysis_index,variant_index"
     top.attrs["thresholds"] = list(thresholds)
 
 

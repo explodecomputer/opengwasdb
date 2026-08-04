@@ -75,14 +75,22 @@ def test_query_facade_supports_variant_range_analysis_phewas_top_hits_and_metada
 
     # range: variants 0 and 1 are in [1, 250]; variant 1 missing a2 → 3 cells
     range_res = query.range_phewas("1", 1, 250)
-    cells = sorted(zip(range_res["variant_index"].tolist(), range_res["analysis_index"].tolist()))
+    cells = sorted(
+        zip(
+            range_res["variant_index"].tolist(),
+            range_res["analysis_index"].tolist(),
+            strict=True,
+        )
+    )
     assert cells == [(0, 0), (0, 1), (1, 0)]
 
     # analysis: a1 has cells for variants 0 and 1 only
     a1 = query.analysis("a1")
     assert sorted(a1["variant_index"].tolist()) == [0, 1]
     assert (a1["analysis_index"] == 0).all()
-    z_by_vi = {v: z for v, z in zip(a1["variant_index"].tolist(), a1["z"].tolist())}
+    z_by_vi = {
+        v: z for v, z in zip(a1["variant_index"].tolist(), a1["z"].tolist(), strict=True)
+    }
     assert z_by_vi[0] == pytest.approx(2.0, rel=5e-3)
     assert z_by_vi[1] == pytest.approx(-3.0, rel=5e-3)
 
@@ -95,6 +103,13 @@ def test_query_facade_supports_variant_range_analysis_phewas_top_hits_and_metada
     assert len(top_hits["z"]) == 2
     assert all(abs(z) >= 6.0 for z in top_hits["z"])
     assert (top_hits["analysis_index"] == 1).all()
+
+    # Analysis-addressed top hits use the same sparse result contract and
+    # return only that analysis's genomic-order slice.
+    a2_top_hits = query.top_hits(analysis_id="a2", threshold=5e-8, limit=1)
+    assert a2_top_hits["variant_index"].tolist() == [0]
+    assert a2_top_hits["analysis_index"].tolist() == [1]
+    assert query.top_hits(analysis_id="unknown", threshold=5e-8)["z"].size == 0
 
     # metadata accessors
     variants = query.variants_table()

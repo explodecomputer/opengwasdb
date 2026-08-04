@@ -124,7 +124,7 @@ DESC = {
     "bulk": "One analysis, all variants (`analysis`)",
     "phewas": "One variant × all 2,514 analyses (`phewas`)",
     "regional": "All associations in a 1 Mb window (`range_phewas`)",
-    "tophits": "Significant hits for `ukb-b-10912` (filter of global `top_hits` index, p<5e-8)",
+    "tophits": "Significant hits for `ukb-b-10912` (addressed index slice, p<5e-8)",
     "random_lookup": "100 variants × 10 analyses (`lookup`)",
 }
 rows = []
@@ -147,13 +147,58 @@ print(md_table([
 ], rows))
 ```
 
-`phewas` is a low-millisecond point query. `bulk` and `regional` scale with the
-number of cells returned. The `top_hits` row returns hits for one analysis, but
-the current index is global: the query first materialises all pre-indexed
-significant associations and then filters to `ukb-b-10912`. Its latency therefore
-reflects the 5.5–6.4 million-entry global index read, not merely the 7–9 thousand
-cells returned. The reference-completed index stores the `imputed` flag alongside
-`z`/`se`, avoiding millions of random reads into `data.zarr/imputed`.
+`phewas` and the analysis-addressed `top_hits` call are low-millisecond point
+queries. `bulk` and `regional` scale with the number of cells returned. Top-hit
+tiers are packed by analysis index and canonical genomic position, with an
+offset table mapping each analysis directly to one contiguous slice. The
+reference-completed index stores the `imputed` flag alongside `z`/`se`, avoiding
+random reads into `data.zarr/imputed`.
+
+### Analysis-major top-hit experiment
+
+The previous implementation materialised the complete 5.5–6.4 million-entry
+tier and filtered it in Python. The experiment below holds the analysis,
+threshold, result ordering, and result count constant while varying only the
+one-dimensional Zarr chunk length. Each figure is based on 10 timed warm-cache
+repetitions after a warm-up. “First read” is reported separately as the first
+call after reopening the store; it is not claimed to be a controlled cold-cache
+measurement.
+
+```{python}
+#| echo: false
+#| output: asis
+for label, result in (("Observed-Only", data), ("Reference-Completed", completed)):
+    experiment = result["top_hit_experiment"]
+    rows = [
+        (
+            f"{trial['chunk_size']:,}",
+            fmt_ms(trial["first_read_ms"]),
+            fmt_ms(trial["median_ms"]),
+            fmt_ms(trial["p95_ms"]),
+            fmt_ms(trial["global_median_ms"]),
+            f"{trial['index_bytes'] / 1e6:,.1f} MB",
+            f"{trial['repack_seconds']:,.1f} s",
+        )
+        for trial in experiment["trials"]
+    ]
+    print(f"#### {label}")
+    print()
+    print(md_table(
+        ["Chunk", "First read", "Selected median", "Selected p95",
+         "Global median", "Index size", "Repack"],
+        rows,
+    ))
+    print()
+```
+
+The selected **16,384-entry chunk** keeps the completed selected-analysis read
+within 10% of its absolute fastest trial while materially improving global-read
+latency; it is also the fastest configuration for the observed store. Observed
+latency fell from **304.4 ms to 1.17 ms** (**261×**), and completed latency from
+**397.9 ms to 1.77 ms** (**225×**). Both comfortably meet the under-10-ms target,
+and every measured selected result exactly matched its corresponding global
+subset. The indexes grew to 692.7 MB and 803.1 MB respectively; this experiment
+deliberately prioritised latency over space.
 
 ---
 

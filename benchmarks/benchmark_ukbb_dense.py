@@ -21,7 +21,9 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import zarr
 
+from opengwasdb.layouts.dense.top_hits import threshold_key, write_top_hit_indexes
 from opengwasdb.query import query_store
 
 STORE = Path("/local-scratch/data/opengwas/opengwasdb/ukb-b.opengwasdb")
@@ -57,16 +59,101 @@ def _median_ms(fn, reps: int) -> tuple[float, float, int]:
     return med, p95, count
 
 
-def _analysis_top_hits(q, analysis_index: int) -> dict[str, np.ndarray]:
-    """Return genome-wide significant hits for one analysis.
-
-    The current top-hit index is global, so selecting an analysis is a filter
-    over the indexed result. Keeping this in the benchmark makes the measured
-    access pattern match the usual user query without disguising that cost.
-    """
+def _legacy_analysis_top_hits(q, analysis_index: int) -> dict[str, np.ndarray]:
+    """Previous behavior: materialise the global tier, then filter it."""
     result = q.top_hits(threshold=5e-8)
     keep = result["analysis_index"] == analysis_index
     return {name: values[keep] for name, values in result.items()}
+
+
+def _top_hit_index_bytes(store: Path) -> int:
+    return _dir_bytes(store / "data.zarr" / "top_hits")
+
+
+def _repack_top_hits(store: Path, chunk_size: int) -> float:
+    """Repack from the loosest existing tier, avoiding a dense-matrix rescan."""
+    root = zarr.open_group(str(store / "data.zarr"), mode="r")
+    group = root[f"top_hits/{threshold_key(5e-4)}"]
+    rows = group["variant_index"][:]
+    cols = group["analysis_index"][:]
+    z_values = group["z"][:]
+    se_values = group["se"][:]
+    imputed = group["imputed"][:] if "imputed" in group else None
+    del group, root
+    started = time.perf_counter()
+    write_top_hit_indexes(
+        store, rows, cols, z_values, se_values, imputed=imputed, chunk_size=chunk_size
+    )
+    return time.perf_counter() - started
+
+
+def run_top_hit_experiment(store: Path, output: Path, reps: int) -> None:
+    """Evaluate narrow-slice chunks and update an existing benchmark result."""
+    previous = json.loads(output.read_text())
+    baseline = next(row for row in previous["timings"] if row["query"] == "tophits")
+    trials = []
+    for chunk_size in (1_024, 4_096, 16_384):
+        rebuild_seconds = _repack_top_hits(store, chunk_size)
+        q = query_store(store)
+        analysis_index = next(
+            index for index, row in q.analyses_table().items() if row["analysis_id"] == EXPOSURE
+        )
+        started = time.perf_counter()
+        first = q.top_hits(analysis_id=EXPOSURE, threshold=5e-8)
+        first_ms = (time.perf_counter() - started) * 1_000
+        median_ms, p95_ms, count = _median_ms(
+            lambda query=q: query.top_hits(analysis_id=EXPOSURE, threshold=5e-8), reps
+        )
+        global_ms, _, _ = _median_ms(
+            lambda query=q: query.top_hits(threshold=5e-8), reps
+        )
+        global_result = q.top_hits(threshold=5e-8)
+        keep = global_result["analysis_index"] == analysis_index
+        correct = all(
+            np.array_equal(first[name], global_result[name][keep]) for name in first
+        )
+        q.close()
+        trial = {
+            "chunk_size": chunk_size,
+            "first_read_ms": round(first_ms, 3),
+            "median_ms": round(median_ms, 3),
+            "p95_ms": round(p95_ms, 3),
+            "global_median_ms": round(global_ms, 3),
+            "result_count": count,
+            "repack_seconds": round(rebuild_seconds, 3),
+            "index_bytes": _top_hit_index_bytes(store),
+            "matches_global_subset": correct,
+        }
+        trials.append(trial)
+        print(f"top-hits chunk={chunk_size:,}: median={median_ms:.3f} ms global={global_ms:.1f} ms")
+
+    fastest = min(trial["median_ms"] for trial in trials)
+    # Narrow reads are the priority; among configurations within 10% of the
+    # fastest narrow read, retain the one that least penalises global reads.
+    eligible = [trial for trial in trials if trial["median_ms"] <= fastest * 1.10]
+    selected_trial = min(eligible, key=lambda trial: trial["global_median_ms"])
+    selected_chunk = selected_trial["chunk_size"]
+    # Leave the physical store in the measured winning configuration.
+    if trials[-1]["chunk_size"] != selected_chunk:
+        _repack_top_hits(store, selected_chunk)
+    selected = selected_trial
+    previous["top_hit_experiment"] = {
+        "analysis_id": EXPOSURE,
+        "threshold": 5e-8,
+        "repetitions": reps,
+        "baseline_global_filter_median_ms": baseline["median_ms"],
+        "selected_chunk_size": selected_chunk,
+        "selected": selected,
+        "speedup": round(baseline["median_ms"] / selected["median_ms"], 2),
+        "target_ms": 10.0,
+        "meets_target": selected["median_ms"] < 10.0,
+        "trials": trials,
+    }
+    baseline.update({
+        "median_ms": selected["median_ms"], "p95_ms": selected["p95_ms"],
+        "result_count": selected["result_count"],
+    })
+    output.write_text(json.dumps(previous, indent=2) + "\n")
 
 
 def _dir_bytes(path: Path) -> int:
@@ -268,7 +355,12 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--store", type=Path, default=STORE)
     ap.add_argument("--output", type=Path, default=OUTPUT)
+    ap.add_argument("--top-hits-experiment", action="store_true")
     args = ap.parse_args()
+
+    if args.top_hits_experiment:
+        run_top_hit_experiment(args.store, args.output, args.reps)
+        return
 
     q = query_store(args.store)
     an = q.analyses_table()
@@ -294,7 +386,7 @@ def main() -> None:
         "bulk": lambda: q.analysis(EXPOSURE),
         "phewas": lambda: q.phewas(phewas_alid),
         "regional": lambda: q.range_phewas(*REGION),
-        "tophits": lambda: _analysis_top_hits(q, analyses_by_id[EXPOSURE]),
+        "tophits": lambda: q.top_hits(analysis_id=EXPOSURE, threshold=5e-8),
         "random_lookup": lambda: q.lookup(rand_alids, rand_analyses),
     }
     timings = []

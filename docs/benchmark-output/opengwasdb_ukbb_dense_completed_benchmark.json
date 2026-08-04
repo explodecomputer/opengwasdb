@@ -49,8 +49,8 @@
     },
     {
       "query": "tophits",
-      "median_ms": 397.889,
-      "p95_ms": 559.485,
+      "median_ms": 1.768,
+      "p95_ms": 1.8,
       "result_count": 8580
     },
     {
@@ -32764,5 +32764,61 @@
   "labels": {
     "ukb-b-10912": "Non-cancer illness code, self-reported: high cholesterol",
     "ukb-b-11590": "Vascular/heart problems diagnosed by doctor: Heart attack"
+  },
+  "top_hit_experiment": {
+    "analysis_id": "ukb-b-10912",
+    "threshold": 5e-08,
+    "repetitions": 10,
+    "baseline_global_filter_median_ms": 397.889,
+    "selected_chunk_size": 16384,
+    "selected": {
+      "chunk_size": 16384,
+      "first_read_ms": 2.494,
+      "median_ms": 1.768,
+      "p95_ms": 1.8,
+      "global_median_ms": 608.941,
+      "result_count": 8580,
+      "repack_seconds": 19.526,
+      "index_bytes": 803130825,
+      "matches_global_subset": true
+    },
+    "speedup": 225.05,
+    "target_ms": 10.0,
+    "meets_target": true,
+    "trials": [
+      {
+        "chunk_size": 1024,
+        "first_read_ms": 3.348,
+        "median_ms": 2.833,
+        "p95_ms": 2.972,
+        "global_median_ms": 1616.721,
+        "result_count": 8580,
+        "repack_seconds": 91.636,
+        "index_bytes": 851581975,
+        "matches_global_subset": true
+      },
+      {
+        "chunk_size": 4096,
+        "first_read_ms": 2.295,
+        "median_ms": 1.704,
+        "p95_ms": 1.732,
+        "global_median_ms": 820.314,
+        "result_count": 8580,
+        "repack_seconds": 43.82,
+        "index_bytes": 814017165,
+        "matches_global_subset": true
+      },
+      {
+        "chunk_size": 16384,
+        "first_read_ms": 2.494,
+        "median_ms": 1.768,
+        "p95_ms": 1.8,
+        "global_median_ms": 608.941,
+        "result_count": 8580,
+        "repack_seconds": 19.526,
+        "index_bytes": 803130825,
+        "matches_global_subset": true
+      }
+    ]
   }
 }

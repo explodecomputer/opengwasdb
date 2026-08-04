@@ -61,6 +61,18 @@ def test_validator_rejects_inconsistent_top_hit_index(dense_store_path):
     assert any("top-hit index p_5e_08" in error for error in result.errors)
 
 
+def test_validator_rejects_invalid_top_hit_offsets(dense_store_path):
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r+")
+    offsets = root["top_hits/p_5e_08/analysis_offsets"][:]
+    offsets[-1] -= 1
+    root["top_hits/p_5e_08/analysis_offsets"][:] = offsets
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("invalid analysis offsets" in error for error in result.errors)
+
+
 def test_validator_rejects_missing_variant_axis_file(dense_store_path):
     (dense_store_path / "variants.tsv.gz").unlink()
 

@@ -371,6 +371,23 @@ class TestQuery:
         assert "imputed" not in set(result["association_status"].tolist())
         q.close()
 
+    def test_analysis_top_hits_match_global_subset_and_use_indexed_status(self, completed_store):
+        q = query_store(completed_store)
+        global_result = q.top_hits(threshold=5e-4)
+        expected = global_result["analysis_index"] == 0
+
+        def fail_imputed_pairs(rows, cols):  # noqa: ARG001
+            raise AssertionError("selected top hits must use indexed imputed flags")
+
+        q._imputed_pairs = fail_imputed_pairs
+        selected = q.top_hits(analysis_id="a1", threshold=5e-4)
+        observed = q.top_hits(analysis_id="a1", threshold=5e-4, observed_only=True)
+
+        for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
+            np.testing.assert_array_equal(selected[name], global_result[name][expected])
+        assert "imputed" not in set(observed["association_status"].tolist())
+        q.close()
+
     def test_top_hit_index_stores_imputed_flags(self, completed_store):
         from opengwasdb.layouts.dense.top_hits import threshold_key
 
