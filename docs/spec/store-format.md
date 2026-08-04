@@ -341,13 +341,46 @@ An LD Reference Panel used for Reference Completion MUST define:
 | variant list | Canonical ALIDs defining the Reference Variant Set |
 | allele orientation | Orientation compatible with Store canonical ALID convention |
 | LD blocks | Block definitions used by the completion method |
-| LD representation | Files/data structures required by the completion method |
+| LD representation | Form in which LD is stored — see below |
+| source cohort | Cohort the panel's LD was estimated from |
+| sample size | Number of individuals contributing to the LD estimate |
+| variant inclusion | Threshold governing which variants enter the panel |
 | checksums | Integrity checks for reference files |
 | provenance | Source, build, and filtering provenance for the panel |
 
 If EAF is emitted for imputed associations, the LD Reference Panel MUST provide EAF for panel variants or declare why EAF is absent.
 
 The Store Release reference assembly MUST match the LD Reference Panel reference assembly.
+
+### 13.1 LD representation
+
+A panel SHOULD store, per LD block, the **eigendecomposition** of the block's LD
+matrix — all eigenvalues plus a retained set of eigenvectors — rather than the LD
+matrix itself (ADR 0031). Reference completion consumes eigenvectors only, so the
+matrix is not required to interpret or apply a panel.
+
+The number of eigenvectors retained MUST be sufficient for the truncation the
+Reference Completion Method requests, and the panel MUST record, per block, both
+the retained count and the proportion of total eigenvalue mass it represents. A
+fixed retained count is NOT sufficient: the number of components needed to reach a
+given variance depends on the panel's sample size, so a count calibrated on one
+cohort will silently under-resolve a panel built from a smaller one. Where a
+consumer's requested truncation cannot be satisfied from the retained components,
+it MUST surface that rather than proceeding with reduced variance.
+
+Panels MAY additionally retain full LD matrices, but consumers MUST NOT require
+them when a conforming eigendecomposition is present.
+
+### 13.2 Panel power is not uniform across ancestries
+
+Panels for different ancestries may be estimated from cohorts differing by orders
+of magnitude in sample size, and a panel's LD matrix has rank at most one less
+than its sample size regardless of how many variants it spans. Reference
+completion quality therefore varies by panel construction independently of the
+quality of the Analyses being completed. Because `sample size`, `source cohort`,
+and `variant inclusion` are recorded per panel, that difference is discoverable;
+comparisons of completion quality across ancestries MUST NOT assume panels are
+equivalently powered.
 
 ## 14. Reference completion method requirements
 
@@ -372,7 +405,7 @@ The initial Reference Completion implementation should use the existing `pleiodb
 - benchmark and reference-file location notes: `https://github.com/explodecomputer/pleiodb/blob/main/scratch/imputation_benchmark.qmd`;
 - benchmarked LD panel root recorded there: `/local-scratch/projects/genotype-phenotype-map/data/ld_reference_panel_hg38/EUR`.
 
-That prior art uses LD block TSV files, `.unphased.vcor1.gz` LD matrices, optional precomputed `.ldeig.rds` eigenfactor files, and cached `.npz` extracts. These file types are implementation inputs to the Reference Completion Method and MUST be captured through LD Reference Panel and Reference Completion Method provenance when used.
+That prior art uses LD block TSV files alongside `.unphased.vcor1.gz` LD matrices, treating the eigendecomposition as a derived cache. Under §13.1 that relationship is inverted: the eigendecomposition is the primary panel artifact and the LD matrix is optional. Panels produced before that decision may still carry matrices, and a conforming reader MAY use one to derive a missing decomposition, but MUST NOT require it when a decomposition is present. These file types remain implementation inputs to the Reference Completion Method and MUST be captured through LD Reference Panel and Reference Completion Method provenance when used.
 
 ## 15. Association Status encoding
 
