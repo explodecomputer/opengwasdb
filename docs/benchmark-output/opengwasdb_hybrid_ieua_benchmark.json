@@ -47,9 +47,9 @@
       },
       {
         "query": "tophits",
-        "median_ms": 2.607,
-        "p95_ms": 3.153,
-        "result_count": 14753
+        "median_ms": 2.363,
+        "p95_ms": 2.459,
+        "result_count": 7909
       },
       {
         "query": "random_lookup",
@@ -90,6 +90,21 @@
         "result_count": 292
       }
     ]
+  },
+  "top_hit_experiment": {
+    "analysis_id": "ieu-a-300",
+    "threshold": 5e-08,
+    "repetitions": 10,
+    "baseline_global_index_median_ms": 2.607,
+    "selected_median_ms": 2.363,
+    "selected_p95_ms": 2.459,
+    "first_read_ms": 3.873,
+    "result_count": 7909,
+    "global_result_count": 14753,
+    "speedup": 1.1,
+    "dense_rebuild_seconds": 6.724,
+    "overflow_rebuild_seconds": 0.092,
+    "matches_global_subset": true
   },
   "mr": [
     {

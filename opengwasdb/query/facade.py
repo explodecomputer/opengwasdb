@@ -520,6 +520,7 @@ class RaggedStoreQuery:
     def top_hits(
         self,
         *,
+        analysis_id: str | None = None,
         threshold: float = 5e-8,
         limit: int | None = None,
         observed_only: bool = False,
@@ -533,13 +534,26 @@ class RaggedStoreQuery:
         key = threshold_key(threshold)
         root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
         path = f"top_hits/{key}"
-        if path in root and not observed_only:
+        if path in root:
             group = root[path]
-            vi = group["variant_index"][:].astype("int32")
-            ai = group["analysis_index"][:].astype("int32")
-            z = group["z"][:].astype("float32")
-            se = group["se"][:].astype("float32")
-            imp = np.zeros(len(vi), dtype=np.uint8)
+            analysis_index = None
+            if analysis_id is not None:
+                analysis_index = self._resolve_analysis_id(analysis_id)
+                if analysis_index is None or "analysis_offsets" not in group:
+                    return _empty_result()
+            reader = DenseTopHitReader(group)
+            bounds = reader.bounds(analysis_index)
+            vi = reader.read("variant_index", bounds, "int32")
+            ai = reader.read("analysis_index", bounds, "int32")
+            z = reader.read("z", bounds, "float32")
+            se = reader.read("se", bounds, "float32")
+            imp = (
+                reader.read("imputed", bounds, "uint8")
+                if "imputed" in group else np.zeros(len(vi), dtype=np.uint8)
+            )
+            if observed_only:
+                keep = imp == 0
+                vi, ai, z, se, imp = vi[keep], ai[keep], z[keep], se[keep], imp[keep]
             if limit is not None:
                 vi, ai, z, se = vi[:limit], ai[:limit], z[:limit], se[:limit]
                 imp = imp[:limit]
@@ -830,17 +844,23 @@ class HybridStoreQuery:
             overflow = _empty_result()
         return _concat_results([dense, overflow])
 
-    def _overflow_top_hits(self, threshold: float) -> dict[str, np.ndarray]:
+    def _overflow_top_hits(
+        self, threshold: float, analysis_index: int | None = None
+    ) -> dict[str, np.ndarray]:
         key = threshold_key(threshold)
         root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
         path = f"top_hits/{key}"
         if path not in root:
             return _empty_result()
         group = root[path]
-        vi = group["variant_index"][:].astype("int32")
-        ai = group["analysis_index"][:].astype("int32")
-        z = group["z"][:].astype("float32")
-        se = group["se"][:].astype("float32")
+        if analysis_index is not None and "analysis_offsets" not in group:
+            return _empty_result()
+        reader = DenseTopHitReader(group)
+        bounds = reader.bounds(analysis_index)
+        vi = reader.read("variant_index", bounds, "int32")
+        ai = reader.read("analysis_index", bounds, "int32")
+        z = reader.read("z", bounds, "float32")
+        se = reader.read("se", bounds, "float32")
         return {
             "variant_index": vi,
             "analysis_index": ai,
@@ -852,17 +872,26 @@ class HybridStoreQuery:
     def top_hits(
         self,
         *,
+        analysis_id: str | None = None,
         threshold: float = 5e-8,
         limit: int | None = None,
         observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
-        dense = self._remap_dense(
-            self._dense.top_hits(threshold=threshold, observed_only=observed_only)
-        )
-        overflow = self._overflow_top_hits(threshold)  # overflow is always observed
+        analysis_index = None
+        if analysis_id is not None:
+            analysis = analysis_by_id(self._connection, analysis_id)
+            if analysis is None:
+                return _empty_result()
+            analysis_index = int(analysis["analysis_index"])
+        dense = self._remap_dense(self._dense.top_hits(
+            analysis_id=analysis_id, threshold=threshold, observed_only=observed_only
+        ))
+        overflow = self._overflow_top_hits(
+            threshold, analysis_index
+        )  # overflow is always observed
         merged = _concat_results([dense, overflow])
         if len(merged["z"]):
-            order = np.argsort(-np.abs(merged["z"]), kind="stable")
+            order = np.lexsort((merged["variant_index"], merged["analysis_index"]))
             merged = {k: v[order] for k, v in merged.items()}
         if limit is not None:
             merged = {k: v[:limit] for k, v in merged.items()}

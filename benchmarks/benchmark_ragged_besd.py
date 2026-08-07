@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import zarr
 
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
@@ -126,7 +127,11 @@ def _run_benchmark(
             selection["region_chrom"], selection["region_start"], selection["region_end"]
         ),
         "phewas": lambda: q.phewas(selection["phewas_alid"]),
-        "tophits": lambda: q.top_hits(threshold=selection["top_hit_threshold"], limit=10),
+        "tophits": lambda: q.top_hits(
+            analysis_id=selection["top_hit_analysis_id"],
+            threshold=selection["top_hit_threshold"],
+            limit=10,
+        ),
         "random_lookup": lambda: q.lookup(
             selection["random_alids"], selection["random_analysis_ids"]
         ),
@@ -200,7 +205,14 @@ def _choose_queries(store_path: Path) -> dict:
             (best_analysis_idx,),
         ).fetchone()
         # Random analyses for lookup query
-        all_probes = conn.execute("SELECT probe_id FROM analyses").fetchall()
+        all_probes = conn.execute("SELECT trait_id FROM analyses").fetchall()
+        root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+        hit_offsets = root["top_hits/p_5e_08/analysis_offsets"][:]
+        top_hit_analysis_idx = int(np.argmax(np.diff(hit_offsets)))
+        top_hit_row = conn.execute(
+            "SELECT trait_id FROM analyses WHERE analysis_index = ?",
+            (top_hit_analysis_idx,),
+        ).fetchone()
 
     analysis_probe_id = str(probe_row["trait_id"])
     # Use probe chr/bp to define a 2 Mb region around it for range queries
@@ -233,8 +245,9 @@ def _choose_queries(store_path: Path) -> dict:
         "region_end": region_end,
         "phewas_alid": phewas_alid,
         "top_hit_threshold": top_hit_threshold,
+        "top_hit_analysis_id": str(top_hit_row["trait_id"]),
         "random_alids": [str(all_variants[i].alid) for i in random_vi],
-        "random_analysis_ids": [str(all_probes[i]["probe_id"]) for i in random_ai],
+        "random_analysis_ids": [str(all_probes[i]["trait_id"]) for i in random_ai],
     }
 
 

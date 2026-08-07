@@ -260,6 +260,38 @@ def test_top_hits_query_uses_index(tmp_path):
     assert "variant_index" in result and "analysis_index" in result
 
 
+def test_top_hits_query_selects_one_analysis_from_index(tmp_path):
+    from opengwasdb.query import query_store
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    q = query_store(out)
+    global_result = q.top_hits(threshold=5e-4)
+    selected = q.top_hits(analysis_id="ENSG00000000001", threshold=5e-4, limit=1)
+
+    assert selected["analysis_index"].tolist() == [0]
+    assert selected["variant_index"].tolist() == global_result["variant_index"][:1].tolist()
+    assert q.top_hits(analysis_id="unknown", threshold=5e-4)["z"].size == 0
+
+
+def test_validation_rejects_ragged_top_hit_offsets(tmp_path):
+    from opengwasdb.validation import validate_store
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+    root = zarr.open_group(str(out / "data.zarr"), mode="r+")
+    offsets = root["top_hits/p_5e_04/analysis_offsets"][:]
+    offsets[-1] -= 1
+    root["top_hits/p_5e_04/analysis_offsets"][:] = offsets
+
+    result = validate_store(out)
+    assert not result.ok
+    assert any("invalid analysis offsets" in error for error in result.errors)
+
+
 def test_overwrite_flag(tmp_path):
     prefix = _make_besd_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"

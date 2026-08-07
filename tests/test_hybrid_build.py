@@ -183,8 +183,21 @@ def test_top_hits_merges_components(hybrid_store):
     alids = {variants[int(vi)]["alid"] for vi in r["variant_index"]}
     # The off-panel overflow hit (z=-5.0) must appear alongside dense hits.
     assert HG38_ALID_2 in alids
-    # Ranked by descending |z|: the strongest is trait_b's -12.0 (dense).
-    assert abs(r["z"][0]) == pytest.approx(12.0, rel=5e-3)
+    assert list(zip(r["analysis_index"], r["variant_index"], strict=True)) == sorted(
+        zip(r["analysis_index"], r["variant_index"], strict=True)
+    )
+
+
+def test_top_hits_selects_and_merges_one_analysis(hybrid_store):
+    q = query_store(hybrid_store)
+    global_result = q.top_hits(threshold=5e-4)
+    selected = q.top_hits(analysis_id="trait_a", threshold=5e-4)
+    expected = global_result["analysis_index"] == 0
+
+    for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
+        np.testing.assert_array_equal(selected[name], global_result[name][expected])
+    assert len(selected["z"]) == 2  # one Dense hit and one overflow hit
+    assert q.top_hits(analysis_id="unknown", threshold=5e-4)["z"].size == 0
 
 
 # ── Validation (issue 059) ───────────────────────────────────────────────────
@@ -222,3 +235,14 @@ def test_validate_catches_disjoint_violation(hybrid_store):
     result = validate_store(hybrid_store)
     assert not result.ok
     assert any("disjoint" in e.lower() for e in result.errors)
+
+
+def test_validate_catches_overflow_top_hit_offsets(hybrid_store):
+    root = zarr.open_group(str(hybrid_store / "data.zarr"), mode="r+")
+    offsets = root["top_hits/p_5e_04/analysis_offsets"][:]
+    offsets[-1] -= 1
+    root["top_hits/p_5e_04/analysis_offsets"][:] = offsets
+
+    result = validate_store(hybrid_store)
+    assert not result.ok
+    assert any("invalid analysis offsets" in error for error in result.errors)

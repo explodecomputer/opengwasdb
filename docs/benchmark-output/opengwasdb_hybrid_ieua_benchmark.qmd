@@ -128,7 +128,7 @@ DESC = {
     "bulk": "One analysis, all variants (`analysis`)",
     "phewas": "One (panel) variant × all analyses (`phewas`)",
     "regional": "All associations in a 1 Mb window (`range_phewas`)",
-    "tophits": "Genome-wide significant index read (`top_hits`)",
+    "tophits": "`ieu-a-300` significant hits from addressed Dense + overflow slices",
     "random_lookup": "100 variants × analyses (`lookup`)",
 }
 h = by_query(data["timings"]["hybrid"])
@@ -148,6 +148,16 @@ print("On-panel point queries are served by the Dense Component and stay in the 
       "over the two components. Off-panel PheWAS inherits the ragged O(n) scan "
       "(a variant-centric overflow index is deferred, ADR 0026).")
 ```
+
+Hybrid `top_hits(analysis_id=...)` delegates the selector to both component
+indexes, remaps Dense component rows to the shared variant axis, and merges in
+genomic order without materialising either global tier. For `ieu-a-300`, the
+selected query returned 7,909 hits in **2.36 ms** median (2.46 ms p95), versus
+the previous 2.61 ms global read over 14,753 hits. The modest **1.1×** speedup is
+expected for this three-analysis fixture; importantly, the selected path did
+not regress and exactly matched the corresponding global subset. Rebuilding the
+completed fixture took 6.72 seconds for the Dense component and 0.09 seconds for
+the overflow index.
 
 ---
 
