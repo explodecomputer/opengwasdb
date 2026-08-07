@@ -11,6 +11,12 @@ import pytest
 import zarr
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
+from opengwasdb.completion.ld_panel import (
+    canonical_panel_alid,
+    load_block,
+    load_ld_eigenvectors,
+    snp_position,
+)
 from opengwasdb.layouts.dense import complete as complete_module
 from opengwasdb.layouts.dense.complete import (
     complete_dense_store,
@@ -65,26 +71,50 @@ def _write_ld_block(
     block_name: str,
     snps: list[tuple[str, float, int]],
     seed: int = 0,
+    *,
+    write_matrix: bool = True,
+    write_npz: bool = False,
+    npz_k: int | None = None,
+    snp_id_style: str = "alid",
 ) -> None:
-    """Write one flat-layout LD block: {block_name}.tsv + .unphased.vcor1.gz."""
+    """Write one flat-layout LD block.
+
+    A block may carry an LD matrix, an eigendecomposition, or both — panels built
+    under ADR 0031 ship only the decomposition, so tests need to construct each
+    combination. ``npz_k`` truncates the stored eigenvectors to force the
+    under-resolved case. ``snp_id_style`` selects the panel's identifier
+    convention: canonical ALIDs, or the legacy ``chr:pos_ref_alt`` form used by the
+    production UKB EUR panel.
+    """
     block_dir.mkdir(parents=True, exist_ok=True)
     n = len(snps)
 
     tsv_lines = ["CHR\tSNP\tOA\tEA\tEAF\tBP"]
     for alid, eaf, bp in snps:
-        chrom, _pos, a1, a2 = alid.split(":")
-        tsv_lines.append(f"{chrom}\t{alid}\t{a2}\t{a1}\t{eaf}\t{bp}")
+        chrom, pos, a1, a2 = alid.split(":")
+        snp_id = alid if snp_id_style == "alid" else f"{chrom}:{pos}_{a1}_{a2}"
+        tsv_lines.append(f"{chrom}\t{snp_id}\t{a2}\t{a1}\t{eaf}\t{bp}")
     (block_dir / f"{block_name}.tsv").write_text("\n".join(tsv_lines) + "\n")
 
     rng = np.random.default_rng(seed)
     A = rng.standard_normal((n, n))
     ld = A @ A.T + np.eye(n) * n * 0.1
 
-    buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
-        for row in ld:
-            gz.write(("\t".join(f"{v:.6f}" for v in row) + "\n").encode())
-    (block_dir / f"{block_name}.unphased.vcor1.gz").write_bytes(buf.getvalue())
+    if write_matrix:
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+            for row in ld:
+                gz.write(("\t".join(f"{v:.6f}" for v in row) + "\n").encode())
+        (block_dir / f"{block_name}.unphased.vcor1.gz").write_bytes(buf.getvalue())
+
+    if write_npz:
+        vals, vecs = np.linalg.eigh(ld)
+        vals = vals[::-1]
+        vecs = vecs[:, ::-1]
+        k = vecs.shape[1] if npz_k is None else min(npz_k, vecs.shape[1])
+        np.savez_compressed(
+            block_dir / f"{block_name}.ldeig", values=vals, vectors=vecs[:, :k]
+        )
 
 
 def _make_ld_panel(tmp_path: Path) -> Path:
@@ -526,3 +556,241 @@ class TestParallel:
         assert parallel.n_missing_imputation_failed == serial.n_missing_imputation_failed
         _assert_stores_identical(parallel_dst, serial_dst)
         assert validate_store(parallel_dst).ok
+
+
+class TestPanelArtifacts:
+    """Which block artifacts the panel loader requires (ADR 0031, spec §13.1).
+
+    Completion consumes eigenvectors only, so a block is loadable when it can
+    produce them by either route. Requiring the LD matrix would make
+    eigendecomposition-only panels silently empty rather than failing loudly.
+    """
+
+    @staticmethod
+    def _block(tmp_path: Path, name: str, **kwargs) -> Path:
+        _write_ld_block(
+            tmp_path / "panel" / "EUR" / "1", name,
+            [
+                ("1:900000:A:G", 0.35, 900_000),
+                ("1:950000:A:C", 0.32, 950_000),
+                ("1:1000000:A:G", 0.30, 1_000_000),
+                ("1:1050000:C:T", 0.40, 1_050_000),
+            ],
+            **kwargs,
+        )
+        return tmp_path / "panel" / "EUR" / "1" / f"{name}.tsv"
+
+    def test_loads_with_eigendecomposition_only(self, tmp_path):
+        tsv = self._block(tmp_path, "blk", write_matrix=False, write_npz=True)
+        block = load_block(tsv)
+        assert block is not None
+        assert block.ld_path is None
+        vals, vecs = load_ld_eigenvectors(block, thresh=0.9)
+        assert vecs.shape[0] == 4
+        assert vecs.shape[1] >= 1
+
+    def test_loads_with_matrix_only(self, tmp_path):
+        tsv = self._block(tmp_path, "blk", write_matrix=True, write_npz=False)
+        block = load_block(tsv)
+        assert block is not None
+        assert block.ldeig_npz_path is None
+        vals, vecs = load_ld_eigenvectors(block, thresh=0.9)
+        assert vecs.shape[0] == 4
+
+    def test_loads_with_both(self, tmp_path):
+        tsv = self._block(tmp_path, "blk", write_matrix=True, write_npz=True)
+        block = load_block(tsv)
+        assert block is not None
+        assert block.ld_path is not None and block.ldeig_npz_path is not None
+
+    def test_skips_when_neither_present(self, tmp_path):
+        tsv = self._block(tmp_path, "blk", write_matrix=False, write_npz=False)
+        assert load_block(tsv) is None
+
+    def test_under_resolved_block_warns_and_returns_stored(self, tmp_path, caplog):
+        """A stored component count too small for the requested variance must be
+        surfaced — silently returning fewer components degrades imputation with no
+        signal (spec §13.1)."""
+        tsv = self._block(tmp_path, "blk", write_matrix=False, write_npz=True, npz_k=1)
+        block = load_block(tsv)
+        with caplog.at_level("WARNING"):
+            vals, vecs = load_ld_eigenvectors(block, thresh=0.99)
+        assert vecs.shape[1] == 1
+        assert "under-resolved" in caplog.text
+        assert block.block_id in caplog.text
+
+    def test_sufficient_components_do_not_warn(self, tmp_path, caplog):
+        tsv = self._block(tmp_path, "blk", write_matrix=False, write_npz=True)
+        block = load_block(tsv)
+        with caplog.at_level("WARNING"):
+            load_ld_eigenvectors(block, thresh=0.9)
+        assert "under-resolved" not in caplog.text
+
+
+class TestPanelIdentifiers:
+    """Panel SNP ids normalise to canonical store ALIDs regardless of convention."""
+
+    def test_legacy_underscore_form(self):
+        assert canonical_panel_alid("22:17238320_A_G") == "22:17238320:A:G"
+
+    def test_canonical_form_passes_through(self):
+        assert canonical_panel_alid("22:17238320:A:G") == "22:17238320:A:G"
+
+    def test_chr_prefix_stripped(self):
+        assert canonical_panel_alid("chr22:17238320_A_G") == "22:17238320:A:G"
+
+    def test_orientation_canonicalised(self):
+        """A panel entry recorded in the opposite allele order must resolve to the
+        same variant, or imputed effect directions would silently invert."""
+        assert canonical_panel_alid("22:17238320_G_A") == canonical_panel_alid(
+            "22:17238320_A_G"
+        )
+
+    def test_unparseable_returns_none(self):
+        assert canonical_panel_alid("rs12345") is None
+        assert canonical_panel_alid("") is None
+
+    def test_position_from_either_form(self):
+        assert snp_position("22:17238320_A_G") == 17238320
+        assert snp_position("22:17238320:A:G") == 17238320
+        assert snp_position("rs12345") == -1
+
+
+class TestPanelFormatIndependence:
+    """Completion must not depend on how a panel stores LD or names its variants.
+
+    The production EUR panel uses legacy ``chr:pos_ref_alt`` ids and ships LD
+    matrices; panels built under ADR 0031 use canonical ALIDs and ship only
+    eigendecompositions. Both must yield the same store — otherwise the storage
+    contract silently changes results.
+    """
+
+    @staticmethod
+    def _panel(root: Path, **kwargs) -> Path:
+        _write_ld_block(
+            root / "EUR" / "1", "900000-1300000",
+            [
+                ("1:900000:A:G", 0.35, 900_000),
+                ("1:950000:A:C", 0.32, 950_000),
+                ("1:1000000:A:G", 0.30, 1_000_000),
+                ("1:1050000:C:T", 0.40, 1_050_000),
+                ("1:1100000:A:C", 0.45, 1_100_000),
+            ],
+            seed=0, **kwargs,
+        )
+        _write_ld_block(
+            root / "EUR" / "2", "1-500000",
+            [
+                ("2:100000:A:G", 0.20, 100_000),
+                ("2:200000:C:G", 0.25, 200_000),
+            ],
+            seed=1, **kwargs,
+        )
+        return root
+
+    def test_eigendecomposition_only_matches_matrix_panel(
+        self, tmp_path, observed_store, completed_store
+    ):
+        """npz-only, legacy-id panel produces a store identical to the canonical
+        matrix-backed fixture — same variants, same imputed/missing counts, same
+        arrays."""
+        root = self._panel(
+            tmp_path / "legacy_panel",
+            write_matrix=False, write_npz=True, snp_id_style="legacy",
+        )
+        dst = tmp_path / "legacy.opengwasdb"
+        result = complete_dense_store(
+            observed_store, dst, root,
+            ancestry="EUR", min_cor=0.0, release_id="comp-v1",
+        )
+        assert validate_store(dst).ok
+        assert result.n_variants == 8
+        _assert_stores_identical(dst, completed_store)
+
+
+# AR(1)-correlated block (rho=0.9): unlike the iid-random matrix _write_ld_block
+# uses elsewhere, its leading eigenvectors are smooth basis functions, so a smooth
+# z profile projects onto a handful of components and elastic-net can actually
+# recover a held-out point. SOURCE_ROWS above never gives ElasticNetCV enough
+# signal to fit anything but zero, so TestPanelFormatIndependence's byte-identical
+# check is silently comparing two all-missing outputs — real proof that
+# eigendecomposition-only panels still produce genuine imputed cells needs its
+# own fixture.
+_SIGNAL_N = 12
+_SIGNAL_MISSING_IDX = 6  # left out of the observed source rows; the imputation target
+_SIGNAL_POSITIONS = [100_000 * (i + 1) for i in range(_SIGNAL_N)]
+_SIGNAL_Z_TRUE = np.sin(np.linspace(0, 3, _SIGNAL_N)) * 5 + np.arange(_SIGNAL_N) * 0.1
+
+
+@pytest.fixture
+def signal_source_path(tmp_path: Path) -> Path:
+    """One analysis, one AR(1) block, every position observed except the target."""
+    rows = [SOURCE_HEADER]
+    for i, (pos, z) in enumerate(zip(_SIGNAL_POSITIONS, _SIGNAL_Z_TRUE, strict=True)):
+        if i == _SIGNAL_MISSING_IDX:
+            continue
+        rows.append(
+            f"a1\tp1\tHeight\tHeight primary\t1\t{pos}\tA\tG\t{z:.6f}\t0.2\trs{i}\tsd_units"
+        )
+    path = tmp_path / "signal_associations.tsv"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def signal_observed_store(tmp_path: Path, signal_source_path: Path) -> Path:
+    out = tmp_path / "signal_obs.opengwasdb"
+    build_dense_observed_from_sources(
+        [signal_source_path], out,
+        store_id="test", release_id="obs-v1", reference_assembly="GRCh38",
+    )
+    return out
+
+
+@pytest.fixture
+def signal_panel_npz_only(tmp_path: Path) -> Path:
+    """A single eigendecomposition-only block (no .unphased.vcor1.gz at all)
+    covering every position in `signal_source_path`, with genuine AR(1) LD
+    structure so imputation of the held-out position actually succeeds."""
+    root = tmp_path / "signal_panel"
+    snps = [
+        (f"1:{pos}:A:G", 0.3, pos) for pos in _SIGNAL_POSITIONS
+    ]
+    block_dir = root / "EUR" / "1"
+    block_dir.mkdir(parents=True, exist_ok=True)
+    tsv_lines = ["CHR\tSNP\tOA\tEA\tEAF\tBP"]
+    for alid, eaf, bp in snps:
+        chrom, _pos, a1, a2 = alid.split(":")
+        tsv_lines.append(f"{chrom}\t{alid}\t{a2}\t{a1}\t{eaf}\t{bp}")
+    (block_dir / "100000-1200000.tsv").write_text("\n".join(tsv_lines) + "\n")
+
+    idx = np.arange(_SIGNAL_N)
+    ld = 0.9 ** np.abs(idx[:, None] - idx[None, :])
+    vals, vecs = np.linalg.eigh(ld)
+    vals, vecs = vals[::-1], vecs[:, ::-1]
+    np.savez_compressed(block_dir / "100000-1200000.ldeig.npz", values=vals, vectors=vecs)
+    return root
+
+
+class TestEigendecompositionOnlyPanelImputesRealCells:
+    """opengwasdb#10: a panel shipping only .ldeig.npz must complete end to end
+    and actually impute the held-out position, not merely match a fixture whose
+    own imputation happens to fail identically on both sides."""
+
+    def test_completes_with_imputed_cells(
+        self, tmp_path, signal_observed_store, signal_panel_npz_only
+    ):
+        for chrom_dir in (signal_panel_npz_only / "EUR").iterdir():
+            for f in chrom_dir.iterdir():
+                assert not f.name.endswith(".unphased.vcor1.gz"), (
+                    "fixture must not write LD matrices — that's the point of this test"
+                )
+
+        dst = tmp_path / "signal_comp.opengwasdb"
+        complete_dense_store(
+            signal_observed_store, dst, signal_panel_npz_only,
+            ancestry="EUR", min_cor=0.0, release_id="comp-signal-v1",
+        )
+
+        root = zarr.open_group(str(dst / "data.zarr"), mode="r")
+        assert root["imputed"][:].sum() > 0

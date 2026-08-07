@@ -35,10 +35,16 @@ from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from opengwasdb.completion.impute import impute_z_block, scalar_n_se
 from opengwasdb.completion.ld_panel import (
+    canonical_panel_alid as _canonical_panel_alid,
+)
+from opengwasdb.completion.ld_panel import (
     list_all_blocks,
     list_chromosomes,
     load_block,
     load_ld_eigenvectors,
+)
+from opengwasdb.completion.ld_panel import (
+    snp_position as _snp_position,
 )
 from opengwasdb.index import connect, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.constants import (
@@ -80,43 +86,6 @@ class CompletionResult:
     n_imputed: int
     n_missing_off_panel: int
     n_missing_imputation_failed: int
-
-
-def _bare_alid(snp_id: str) -> str:
-    return snp_id[3:] if snp_id.startswith("chr") else snp_id
-
-
-def _canonical_panel_alid(snp_id: str) -> str | None:
-    """Normalise an LD-panel SNP id to a canonical store ALID (``chr:pos:a1:a2``).
-
-    Handles both the panel's ``[chr]CHR:POS_REF_ALT`` form (underscores) and an
-    already-colon-delimited ``CHR:POS:A1:A2`` form, orienting alleles to the
-    canonical A1 = min(ref, alt). Returns None for ids that don't parse.
-    """
-    s = _bare_alid(snp_id)
-    parts = s.split(":")
-    if len(parts) == 4:
-        chrom, pos_s, ref, alt = parts
-    elif len(parts) == 2 and parts[1].count("_") == 2:
-        chrom, rest = parts
-        pos_s, ref, alt = rest.split("_")
-    else:
-        return None
-    try:
-        return orient_to_canonical(chrom, int(pos_s), ref, alt).variant.alid
-    except (VariantNormalisationError, ValueError):
-        return None
-
-
-def _snp_position(snp_id: str) -> int:
-    """Extract the base-pair position from a panel SNP id (either format).
-    Returns -1 if it cannot be parsed."""
-    parts = _bare_alid(snp_id).split(":")
-    field = parts[1] if len(parts) >= 2 else parts[0]
-    try:
-        return int(field.split("_")[0])
-    except ValueError:
-        return -1
 
 
 def _sanitize_block_id(block_id: str) -> str:
