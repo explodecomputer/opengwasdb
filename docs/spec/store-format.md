@@ -349,6 +349,25 @@ If EAF is emitted for imputed associations, the LD Reference Panel MUST provide 
 
 The Store Release reference assembly MUST match the LD Reference Panel reference assembly.
 
+### 13.1 LD representation: eigendecomposition required, matrix optional
+
+The LD representation required for a Reference Completion Method is a
+**variant table plus an eigendecomposition** (eigenvalues and retained
+eigenvectors, truncated to a cumulative-variance threshold). This is the
+storage contract an LD Reference Panel MUST satisfy for a block to load.
+
+The full LD matrix is an **optional, legacy artifact**. It MAY be used to
+derive a missing eigendecomposition when no cached decomposition exists, but
+it MUST NOT be required for a block to load — a panel that ships only variant
+tables and eigendecompositions (no matrices) is a valid LD Reference Panel.
+
+When the stored eigendecomposition retains fewer components than a requested
+truncation threshold demands, that shortfall MUST be surfaced (e.g. logged)
+rather than silently absorbed; the consumer MAY still proceed with the
+available components.
+
+See ADR 0031.
+
 ## 14. Reference completion method requirements
 
 The Reference Completion Method MUST record:

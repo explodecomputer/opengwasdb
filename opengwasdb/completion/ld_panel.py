@@ -1,9 +1,15 @@
 """Read-only interface for the LD reference panel used in Reference Completion.
 
 Panel layout (flat/production):
-    ld_dir/{ancestry}/{chr}/{block_name}.tsv
-    ld_dir/{ancestry}/{chr}/{block_name}.unphased.vcor1.gz
-    ld_dir/{ancestry}/{chr}/{block_name}.ldeig.npz   (optional cache)
+    ld_dir/{ancestry}/{chr}/{block_name}.tsv                  (variant table, required)
+  and at least one of:
+    ld_dir/{ancestry}/{chr}/{block_name}.ldeig.npz             (eigendecomposition; preferred)
+    ld_dir/{ancestry}/{chr}/{block_name}.unphased.vcor1.gz     (LD matrix; optional/legacy,
+                                                                 used to derive eigenvectors
+                                                                 only when the npz is absent)
+
+A block with neither the npz nor the matrix cannot yield eigenvectors and is
+skipped. See ADR 0031 and store-format spec §13.1.
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.completion.impute import ld_pca
+from opengwasdb.variants import VariantNormalisationError, orient_to_canonical
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +32,7 @@ class LDBlock:
     start_bp: int
     end_bp: int
     tsv_path: Path
-    ld_path: Path
+    ld_path: Path | None       # LD matrix; optional, may be absent (eigendecomposition-only panel)
     ldeig_npz_path: Path | None
     n_ld_snps: int
     snp_ids: list[str]  # ALID strings as stored in the TSV (may have chr prefix)
@@ -68,10 +75,17 @@ def load_block(tsv_path: Path) -> LDBlock | None:
 
     chrom is taken from the parent directory name, matching the panel's
     ld_dir/{ancestry}/{chr}/{block_name}.tsv layout.
+
+    A block is admitted when it can produce eigenvectors by either route — a
+    stored eigendecomposition or a raw LD matrix — and skipped only when
+    neither artifact is present.
     """
     tsv_path = Path(tsv_path)
-    ld_path = tsv_path.with_suffix(".unphased.vcor1.gz")
-    if not ld_path.exists():
+    ld_path_candidate = tsv_path.with_suffix(".unphased.vcor1.gz")
+    ld_path = ld_path_candidate if ld_path_candidate.exists() else None
+    npz_path_candidate = tsv_path.with_suffix(".ldeig.npz")
+    ldeig_npz_path = npz_path_candidate if npz_path_candidate.exists() else None
+    if ld_path is None and ldeig_npz_path is None:
         return None
 
     try:
@@ -81,7 +95,6 @@ def load_block(tsv_path: Path) -> LDBlock | None:
         return None
 
     chrom = tsv_path.parent.name
-    npz_path = tsv_path.with_suffix(".ldeig.npz")
     return LDBlock(
         block_id=f"{chrom}/{tsv_path.stem}",
         chrom=chrom,
@@ -89,7 +102,7 @@ def load_block(tsv_path: Path) -> LDBlock | None:
         end_bp=blk_end,
         tsv_path=tsv_path,
         ld_path=ld_path,
-        ldeig_npz_path=npz_path if npz_path.exists() else None,
+        ldeig_npz_path=ldeig_npz_path,
         n_ld_snps=len(snp_ids),
         snp_ids=snp_ids,
         eaf=eaf,
@@ -141,29 +154,31 @@ def list_all_blocks(ld_dir: str | Path, ancestry: str, chrom: str) -> list[LDBlo
     return blocks
 
 
-def match_variants(
-    block: LDBlock,
-    store_alids: list[str],
-) -> tuple[list[int], list[int]]:
-    """Match store ALIDs to LD panel row indices.
+def canonical_panel_alid(snp_id: str) -> str | None:
+    """Normalise an LD-panel SNP id to a canonical store ALID (``chr:pos:a1:a2``).
 
-    Returns (store_variant_positions, ld_row_indices) — parallel index arrays.
-    Returns empty lists when fewer than 2 variants match.
+    Handles both the panel's ``[chr]CHR:POS_REF_ALT`` form (underscores) and an
+    already-colon-delimited ``CHR:POS:A1:A2`` form, orienting alleles to the
+    canonical A1 = min(ref, alt). Returns None — after logging a warning
+    identifying the offending id — when it doesn't parse under either
+    convention, so a panel-wide format mistake surfaces as warnings rather
+    than as silently reduced completion coverage.
     """
-    alid_to_store: dict[str, int] = {alid: i for i, alid in enumerate(store_alids)}
-
-    store_positions: list[int] = []
-    ld_row_indices: list[int] = []
-
-    for ld_row, snp_id in enumerate(block.snp_ids):
-        bare = _strip_chr(snp_id)
-        if bare in alid_to_store:
-            store_positions.append(alid_to_store[bare])
-            ld_row_indices.append(ld_row)
-
-    if len(store_positions) < 2:
-        return [], []
-    return store_positions, ld_row_indices
+    s = _strip_chr(snp_id)
+    parts = s.split(":")
+    if len(parts) == 4:
+        chrom, pos_s, ref, alt = parts
+    elif len(parts) == 2 and parts[1].count("_") == 2:
+        chrom, rest = parts
+        pos_s, ref, alt = rest.split("_")
+    else:
+        log.warning("Could not parse LD panel SNP id %r — unrecognised format", snp_id)
+        return None
+    try:
+        return orient_to_canonical(chrom, int(pos_s), ref, alt).variant.alid
+    except (VariantNormalisationError, ValueError) as exc:
+        log.warning("Could not canonicalise LD panel SNP id %r: %s", snp_id, exc)
+        return None
 
 
 def load_ld_eigenvectors(
@@ -183,15 +198,31 @@ def load_ld_eigenvectors(
             total = float(np.maximum(vals, 0).sum()) or 1.0
             cumvar = np.cumsum(np.maximum(vals, 0)) / total
             k = int(np.searchsorted(cumvar, thresh)) + 1
-            k = min(k, vecs.shape[1])
+            stored_k = vecs.shape[1]
+            if k > stored_k:
+                achieved = float(cumvar[stored_k - 1]) if stored_k > 0 else 0.0
+                log.warning(
+                    "Block %s: stored eigendecomposition has only %d component(s), "
+                    "needs %d to reach thresh=%.3f cumulative variance (achieved %.4f) "
+                    "— using what's stored",
+                    block.block_id, stored_k, k, thresh, achieved,
+                )
+                k = stored_k
             return vals[:k], vecs[:, :k]
         except Exception as exc:  # noqa: BLE001
-            log.warning("Could not load %s: %s — falling back to LD matrix", block.ldeig_npz_path, exc)
+            log.warning(
+                "Could not load %s: %s — falling back to LD matrix", block.ldeig_npz_path, exc
+            )
 
     return _load_from_ld_matrix(block, thresh)
 
 
 def _load_from_ld_matrix(block: LDBlock, thresh: float) -> tuple[np.ndarray, np.ndarray]:
+    if block.ld_path is None:
+        raise RuntimeError(
+            f"Block {block.block_id}: no LD matrix available and no usable "
+            ".ldeig.npz eigendecomposition"
+        )
     import pandas as pd
     try:
         full = pd.read_csv(
@@ -204,6 +235,8 @@ def _load_from_ld_matrix(block: LDBlock, thresh: float) -> tuple[np.ndarray, np.
 
 def load_ld_matrix(block: LDBlock, row_indices: list[int]) -> np.ndarray:
     """Load LD submatrix for the given row indices."""
+    if block.ld_path is None:
+        raise RuntimeError(f"Block {block.block_id} has no LD matrix (ld_path is None)")
     import pandas as pd
     full = pd.read_csv(
         block.ld_path, header=None, delimiter="\t"

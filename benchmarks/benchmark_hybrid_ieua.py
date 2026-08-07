@@ -36,9 +36,9 @@ from pathlib import Path
 import numpy as np
 from scipy.special import erfc
 
-from opengwasdb.completion.ld_panel import list_all_blocks, list_chromosomes
+from opengwasdb.completion.ld_panel import canonical_panel_alid, list_all_blocks, list_chromosomes
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
-from opengwasdb.layouts.dense.complete import _canonical_panel_alid, complete_dense_store
+from opengwasdb.layouts.dense.complete import complete_dense_store
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
 from opengwasdb.query import query_store
@@ -86,7 +86,7 @@ def _extract_panel(ld_dir: Path, ancestry: str, out_path: Path) -> int:
     for chrom in list_chromosomes(ld_dir, ancestry):
         for block in list_all_blocks(ld_dir, ancestry, chrom):
             for snp_id in block.snp_ids:
-                ca = _canonical_panel_alid(snp_id)
+                ca = canonical_panel_alid(snp_id)
                 if ca is not None:
                     alids.add(ca)
     with out_path.open("w") as fh:

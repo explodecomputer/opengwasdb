@@ -134,6 +134,67 @@ def ld_panel(tmp_path: Path) -> Path:
     return _make_ld_panel(tmp_path)
 
 
+# AR(1)-correlated block (rho=0.9): unlike an iid-random LD matrix, its leading
+# eigenvectors are smooth basis functions, so a smooth z profile projects onto a
+# handful of components and elastic-net can actually recover a held-out point —
+# needed to prove imputed cells appear, not just that the pipeline runs.
+_NPZ_ONLY_N = 12
+_NPZ_ONLY_MISSING_IDX = 6  # left out of the observed source rows; the imputation target
+_NPZ_ONLY_POSITIONS = [100_000 * (i + 1) for i in range(_NPZ_ONLY_N)]
+_NPZ_ONLY_Z_TRUE = (
+    np.sin(np.linspace(0, 3, _NPZ_ONLY_N)) * 5 + np.arange(_NPZ_ONLY_N) * 0.1
+)
+
+
+def _npz_only_ld_block() -> tuple[np.ndarray, np.ndarray]:
+    idx = np.arange(_NPZ_ONLY_N)
+    ld = 0.9 ** np.abs(idx[:, None] - idx[None, :])
+    vals, vecs = np.linalg.eigh(ld)
+    return vals[::-1], vecs[:, ::-1]
+
+
+@pytest.fixture
+def npz_only_source_path(tmp_path: Path) -> Path:
+    """One analysis, one AR(1) block, every position observed except the target."""
+    rows = [SOURCE_HEADER]
+    for i, (pos, z) in enumerate(zip(_NPZ_ONLY_POSITIONS, _NPZ_ONLY_Z_TRUE, strict=True)):
+        if i == _NPZ_ONLY_MISSING_IDX:
+            continue
+        rows.append(
+            f"a1\tp1\tHeight\tHeight primary\t1\t{pos}\tA\tG\t{z:.6f}\t0.2\trs{i}\tsd_units"
+        )
+    path = tmp_path / "npz_only_associations.tsv"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def npz_only_observed_store(tmp_path: Path, npz_only_source_path: Path) -> Path:
+    out = tmp_path / "npz_only_obs.opengwasdb"
+    build_dense_observed_from_sources(
+        [npz_only_source_path], out,
+        store_id="test", release_id="obs-v1", reference_assembly="GRCh38",
+    )
+    return out
+
+
+@pytest.fixture
+def ld_panel_npz_only(tmp_path: Path) -> Path:
+    """A single eigendecomposition-only block — no .unphased.vcor1.gz at all —
+    covering every position in `npz_only_source_path`, matching (opengwasdb#10)."""
+    block_dir = tmp_path / "ld_panel_npz_only" / "EUR" / "1"
+    block_dir.mkdir(parents=True, exist_ok=True)
+
+    tsv_lines = ["CHR\tSNP\tOA\tEA\tEAF\tBP"]
+    for pos in _NPZ_ONLY_POSITIONS:
+        tsv_lines.append(f"1\t1:{pos}:A:G\tG\tA\t0.3\t{pos}")
+    (block_dir / "100000-1200000.tsv").write_text("\n".join(tsv_lines) + "\n")
+
+    vals, vecs = _npz_only_ld_block()
+    np.savez_compressed(block_dir / "100000-1200000.ldeig.npz", values=vals, vectors=vecs)
+    return block_dir.parent.parent
+
+
 @pytest.fixture
 def completed_store(tmp_path: Path, observed_store: Path, ld_panel: Path) -> Path:
     dst = tmp_path / "comp.opengwasdb"
@@ -526,3 +587,28 @@ class TestParallel:
         assert parallel.n_missing_imputation_failed == serial.n_missing_imputation_failed
         _assert_stores_identical(parallel_dst, serial_dst)
         assert validate_store(parallel_dst).ok
+
+
+class TestEigendecompositionOnlyPanel:
+    """opengwasdb#10: a panel shipping only .ldeig.npz (no LD matrices at all)
+    must still complete end to end, proving the fix works through the full
+    pipeline and not just at the loader."""
+
+    def test_completes_with_imputed_cells(
+        self, tmp_path, npz_only_observed_store, ld_panel_npz_only
+    ):
+        for chrom_dir in (ld_panel_npz_only / "EUR").iterdir():
+            for f in chrom_dir.iterdir():
+                assert not f.name.endswith(".unphased.vcor1.gz"), (
+                    "fixture must not write LD matrices — that's the point of this test"
+                )
+
+        dst = tmp_path / "comp_npz_only.opengwasdb"
+        complete_dense_store(
+            npz_only_observed_store, dst, ld_panel_npz_only,
+            ancestry="EUR", min_cor=0.0, release_id="comp-npz-v1",
+        )
+
+        root = zarr.open_group(str(dst / "data.zarr"), mode="r")
+        imputed = root["imputed"][:]
+        assert imputed.sum() > 0

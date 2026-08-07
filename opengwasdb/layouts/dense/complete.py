@@ -35,6 +35,7 @@ from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from opengwasdb.completion.impute import impute_z_block, scalar_n_se
 from opengwasdb.completion.ld_panel import (
+    canonical_panel_alid,
     list_all_blocks,
     list_chromosomes,
     load_block,
@@ -84,28 +85,6 @@ class CompletionResult:
 
 def _bare_alid(snp_id: str) -> str:
     return snp_id[3:] if snp_id.startswith("chr") else snp_id
-
-
-def _canonical_panel_alid(snp_id: str) -> str | None:
-    """Normalise an LD-panel SNP id to a canonical store ALID (``chr:pos:a1:a2``).
-
-    Handles both the panel's ``[chr]CHR:POS_REF_ALT`` form (underscores) and an
-    already-colon-delimited ``CHR:POS:A1:A2`` form, orienting alleles to the
-    canonical A1 = min(ref, alt). Returns None for ids that don't parse.
-    """
-    s = _bare_alid(snp_id)
-    parts = s.split(":")
-    if len(parts) == 4:
-        chrom, pos_s, ref, alt = parts
-    elif len(parts) == 2 and parts[1].count("_") == 2:
-        chrom, rest = parts
-        pos_s, ref, alt = rest.split("_")
-    else:
-        return None
-    try:
-        return orient_to_canonical(chrom, int(pos_s), ref, alt).variant.alid
-    except (VariantNormalisationError, ValueError):
-        return None
 
 
 def _snp_position(snp_id: str) -> int:
@@ -237,7 +216,7 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
     # Canonical ALID per block variant (None if it doesn't parse); the LD
     # eigenvectors are indexed by block position, so every block SNP keeps its
     # slot even when unmatched.
-    canonical_alids = [_canonical_panel_alid(s) for s in block.snp_ids]
+    canonical_alids = [canonical_panel_alid(s) for s in block.snp_ids]
 
     src_axis = VariantAxis(task.source_path)
     try:
@@ -486,7 +465,7 @@ def _run_completion(
             for block in list_all_blocks(ld_dir, ancestry, chrom):
                 tsv_paths.append(block.tsv_path)
                 for snp_id in block.snp_ids:
-                    ca = _canonical_panel_alid(snp_id)
+                    ca = canonical_panel_alid(snp_id)
                     if ca is not None:
                         panel_alids.add(ca)
         print(f"LD panel: {len(tsv_paths):,} blocks, {len(panel_alids):,} panel variants")

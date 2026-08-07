@@ -20,10 +20,8 @@ from numcodecs import Blosc
 
 from opengwasdb.completion.impute import impute_z_block, scalar_n_se
 from opengwasdb.completion.ld_panel import (
-    LDBlock,
     find_blocks,
     load_ld_eigenvectors,
-    match_variants,
 )
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RAGGED_ZARR_PATH, RaggedCSRReader
