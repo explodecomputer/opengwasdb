@@ -706,3 +706,91 @@ class TestPanelFormatIndependence:
         assert validate_store(dst).ok
         assert result.n_variants == 8
         _assert_stores_identical(dst, completed_store)
+
+
+# AR(1)-correlated block (rho=0.9): unlike the iid-random matrix _write_ld_block
+# uses elsewhere, its leading eigenvectors are smooth basis functions, so a smooth
+# z profile projects onto a handful of components and elastic-net can actually
+# recover a held-out point. SOURCE_ROWS above never gives ElasticNetCV enough
+# signal to fit anything but zero, so TestPanelFormatIndependence's byte-identical
+# check is silently comparing two all-missing outputs — real proof that
+# eigendecomposition-only panels still produce genuine imputed cells needs its
+# own fixture.
+_SIGNAL_N = 12
+_SIGNAL_MISSING_IDX = 6  # left out of the observed source rows; the imputation target
+_SIGNAL_POSITIONS = [100_000 * (i + 1) for i in range(_SIGNAL_N)]
+_SIGNAL_Z_TRUE = np.sin(np.linspace(0, 3, _SIGNAL_N)) * 5 + np.arange(_SIGNAL_N) * 0.1
+
+
+@pytest.fixture
+def signal_source_path(tmp_path: Path) -> Path:
+    """One analysis, one AR(1) block, every position observed except the target."""
+    rows = [SOURCE_HEADER]
+    for i, (pos, z) in enumerate(zip(_SIGNAL_POSITIONS, _SIGNAL_Z_TRUE, strict=True)):
+        if i == _SIGNAL_MISSING_IDX:
+            continue
+        rows.append(
+            f"a1\tp1\tHeight\tHeight primary\t1\t{pos}\tA\tG\t{z:.6f}\t0.2\trs{i}\tsd_units"
+        )
+    path = tmp_path / "signal_associations.tsv"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def signal_observed_store(tmp_path: Path, signal_source_path: Path) -> Path:
+    out = tmp_path / "signal_obs.opengwasdb"
+    build_dense_observed_from_sources(
+        [signal_source_path], out,
+        store_id="test", release_id="obs-v1", reference_assembly="GRCh38",
+    )
+    return out
+
+
+@pytest.fixture
+def signal_panel_npz_only(tmp_path: Path) -> Path:
+    """A single eigendecomposition-only block (no .unphased.vcor1.gz at all)
+    covering every position in `signal_source_path`, with genuine AR(1) LD
+    structure so imputation of the held-out position actually succeeds."""
+    root = tmp_path / "signal_panel"
+    snps = [
+        (f"1:{pos}:A:G", 0.3, pos) for pos in _SIGNAL_POSITIONS
+    ]
+    block_dir = root / "EUR" / "1"
+    block_dir.mkdir(parents=True, exist_ok=True)
+    tsv_lines = ["CHR\tSNP\tOA\tEA\tEAF\tBP"]
+    for alid, eaf, bp in snps:
+        chrom, _pos, a1, a2 = alid.split(":")
+        tsv_lines.append(f"{chrom}\t{alid}\t{a2}\t{a1}\t{eaf}\t{bp}")
+    (block_dir / "100000-1200000.tsv").write_text("\n".join(tsv_lines) + "\n")
+
+    idx = np.arange(_SIGNAL_N)
+    ld = 0.9 ** np.abs(idx[:, None] - idx[None, :])
+    vals, vecs = np.linalg.eigh(ld)
+    vals, vecs = vals[::-1], vecs[:, ::-1]
+    np.savez_compressed(block_dir / "100000-1200000.ldeig.npz", values=vals, vectors=vecs)
+    return root
+
+
+class TestEigendecompositionOnlyPanelImputesRealCells:
+    """opengwasdb#10: a panel shipping only .ldeig.npz must complete end to end
+    and actually impute the held-out position, not merely match a fixture whose
+    own imputation happens to fail identically on both sides."""
+
+    def test_completes_with_imputed_cells(
+        self, tmp_path, signal_observed_store, signal_panel_npz_only
+    ):
+        for chrom_dir in (signal_panel_npz_only / "EUR").iterdir():
+            for f in chrom_dir.iterdir():
+                assert not f.name.endswith(".unphased.vcor1.gz"), (
+                    "fixture must not write LD matrices — that's the point of this test"
+                )
+
+        dst = tmp_path / "signal_comp.opengwasdb"
+        complete_dense_store(
+            signal_observed_store, dst, signal_panel_npz_only,
+            ancestry="EUR", min_cor=0.0, release_id="comp-signal-v1",
+        )
+
+        root = zarr.open_group(str(dst / "data.zarr"), mode="r")
+        assert root["imputed"][:].sum() > 0
