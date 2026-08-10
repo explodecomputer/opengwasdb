@@ -49,11 +49,23 @@ def _make_vcf(tmp_path: Path, name: str, rows: list[str], study_type: str = "Con
     return path
 
 
-def _make_manifest(tmp_path: Path, entries: list[tuple[str, Path, str]]) -> Path:
+def _make_manifest(
+    tmp_path: Path,
+    entries: list[tuple[str, Path, str]],
+    scales: dict[str, str] | None = None,
+) -> Path:
+    """Write the build manifest: trait_id/file_path/trait_name/n (also the
+    Analysis Catalogue's BUILD_COLUMNS) plus the now-required
+    stored_effect_scale (issue #17). `scales` overrides the scale per
+    trait_id (default `"sd"`), letting a test declare a scale that disagrees
+    with its VCF's own ``##SAMPLE`` header -- the manifest always wins.
+    """
+    scales = scales or {}
     manifest = tmp_path / "manifest.tsv"
-    lines = ["trait_id\tfile_path\ttrait_name\tn"]
+    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"]
     for trait_id, file_path, trait_name in entries:
-        lines.append(f"{trait_id}\t{file_path}\t{trait_name}\t1000")
+        scale = scales.get(trait_id, "sd")
+        lines.append(f"{trait_id}\t{file_path}\t{trait_name}\t1000\t{scale}")
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return manifest
 
@@ -77,11 +89,15 @@ def two_trait_store(tmp_path):
             f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t6.0:0.5\n",  # z=12.0, flip→-12.0
             f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t1.2:0.3\n",  # z=4.0, no flip
         ],
-        study_type="CaseControl",
+        # The ieu-a-7 scenario: header says Continuous, but this is really a
+        # case-control trait -- the manifest (below) declares log_or, and
+        # that value must win (issue #17), not this header.
+        study_type="Continuous",
     )
     manifest = _make_manifest(
         tmp_path,
         [("trait_a", vcf1, "Trait A"), ("trait_b", vcf2, "Trait B")],
+        scales={"trait_b": "log_or"},
     )
     store_path = tmp_path / "store.opengwasdb"
     build_dense_from_vcf_manifest(
@@ -165,12 +181,36 @@ def test_analysis_query_returns_all_variants_for_trait(two_trait_store):
     assert all(np.isfinite(result["z"]))
 
 
-def test_stored_effect_scale_matches_vcf_study_type(two_trait_store):
+def test_stored_effect_scale_comes_from_manifest_not_header(two_trait_store):
+    """The ieu-a-7 fix (issue #17): trait_b's VCF header says
+    ``StudyType=Continuous``, but its manifest row declares
+    ``stored_effect_scale=log_or`` -- the built store must record the
+    manifest's value, not the header's."""
     query = query_store(two_trait_store)
     analyses = query.analyses_table()
     by_id = {v["analysis_id"]: v for v in analyses.values()}
     assert by_id["trait_a"]["stored_effect_scale"] == "sd"
     assert by_id["trait_b"]["stored_effect_scale"] == "log_or"
+
+
+def test_missing_required_manifest_field_fails_the_build_loudly(tmp_path):
+    """A manifest missing stored_effect_scale must fail the build with a
+    clear error before any I/O, not fall back to VCF-header inference or a
+    silent default (issue #17)."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest_path = tmp_path / "manifest.tsv"
+    # No stored_effect_scale column at all.
+    manifest_path.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="stored_effect_scale"):
+        build_dense_from_vcf_manifest(
+            manifest_path, tmp_path / "store.opengwasdb", store_id="s", release_id="r"
+        )
 
 
 def test_liftover_failure_above_threshold_raises(tmp_path):

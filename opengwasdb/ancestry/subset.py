@@ -1,11 +1,16 @@
 """Subset the Analysis Catalogue to one ancestry and build its Hybrid store.
 
 A build manifest is a pure **row filter** over the Catalogue (ADR 0027): because
-the Catalogue is a superset of the build manifest and the builder reads only its
-four columns, filtering to ``assigned_ancestry == EUR`` yields a manifest the
-unchanged ``build-hybrid`` consumes directly. After the (unchanged) build, the
-store's per-Analysis Assigned Ancestry and Catalogue provenance are recorded in a
-sidecar (``opengwasdb.ancestry.store``).
+the Catalogue is a superset of the build manifest's ``trait_id``/``file_path``/
+``trait_name``/``n`` columns, filtering to ``assigned_ancestry == EUR`` yields
+those columns already in the shape ``build-hybrid`` reads. The one column the
+Catalogue does not carry is ``stored_effect_scale`` (issue #17): ancestry
+assignment runs on allele frequencies alone and may run before a study's
+effect scale is even resolved, so it stays a genuinely separate build input --
+supplied by the caller here and stamped onto the filtered rows before writing
+the manifest, not something ancestry assignment should ever need to know
+about. After the build, the store's per-Analysis Assigned Ancestry and
+Catalogue provenance are recorded in a sidecar (``opengwasdb.ancestry.store``).
 """
 
 from __future__ import annotations
@@ -41,12 +46,15 @@ def subset_catalogue(
     catalogue_path: str | Path,
     manifest_path: str | Path,
     *,
+    stored_effect_scale: str,
     ancestry: str = DEFAULT_ANCESTRY,
 ) -> SubsetResult:
     """Row-filter the Catalogue to ``assigned_ancestry == ancestry``.
 
-    Writes the filtered rows verbatim (all columns) — still a manifest superset —
-    so the unchanged manifest reader consumes it. Returns the subset provenance.
+    Writes the filtered rows verbatim (all Catalogue columns), plus
+    ``stored_effect_scale`` stamped onto every row -- the one column
+    `opengwasdb.layouts.dense.build_vcf._read_manifest` now requires that the
+    Catalogue itself never carries (issue #17). Returns the subset provenance.
     """
     catalogue_path = Path(catalogue_path)
     manifest_path = Path(manifest_path)
@@ -58,8 +66,11 @@ def subset_catalogue(
         rows = list(reader)
 
     kept = [r for r in rows if r.get("assigned_ancestry") == ancestry]
+    for row in kept:
+        row["stored_effect_scale"] = stored_effect_scale
+    out_fieldnames = [*fieldnames, "stored_effect_scale"]
     with open(manifest_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter="\t")
+        writer = csv.DictWriter(fh, fieldnames=out_fieldnames, delimiter="\t")
         writer.writeheader()
         writer.writerows(kept)
 
@@ -101,6 +112,7 @@ def build_hybrid_from_catalogue(
     reference_panel: str | Path,
     store_id: str,
     release_id: str,
+    stored_effect_scale: str,
     ancestry: str = DEFAULT_ANCESTRY,
     overwrite: bool = False,
     n_workers: int = 1,
@@ -108,6 +120,11 @@ def build_hybrid_from_catalogue(
     manifest_path: str | Path | None = None,
 ) -> SubsetResult:
     """Subset the Catalogue to ``ancestry`` and build a Hybrid store from it.
+
+    ``stored_effect_scale`` applies uniformly to every kept Analysis (issue
+    #17) -- this entry point is for a single Source Collection release where
+    that is expected to hold; a release mixing scales per Analysis needs a
+    manifest built some other way.
 
     Uses the unchanged ``build_hybrid_from_vcf_manifest`` on the row-filtered
     manifest, then records per-Analysis Assigned Ancestry + Catalogue provenance
@@ -123,7 +140,9 @@ def build_hybrid_from_catalogue(
         manifest_path = output_path.with_suffix(".manifest.tsv")
     manifest_path = Path(manifest_path)
 
-    subset = subset_catalogue(catalogue_path, manifest_path, ancestry=ancestry)
+    subset = subset_catalogue(
+        catalogue_path, manifest_path, ancestry=ancestry, stored_effect_scale=stored_effect_scale
+    )
     build_hybrid_from_vcf_manifest(
         subset.manifest_path,
         output_path,

@@ -150,14 +150,18 @@ def test_calibrate_cli_prints_crosstab_and_relabels(tmp_path):
     assert relabelled["eur2"]["gate_tau"] == "0.85"
 
 
-def test_relabel_preserves_catalogue_as_manifest_superset(tmp_path):
-    from opengwasdb.layouts.dense.build_vcf import _read_manifest
-
+def test_relabel_preserves_catalogue_as_manifest_columns(tmp_path):
+    """Relabelling preserves the Catalogue's trait_id/file_path/trait_name/n
+    columns (the build manifest's own columns) in order, though a relabelled
+    Catalogue is still not on its own a complete build manifest as of issue
+    #17: stored_effect_scale is a genuinely separate build input ancestry
+    assignment never needs."""
     catalogue = _write(tmp_path, _rows())
     runner = CliRunner()
     out = tmp_path / "relabelled.tsv"
     args = ["calibrate-ancestry", str(catalogue)]
     args += ["--tau", "0.85", "--delta", "0.2", "--out", str(out)]
     runner.invoke(app, args)
-    loaded = _read_manifest(out)
-    assert [m.trait_id for m in loaded] == ["eur1", "eur2", "afr1", "mix1", "eas1"]
+    with open(out, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    assert [r["trait_id"] for r in rows] == ["eur1", "eur2", "afr1", "mix1", "eas1"]

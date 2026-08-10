@@ -1002,7 +1002,7 @@ def _stream_unit(
 
         if analysis_id is None:
             return  # a VCF carries no analysis_id; it needs a manifest trait_id
-        for chrom, pos, ref, alt, z, se, _scale in stream_vcf_associations(path):
+        for chrom, pos, ref, alt, z, se in stream_vcf_associations(path):
             a1, a2 = sorted((ref, alt))
             yield (analysis_id, chrom, int(pos), a1, a2, float(z), float(se))
     else:

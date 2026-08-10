@@ -57,14 +57,16 @@ def test_resolve_reader_returns_gwas_vcf_reader_for_its_capability(tmp_path):
     vcf = tmp_path / "study.vcf"
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n")
 
-    reader = resolve_reader(GWAS_VCF_CAPABILITY, vcf)
+    reader = resolve_reader(GWAS_VCF_CAPABILITY, vcf, StoredEffectScale.SD)
 
     assert isinstance(reader, GwasVcfReader)
 
 
 def test_resolve_reader_rejects_unknown_capability(tmp_path):
     with pytest.raises(ValueError, match="unknown source reader capability"):
-        resolve_reader("opengwasdb.some-future-format", tmp_path / "study.vcf")
+        resolve_reader(
+            "opengwasdb.some-future-format", tmp_path / "study.vcf", StoredEffectScale.SD
+        )
 
 
 # --- Shared conformance suite: same assertions against GwasVcfReader and FakeReader ---
@@ -81,7 +83,7 @@ def _gwas_vcf_reader(tmp_path: Path) -> GwasVcfReader:
     )
     # Bgzip+index: stream_associations works on a plain VCF, but
     # extract_at_sites's bcftools -R region lookup requires an index.
-    return GwasVcfReader(_bgzip_index(vcf))
+    return GwasVcfReader(_bgzip_index(vcf), StoredEffectScale.SD)
 
 
 def _fake_reader() -> FakeReader:
@@ -120,18 +122,6 @@ def reader(request, tmp_path):
     return _fake_reader()
 
 
-def _malformed_gwas_vcf_reader(tmp_path: Path) -> GwasVcfReader:
-    """An unrecognised StudyType is malformed input GWAS-VCF must reject --
-    unlike a non-positive SE, which the underlying bcftools stream already
-    filters out silently (existing, unchanged behaviour; see
-    ``test_stream_vcf_associations_skips_zero_se`` in test_vcf_source.py).
-    Construction itself does not raise: GwasVcfReader is a thin path wrapper,
-    so the malformed header is only discovered once streaming is attempted."""
-    vcf = tmp_path / "malformed.vcf"
-    _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="Unknown")
-    return GwasVcfReader(vcf)
-
-
 def _malformed_fake_reader() -> FakeReader:
     """A negative SE violates ReaderAssociation's own invariant -- raised at
     construction, which is what lets "rejection of malformed input" be a
@@ -152,15 +142,16 @@ def _malformed_fake_reader() -> FakeReader:
     )
 
 
-@pytest.fixture(params=["gwas_vcf", "fake"])
-def malformed_reader_factory(request, tmp_path):
-    """A zero-arg callable that builds (and, for the fake, only then raises
-    on) a reader over malformed input -- a factory, not an already-built
-    reader, so the ValueError each param raises at a different point
-    (construction for the fake, first-iteration for GWAS-VCF) is caught by
-    the test's own `pytest.raises`, not by fixture setup."""
-    if request.param == "gwas_vcf":
-        return lambda: _malformed_gwas_vcf_reader(tmp_path)
+@pytest.fixture
+def malformed_reader_factory():
+    """Only the fake is exercised here: GWAS-VCF's own malformed-input
+    rejection (an unrecognised header StudyType) no longer exists as of
+    issue #17 -- `stored_effect_scale` is supplied by the caller at
+    construction, not derived from the file's header, so `GwasVcfReader` has
+    no remaining file-content validation of its own to reject on. A zero-arg
+    callable rather than an already-built reader, so the fake's construction
+    ValueError is caught by the test's own `pytest.raises`, not by fixture
+    setup."""
     return _malformed_fake_reader
 
 
@@ -199,22 +190,28 @@ def test_reader_conformance_extract_at_sites_ignores_unrequested_alids(reader):
     assert set(sites) == {"1:100:A:G"}
 
 
-# --- GWAS-VCF-specific malformed-input rejection (existing vcf_source behaviour) ---
+# --- GWAS-VCF manifest authority (issue #17) ---
 
 
-def test_gwas_vcf_reader_rejects_unknown_study_type(tmp_path):
+def test_gwas_vcf_reader_uses_constructor_scale_regardless_of_header(tmp_path):
+    """The ieu-a-7 scenario at the reader level: a VCF header StudyType that
+    disagrees with (or is entirely absent from) the manifest-resolved scale
+    must not affect what's yielded -- the constructor argument always wins."""
     vcf = tmp_path / "study.vcf"
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="Unknown")
 
-    with pytest.raises(ValueError, match="StudyType"):
-        list(GwasVcfReader(vcf).stream_associations())
+    reader = GwasVcfReader(vcf, StoredEffectScale.LOG_OR)
+    associations = list(reader.stream_associations())
+
+    assert len(associations) == 1
+    assert associations[0].stored_effect_scale is StoredEffectScale.LOG_OR
 
 
 def test_gwas_vcf_reader_extract_at_sites_with_no_sites_returns_empty(tmp_path):
     vcf = tmp_path / "study.vcf"
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE:AF\t1.0:0.5:0.30\n")
 
-    assert GwasVcfReader(vcf).extract_at_sites([]) == {}
+    assert GwasVcfReader(vcf, StoredEffectScale.SD).extract_at_sites([]) == {}
 
 
 # --- FakeReader: usable with no bcftools/fixture VCF dependency ---

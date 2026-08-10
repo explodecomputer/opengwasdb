@@ -32,13 +32,15 @@ from opengwasdb.model.enums import StoredEffectScale
 class ReaderAssociation:
     """One source association's position, effect, and precision.
 
-    Field shape mirrors what GWAS-VCF readers have always yielded
-    (`opengwasdb.build.vcf_source.stream_vcf_associations`): `ref`/`alt` are
-    the source's own allele labelling, not reordered to canonical A1/A2 --
-    `z` is already sign-corrected to the A1 = min(ref, alt) convention every
-    reader in this package follows. There is no `analysis_id`: a source file
-    may cover one Analysis (GWAS-VCF) or many (a multi-analysis tabular
-    file), so identity assignment stays the caller's responsibility.
+    `ref`/`alt` are the source's own allele labelling, not reordered to
+    canonical A1/A2 -- `z` is already sign-corrected to the A1 = min(ref, alt)
+    convention every reader in this package follows. There is no
+    `analysis_id`: a source file may cover one Analysis (GWAS-VCF) or many (a
+    multi-analysis tabular file), so identity assignment stays the caller's
+    responsibility. `stored_effect_scale` is likewise never derived from the
+    source file itself (issue #17): it is Analytical Metadata a reader
+    receives from its caller (ultimately the build manifest, validated
+    against issue #16's schema) and attaches to every association it yields.
     """
 
     chromosome: str

@@ -94,9 +94,9 @@ def _build_source(tmp_path):
     )
     manifest = tmp_path / "manifest.tsv"
     manifest.write_text(
-        "trait_id\tfile_path\ttrait_name\tn\n"
-        f"trait_a\t{trait_a}\tTrait A\t1000\n"
-        f"trait_c\t{trait_c}\tTrait C\t1000\n",
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\n"
+        f"trait_a\t{trait_a}\tTrait A\t1000\tsd\n"
+        f"trait_c\t{trait_c}\tTrait C\t1000\tsd\n",
         encoding="utf-8",
     )
     panel = tmp_path / "panel.txt"

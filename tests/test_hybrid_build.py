@@ -49,11 +49,20 @@ def _make_vcf(tmp_path: Path, name: str, rows: list[str], study_type: str = "Con
     return path
 
 
-def _make_manifest(tmp_path: Path, entries: list[tuple[str, Path, str]]) -> Path:
+def _make_manifest(
+    tmp_path: Path,
+    entries: list[tuple[str, Path, str]],
+    scales: dict[str, str] | None = None,
+) -> Path:
+    """Write the build manifest; see the identical helper in
+    test_dense_vcf_build.py for the full rationale -- this builder shares
+    its manifest reader with the dense one."""
+    scales = scales or {}
     manifest = tmp_path / "manifest.tsv"
-    lines = ["trait_id\tfile_path\ttrait_name\tn"]
+    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"]
     for trait_id, file_path, trait_name in entries:
-        lines.append(f"{trait_id}\t{file_path}\t{trait_name}\t1000")
+        scale = scales.get(trait_id, "sd")
+        lines.append(f"{trait_id}\t{file_path}\t{trait_name}\t1000\t{scale}")
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return manifest
 
@@ -102,6 +111,50 @@ def test_manifest_is_hybrid(hybrid_store):
     manifest = StoreManifest.load(hybrid_store)
     assert manifest.primary_layout.value == "hybrid"
     assert manifest.association_coverage.value == "full"
+
+
+def test_stored_effect_scale_comes_from_manifest_not_header(tmp_path):
+    """The ieu-a-7 fix (issue #17), hybrid path: a VCF header says
+    ``StudyType=Continuous`` but the manifest declares ``log_or`` -- the
+    built store must record the manifest's value."""
+    vcf = _make_vcf(
+        tmp_path,
+        "trait_a",
+        [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"],
+        study_type="Continuous",
+    )
+    manifest = _make_manifest(
+        tmp_path, [("trait_a", vcf, "Trait A")], scales={"trait_a": "log_or"}
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=_panel(tmp_path),
+        store_id="s", release_id="r",
+    )
+
+    q = query_store(store_path)
+    analyses = q.analyses_table()
+    assert analyses[0]["stored_effect_scale"] == "log_or"
+
+
+def test_missing_required_manifest_field_fails_the_build_loudly(tmp_path):
+    """A manifest missing stored_effect_scale must fail the build with a
+    clear error before any I/O, not fall back to VCF-header inference or a
+    silent default (issue #17)."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest_path = tmp_path / "manifest.tsv"
+    manifest_path.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="stored_effect_scale"):
+        build_hybrid_from_vcf_manifest(
+            manifest_path, tmp_path / "store.opengwasdb",
+            reference_panel=_panel(tmp_path), store_id="s", release_id="r",
+        )
 
 
 def test_store_envelope(hybrid_store):

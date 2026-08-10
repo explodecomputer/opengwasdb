@@ -9,18 +9,14 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
-from opengwasdb.model.enums import StoredEffectScale
 from opengwasdb.variants.normalise import normalise_chromosome
 
 log = logging.getLogger(__name__)
-
-_STUDY_TYPE_RE = re.compile(r"StudyType=([^,>\s]+)")
 
 
 def _require_bcftools() -> str:
@@ -30,34 +26,6 @@ def _require_bcftools() -> str:
             "bcftools not found in PATH — install via conda: conda install -c bioconda bcftools"
         )
     return path
-
-
-def _infer_study_type(path: str, header: str) -> StoredEffectScale:
-    match = _STUDY_TYPE_RE.search(header)
-    if match is None:
-        raise ValueError(f"StudyType not found in ##SAMPLE header of {path}")
-    study_type = match.group(1).strip()
-    if study_type == "CaseControl":
-        return StoredEffectScale.LOG_OR
-    if study_type == "Continuous":
-        return StoredEffectScale.SD
-    raise ValueError(f"Unrecognised StudyType {study_type!r} in {path}")
-
-
-def read_vcf_study_type(path: str | Path) -> StoredEffectScale:
-    """Return the StoredEffectScale inferred from a GWAS-VCF header.
-
-    Reads only the header via bcftools view -h (fast).
-    Raises ValueError if StudyType is absent or unrecognised.
-    """
-    bcftools = _require_bcftools()
-    result = subprocess.run(
-        [bcftools, "view", "-h", str(path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return _infer_study_type(str(path), result.stdout)
 
 
 def stream_vcf_variants(path: str | Path) -> Iterator[tuple[str, int, str, str]]:
@@ -88,16 +56,23 @@ def stream_vcf_variants(path: str | Path) -> Iterator[tuple[str, int, str, str]]
 
 def stream_vcf_associations(
     path: str | Path,
-) -> Iterator[tuple[str, int, str, str, float, float, StoredEffectScale]]:
-    """Yield (bare_chrom, pos, ref, alt, z, se, stored_effect_scale) for each biallelic record.
+) -> Iterator[tuple[str, int, str, str, float, float]]:
+    """Yield (bare_chrom, pos, ref, alt, z, se) for each biallelic record.
 
     z is oriented to canonical ALID convention: A1 = min(ref, alt).  When the
     VCF effect allele (ALT) is not A1, z is negated.  SE is always positive.
 
     Records with SE ≤ 0, non-finite z, or all EZ/ES/SE missing are skipped.
+
+    Carries no effect-scale information: the VCF's own `##SAMPLE` `StudyType`
+    header is not authoritative for `stored_effect_scale` (issue #17 --
+    ieu-a-7 declares `StudyType=Continuous` with no case/control counts for
+    an unambiguously case-control trait) and is never read by this module.
+    `stored_effect_scale` is Analytical Metadata the caller must supply from
+    the build manifest, validated against `opengwasdb.model.analyses`'s
+    schema (issue #16).
     """
     bcftools = _require_bcftools()
-    stored_effect_scale = read_vcf_study_type(path)
     proc = subprocess.Popen(
         [
             bcftools,
@@ -132,7 +107,7 @@ def stream_vcf_associations(
             if alt > ref:
                 z = -z
 
-            yield normalise_chromosome(chrom_raw), int(pos_str), ref, alt, z, se, stored_effect_scale
+            yield normalise_chromosome(chrom_raw), int(pos_str), ref, alt, z, se
     finally:
         proc.stdout.close()  # type: ignore[union-attr]
         proc.wait()
