@@ -20,22 +20,44 @@ class CompletionState(StrEnum):
 
 
 class StoredEffectScale(StrEnum):
-    SD_UNITS = "sd_units"
+    SD = "sd"
     LOG_OR = "log_or"
     LOG_HAZARD = "log_hazard"
 
 
 class SampleSizeKind(StrEnum):
-    PARTICIPANTS = "participants"
+    TOTAL = "total"
     CASE_CONTROL = "case_control"
     EFFECTIVE = "effective"
-    UNKNOWN = "unknown"
+    VARIANT_LEVEL = "variant_level"
 
 
 class SampleSizeScope(StrEnum):
-    ANALYSIS = "analysis"
-    VARIANT = "variant"
-    NONE = "none"
+    ANALYSIS_LEVEL = "analysis_level"
+    VARIANT_LEVEL = "variant_level"
+
+
+# Analytical Metadata vocabularies (store-format spec §7a). Literal values match
+# the registry's already-shipped analyses.tsv vocabulary (opengwasdb-stores
+# docs/release-metadata-schema.md), adopted as canonical here rather than
+# reworked registry-side, since opengwasdb had not yet implemented analyses.tsv
+# I/O when the two vocabularies diverged.
+class AncestryAssignmentMethod(StrEnum):
+    AF_ASSIGNED = "af_assigned"
+    SOURCE_FALLBACK = "source_fallback"
+    SOURCE_TRUSTED_NO_AF = "source_trusted_no_af"
+    UNASSIGNED = "unassigned"
+
+
+# Priority order documented in ADR-0029.
+class OriginalSdMethod(StrEnum):
+    DECLARED_STANDARDISED = "declared_standardised"
+    SOURCE_PROVIDED = "source_provided"
+    ESTIMATED_FROM_SOURCE_MAF = "estimated_from_source_maf"
+    ESTIMATED_FROM_REFERENCE_MAF = "estimated_from_reference_maf"
+    ESTIMATED_FROM_BETA_DISTRIBUTION = "estimated_from_beta_distribution"
+    BINARY_TRAIT = "binary_trait"
+    UNAVAILABLE = "unavailable"
 
 
 class EafScope(StrEnum):

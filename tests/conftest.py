@@ -26,10 +26,10 @@ SOURCE_HEADER = "\t".join(
 
 SOURCE_ROWS = [
     # Generated tiny fixture. Shape intentionally has overlap and missing cells.
-    "a1\tp1\tHeight\tHeight primary\t1\t100\tA\tG\t2.0\t0.1\trs1\tsd_units",
+    "a1\tp1\tHeight\tHeight primary\t1\t100\tA\tG\t2.0\t0.1\trs1\tsd",
     "a2\tp2\tDisease\tDisease primary\t1\t100\tA\tG\t6.0\t0.2\trs1\tlog_or",
     # Source effect allele is not canonical A1, so stored z is negated.
-    "a1\tp1\tHeight\tHeight primary\t1\t200\tT\tC\t3.0\t0.2\trs2\tsd_units",
+    "a1\tp1\tHeight\tHeight primary\t1\t200\tT\tC\t3.0\t0.2\trs2\tsd",
     # Source effect allele is not canonical A1, so stored z becomes positive.
     "a2\tp2\tDisease\tDisease primary\t1\t300\tG\tA\t-6.0\t0.5\trs3\tlog_or",
 ]
