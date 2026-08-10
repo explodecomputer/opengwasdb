@@ -3,10 +3,11 @@
 A build manifest is a pure **row filter** over the Catalogue (ADR 0027): because
 the Catalogue is a superset of the build manifest's ``trait_id``/``file_path``/
 ``trait_name``/``n`` columns, filtering to ``assigned_ancestry == EUR`` yields
-those columns already in the shape ``build-hybrid`` reads. The one column the
-Catalogue does not carry is ``stored_effect_scale`` (issue #17): ancestry
-assignment runs on allele frequencies alone and may run before a study's
-effect scale is even resolved, so it stays a genuinely separate build input --
+those columns already in the shape ``build-hybrid`` reads. Two columns the
+Catalogue does not carry are ``stored_effect_scale`` (issue #17) and
+``original_sd_method``/``original_sd`` (issue #18): ancestry assignment runs on
+allele frequencies alone and may run before a study's effect scale or
+phenotype SD is even resolved, so they stay genuinely separate build inputs --
 supplied by the caller here and stamped onto the filtered rows before writing
 the manifest, not something ancestry assignment should ever need to know
 about. After the build, the store's per-Analysis Assigned Ancestry and
@@ -47,14 +48,20 @@ def subset_catalogue(
     manifest_path: str | Path,
     *,
     stored_effect_scale: str,
+    original_sd_method: str,
     ancestry: str = DEFAULT_ANCESTRY,
+    original_sd: str | float | None = None,
 ) -> SubsetResult:
     """Row-filter the Catalogue to ``assigned_ancestry == ancestry``.
 
     Writes the filtered rows verbatim (all Catalogue columns), plus
-    ``stored_effect_scale`` stamped onto every row -- the one column
-    `opengwasdb.layouts.dense.build_vcf._read_manifest` now requires that the
-    Catalogue itself never carries (issue #17). Returns the subset provenance.
+    ``stored_effect_scale`` and ``original_sd_method``/``original_sd`` stamped
+    onto every row -- the columns `opengwasdb.layouts.dense.build_vcf._read_manifest`
+    now requires that the Catalogue itself never carries (issues #17, #18).
+    ``original_sd`` applies uniformly to every kept Analysis, like
+    ``stored_effect_scale``; leave it ``None`` for ``original_sd_method``
+    values that carry no SD magnitude (``declared_standardised``,
+    ``binary_trait``). Returns the subset provenance.
     """
     catalogue_path = Path(catalogue_path)
     manifest_path = Path(manifest_path)
@@ -68,7 +75,9 @@ def subset_catalogue(
     kept = [r for r in rows if r.get("assigned_ancestry") == ancestry]
     for row in kept:
         row["stored_effect_scale"] = stored_effect_scale
-    out_fieldnames = [*fieldnames, "stored_effect_scale"]
+        row["original_sd_method"] = original_sd_method
+        row["original_sd"] = "" if original_sd is None else str(original_sd)
+    out_fieldnames = [*fieldnames, "stored_effect_scale", "original_sd_method", "original_sd"]
     with open(manifest_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=out_fieldnames, delimiter="\t")
         writer.writeheader()
@@ -113,7 +122,9 @@ def build_hybrid_from_catalogue(
     store_id: str,
     release_id: str,
     stored_effect_scale: str,
+    original_sd_method: str,
     ancestry: str = DEFAULT_ANCESTRY,
+    original_sd: str | float | None = None,
     overwrite: bool = False,
     n_workers: int = 1,
     chunk_shape: tuple[int, int] | None = None,
@@ -121,10 +132,11 @@ def build_hybrid_from_catalogue(
 ) -> SubsetResult:
     """Subset the Catalogue to ``ancestry`` and build a Hybrid store from it.
 
-    ``stored_effect_scale`` applies uniformly to every kept Analysis (issue
-    #17) -- this entry point is for a single Source Collection release where
-    that is expected to hold; a release mixing scales per Analysis needs a
-    manifest built some other way.
+    ``stored_effect_scale`` and ``original_sd_method``/``original_sd`` apply
+    uniformly to every kept Analysis (issues #17, #18) -- this entry point is
+    for a single Source Collection release where that is expected to hold; a
+    release mixing scales or SD methods per Analysis needs a manifest built
+    some other way.
 
     Uses the unchanged ``build_hybrid_from_vcf_manifest`` on the row-filtered
     manifest, then records per-Analysis Assigned Ancestry + Catalogue provenance
@@ -141,7 +153,12 @@ def build_hybrid_from_catalogue(
     manifest_path = Path(manifest_path)
 
     subset = subset_catalogue(
-        catalogue_path, manifest_path, ancestry=ancestry, stored_effect_scale=stored_effect_scale
+        catalogue_path,
+        manifest_path,
+        ancestry=ancestry,
+        stored_effect_scale=stored_effect_scale,
+        original_sd_method=original_sd_method,
+        original_sd=original_sd,
     )
     build_hybrid_from_vcf_manifest(
         subset.manifest_path,

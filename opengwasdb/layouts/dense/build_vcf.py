@@ -32,6 +32,7 @@ from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
+    OriginalSdMethod,
     PrimaryStorageLayout,
     StoredEffectScale,
 )
@@ -51,6 +52,20 @@ class _ManifestRow:
     trait_name: str
     n: int
     stored_effect_scale: str
+    se_divisor: float  # divides original_se to standardise to SD units (issue #18); 1.0 = no-op
+
+
+# original_sd_method tiers that carry an actual phenotype-SD magnitude to divide
+# by (ADR-0029 methods 2-5). declared_standardised implies sd=1 (no magnitude
+# recorded); binary_trait is not SD-scale at all -- neither rescales.
+_SD_RESCALE_METHODS = frozenset(
+    {
+        OriginalSdMethod.SOURCE_PROVIDED,
+        OriginalSdMethod.ESTIMATED_FROM_SOURCE_MAF,
+        OriginalSdMethod.ESTIMATED_FROM_REFERENCE_MAF,
+        OriginalSdMethod.ESTIMATED_FROM_BETA_DISTRIBUTION,
+    }
+)
 
 
 # Pass 2 fork-safe lookup + spill dir, set in the parent immediately before the
@@ -163,8 +178,18 @@ def _match_batch(
     return rows, z_arr, se_arr
 
 
+def _apply_se_divisor(se: np.ndarray, se_divisor: float) -> np.ndarray:
+    """Continuous-trait phenotype-SD standardisation (issue #18):
+    ``stored_se = original_se / sd``. Shared by the dense and hybrid builders,
+    both of which resolve an association stream to ``(index, z, se)`` and need
+    the same no-op-when-1.0 divide applied to ``se`` before spilling."""
+    if se_divisor == 1.0:
+        return se
+    return se / np.float32(se_divisor)
+
+
 def _resolve_column(
-    file_path: str, keys_sorted: np.ndarray, rows_sorted: np.ndarray
+    file_path: str, keys_sorted: np.ndarray, rows_sorted: np.ndarray, se_divisor: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Stream one VCF, resolve each association's variant to a row via the sorted
     key lookup, and return deduped ``(rows int64, z f32, se f32)`` for the column.
@@ -175,6 +200,12 @@ def _resolve_column(
     the final last-wins dedup by row is identical to processing the whole file at
     once: when two source variants lift to the same row, the later stream
     occurrence wins, making the scattered matrix cell deterministic.
+
+    ``se_divisor`` divides the returned ``se`` (continuous-trait phenotype-SD
+    standardisation, issue #18: ``stored_se = original_se / sd``). ``z`` is left
+    untouched -- ``z = beta/se`` is invariant to dividing both by the same
+    constant, so only ``se`` needs rescaling. Defaults to 1.0 (no-op) for
+    binary-trait analyses and callers that pre-date issue #18.
     """
     rows_parts: list[np.ndarray] = []
     z_parts: list[np.ndarray] = []
@@ -226,6 +257,7 @@ def _resolve_column(
         _, first_in_rev = np.unique(rows[::-1], return_index=True)
         keep = np.sort(len(rows) - 1 - first_in_rev)
         rows, z_arr, se_arr = rows[keep], z_arr[keep], se_arr[keep]
+    se_arr = _apply_se_divisor(se_arr, se_divisor)
     return rows, z_arr, se_arr
 
 
@@ -245,14 +277,14 @@ def _spill_column(
     tmp.replace(final)
 
 
-def _pass2_worker(task: tuple[int, str]) -> int:
+def _pass2_worker(task: tuple[int, str, float]) -> int:
     """Resolve one VCF column against the fork-inherited numpy lookup and spill it.
     Returns col_idx only — the compact result stays on disk, never in a pipe."""
     assert _pass2_keys_sorted is not None
     assert _pass2_rows_sorted is not None
     assert _pass2_spill_dir is not None
-    col_idx, file_path = task
-    rows, z, se = _resolve_column(file_path, _pass2_keys_sorted, _pass2_rows_sorted)
+    col_idx, file_path, se_divisor = task
+    rows, z, se = _resolve_column(file_path, _pass2_keys_sorted, _pass2_rows_sorted, se_divisor)
     _spill_column(_pass2_spill_dir, col_idx, rows, z, se)
     return col_idx
 
@@ -456,7 +488,9 @@ def build_dense_from_vcf_manifest(
         if n_workers <= 1:
             for i, row in enumerate(manifest_rows):
                 col_idx = analysis_index[row.trait_id]
-                rows, z, se = _resolve_column(row.file_path, keys_sorted, rows_sorted)
+                rows, z, se = _resolve_column(
+                    row.file_path, keys_sorted, rows_sorted, row.se_divisor
+                )
                 _spill_column(spill_dir, col_idx, rows, z, se)
                 _log_progress(
                     "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
@@ -470,7 +504,8 @@ def build_dense_from_vcf_manifest(
             try:
                 with _fork_pool(n_workers) as pool:
                     tasks = [
-                        (analysis_index[row.trait_id], row.file_path) for row in manifest_rows
+                        (analysis_index[row.trait_id], row.file_path, row.se_divisor)
+                        for row in manifest_rows
                     ]
                     futures = [pool.submit(_pass2_worker, t) for t in tasks]
                     for i, fut in enumerate(as_completed(futures)):
@@ -521,41 +556,85 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     ``trait_name``/``n`` columns -- also the Analysis Catalogue's
     ``BUILD_COLUMNS`` (`opengwasdb.ancestry.catalogue`), so a
     Catalogue-annotated file remains readable here for those four columns --
-    plus a now-required ``stored_effect_scale`` column (issue #17).
+    plus required ``stored_effect_scale`` (issue #17) and ``original_sd_method``
+    (issue #18) columns, and an ``original_sd`` column required only for the
+    ``original_sd_method`` tiers that carry an actual SD magnitude.
 
-    `stored_effect_scale` is deliberately NOT part of the Catalogue/ancestry
-    manifest shape: ancestry assignment runs on allele frequencies alone and
-    may run before a study's effect scale is even resolved, so the two
-    concerns stay independent build inputs rather than one combined schema.
-    A manifest missing the column, or carrying an out-of-vocabulary value,
-    fails the build loudly rather than falling back to the old VCF-header
-    inference or a silent default.
+    Neither column is part of the Catalogue/ancestry manifest shape: ancestry
+    assignment runs on allele frequencies alone and may run before a study's
+    effect scale or phenotype SD is even resolved, so these stay independent
+    build inputs rather than part of one combined schema. A manifest missing a
+    required column, carrying an out-of-vocabulary value, declaring
+    ``original_sd_method=unavailable``, omitting ``original_sd`` for a tier
+    that needs it, or supplying a stray ``original_sd`` for a tier that carries
+    no SD magnitude (``declared_standardised``, ``binary_trait``), fails the
+    build loudly rather than falling back to the old VCF-header inference or a
+    silently assumed ``sd=1`` (issue #18 AC3).
     """
     with open(manifest_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         fieldnames = list(reader.fieldnames or [])
         rows = list(reader)
-    if "stored_effect_scale" not in fieldnames:
-        raise ValueError(
-            f"manifest {manifest_path} is missing required column: 'stored_effect_scale'"
-        )
+    for column in ("stored_effect_scale", "original_sd_method"):
+        if column not in fieldnames:
+            raise ValueError(f"manifest {manifest_path} is missing required column: {column!r}")
     result = []
     for row in rows:
+        trait_id = row["trait_id"]
         scale = row["stored_effect_scale"]
         try:
             StoredEffectScale(scale)
         except ValueError as exc:
             raise ValueError(
-                f"manifest {manifest_path}: analysis {row['trait_id']!r} has invalid "
+                f"manifest {manifest_path}: analysis {trait_id!r} has invalid "
                 f"stored_effect_scale {scale!r}"
             ) from exc
+        sd_method_raw = row["original_sd_method"]
+        try:
+            sd_method = OriginalSdMethod(sd_method_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"manifest {manifest_path}: analysis {trait_id!r} has invalid "
+                f"original_sd_method {sd_method_raw!r}"
+            ) from exc
+        if sd_method is OriginalSdMethod.UNAVAILABLE:
+            raise ValueError(
+                f"manifest {manifest_path}: analysis {trait_id!r} has "
+                "original_sd_method='unavailable' -- its phenotype SD could not be "
+                "established upstream, so the build cannot standardise its effects (issue #18)"
+            )
+        se_divisor = 1.0
+        if sd_method in _SD_RESCALE_METHODS:
+            original_sd_raw = row.get("original_sd", "")
+            try:
+                se_divisor = float(original_sd_raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"manifest {manifest_path}: analysis {trait_id!r} has "
+                    f"original_sd_method={sd_method.value!r} but original_sd "
+                    f"{original_sd_raw!r} is not a valid number"
+                ) from exc
+            if not se_divisor > 0:
+                raise ValueError(
+                    f"manifest {manifest_path}: analysis {trait_id!r} has "
+                    f"non-positive original_sd {original_sd_raw!r}"
+                )
+        else:
+            stray_sd = row.get("original_sd", "")
+            if stray_sd:
+                raise ValueError(
+                    f"manifest {manifest_path}: analysis {trait_id!r} has "
+                    f"original_sd_method={sd_method.value!r}, which carries no SD "
+                    f"magnitude, but original_sd={stray_sd!r} was supplied"
+                )
         result.append(
             _ManifestRow(
-                trait_id=row["trait_id"],
+                trait_id=trait_id,
                 file_path=row["file_path"],
-                trait_name=row.get("trait_name", row["trait_id"]),
+                trait_name=row.get("trait_name", trait_id),
                 n=int(row.get("n", 0) or 0),
                 stored_effect_scale=scale,
+                se_divisor=se_divisor,
             )
         )
     return result

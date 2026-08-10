@@ -28,6 +28,7 @@ from opengwasdb.layouts.dense.build import AnalysisMetadata
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
     _alid_sort_key,
+    _apply_se_divisor,
     _create_dense_zarr,
     _encode_variant_keys,
     _fork_pool,
@@ -178,6 +179,7 @@ def _resolve_column_hybrid(
     keys_sorted: np.ndarray,
     targets_sorted: np.ndarray,
     ispanel_sorted: np.ndarray,
+    se_divisor: float = 1.0,
 ) -> tuple[
     tuple[np.ndarray, np.ndarray, np.ndarray],
     tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -185,6 +187,11 @@ def _resolve_column_hybrid(
     """Stream one study once, routing each association to the dense fill (on-panel)
     or the ragged overflow (off-panel). Returns ``(dense, overflow)`` where each is
     ``(index int64, z f32, se f32)`` deduped last-wins by index.
+
+    ``se_divisor`` divides every returned ``se`` value, dense and overflow alike
+    (continuous-trait phenotype-SD standardisation, issue #18): a study's SD
+    rescaling applies uniformly regardless of which component an association
+    routes to. Defaults to 1.0 (no-op).
     """
     d_idx: list[np.ndarray] = []
     d_z: list[np.ndarray] = []
@@ -243,9 +250,10 @@ def _resolve_column_hybrid(
                 np.empty(0, dtype=np.float32),
                 np.empty(0, dtype=np.float32),
             )
-        return _dedup_last_wins(
+        idx, z, se = _dedup_last_wins(
             np.concatenate(parts_i), np.concatenate(parts_z), np.concatenate(parts_se)
         )
+        return idx, z, _apply_se_divisor(se, se_divisor)
 
     return _assemble(d_idx, d_z, d_se), _assemble(o_idx, o_z, o_se)
 
@@ -270,14 +278,14 @@ def _spill_hybrid_column(
         tmp.replace(final)
 
 
-def _pass2_worker(task: tuple[int, str]) -> int:
+def _pass2_worker(task: tuple[int, str, float]) -> int:
     assert _pass2_keys_sorted is not None
     assert _pass2_targets_sorted is not None
     assert _pass2_ispanel_sorted is not None
     assert _pass2_spill_dir is not None
-    col_idx, file_path = task
+    col_idx, file_path, se_divisor = task
     dense, overflow = _resolve_column_hybrid(
-        file_path, _pass2_keys_sorted, _pass2_targets_sorted, _pass2_ispanel_sorted
+        file_path, _pass2_keys_sorted, _pass2_targets_sorted, _pass2_ispanel_sorted, se_divisor
     )
     _spill_hybrid_column(_pass2_spill_dir, col_idx, dense, overflow)
     return col_idx
@@ -434,7 +442,7 @@ def build_hybrid_from_vcf_manifest(
             for i, row in enumerate(manifest_rows):
                 col = analysis_index[row.trait_id]
                 dense, overflow = _resolve_column_hybrid(
-                    row.file_path, keys_sorted, targets_sorted, ispanel_sorted
+                    row.file_path, keys_sorted, targets_sorted, ispanel_sorted, row.se_divisor
                 )
                 _spill_hybrid_column(spill_dir, col, dense, overflow)
                 _log_progress("Pass 2", i + 1, n_analyses, t2, f"last: {row.trait_id}", every=25)
@@ -448,7 +456,10 @@ def build_hybrid_from_vcf_manifest(
             id_by_col = {analysis_index[row.trait_id]: row.trait_id for row in manifest_rows}
             try:
                 with _fork_pool(n_workers) as pool:
-                    tasks = [(analysis_index[row.trait_id], row.file_path) for row in manifest_rows]
+                    tasks = [
+                        (analysis_index[row.trait_id], row.file_path, row.se_divisor)
+                        for row in manifest_rows
+                    ]
                     futures = [pool.submit(_pass2_worker, t) for t in tasks]
                     for i, fut in enumerate(as_completed(futures)):
                         col = fut.result()
