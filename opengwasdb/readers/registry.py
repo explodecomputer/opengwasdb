@@ -1,0 +1,37 @@
+"""Source Reader Capability resolution (issue #19; opengwasdb-stores ADR-0009).
+
+The single, documented point that maps a Source Collection's
+`source_reader_capability` string to a concrete `SourceReader`. Existing
+builders do not yet call through this resolver -- wiring them is out of
+scope here (see `opengwasdb.readers.interface`'s module docstring); this
+ticket only introduces the seam.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY, GwasVcfReader
+from opengwasdb.readers.interface import SourceReader
+
+_READERS: dict[str, Callable[[str | Path], SourceReader]] = {
+    GWAS_VCF_CAPABILITY: GwasVcfReader,
+}
+
+
+def resolve_reader(capability: str, path: str | Path) -> SourceReader:
+    """Return a SourceReader for `path`, given its Source Collection's
+    `source_reader_capability` string.
+
+    Raises ValueError for an unknown capability, naming the ones this
+    package knows about.
+    """
+    try:
+        reader_factory = _READERS[capability]
+    except KeyError:
+        known = ", ".join(sorted(_READERS)) or "(none registered)"
+        raise ValueError(
+            f"unknown source reader capability {capability!r}; known: {known}"
+        ) from None
+    return reader_factory(path)
