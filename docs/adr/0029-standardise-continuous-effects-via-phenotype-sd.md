@@ -50,10 +50,13 @@ estimate than a single robust per-study scalar.
    a combined quantity without `N`.
 
 A dispersion diagnostic (the spread — e.g. MAD — of the per-variant implied-`sd`
-values behind methods 2-4) is recorded alongside `original_sd` and
-`original_sd_method` as Analytical Metadata (ADR-0030): high dispersion signals
-wrong AF orientation, mixed ancestry, or genomic-control problems even though the
-median still returns a value.
+values behind methods 3-5, the three methods that actually compute a per-variant
+estimate) is recorded alongside `original_sd` and `original_sd_method` as
+Analytical Metadata (ADR-0030): high dispersion signals wrong AF orientation,
+mixed ancestry, or genomic-control problems even though the median still
+returns a value. `declared_standardised` and `source_provided` have no
+per-variant estimate to disperse; `binary_trait` and `unavailable` produce no
+`sd` at all.
 
 ## Considered options
 
