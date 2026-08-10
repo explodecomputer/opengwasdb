@@ -57,12 +57,12 @@ SOURCE_HEADER = "\t".join(
 # chr1:1,200,000 A/G — observed by a1 only; OFF-PANEL (not in any LD block) → a2's
 #                       n_missing_off_panel picks this up.
 SOURCE_ROWS = [
-    "a1\tp1\tHeight\tHeight primary\t1\t900000\tA\tG\t1.0\t0.15\trs0\tsd_units",
-    "a1\tp1\tHeight\tHeight primary\t1\t950000\tA\tC\t1.8\t0.15\trs0b\tsd_units",
-    "a1\tp1\tHeight\tHeight primary\t1\t1000000\tA\tG\t2.0\t0.15\trs1\tsd_units",
+    "a1\tp1\tHeight\tHeight primary\t1\t900000\tA\tG\t1.0\t0.15\trs0\tsd",
+    "a1\tp1\tHeight\tHeight primary\t1\t950000\tA\tC\t1.8\t0.15\trs0b\tsd",
+    "a1\tp1\tHeight\tHeight primary\t1\t1000000\tA\tG\t2.0\t0.15\trs1\tsd",
     "a2\tp2\tDisease\tDisease primary\t1\t1000000\tA\tG\t6.0\t0.20\trs1\tlog_or",
-    "a1\tp1\tHeight\tHeight primary\t1\t1100000\tA\tC\t3.0\t0.20\trs2\tsd_units",
-    "a1\tp1\tHeight\tHeight primary\t1\t1200000\tA\tG\t1.5\t0.30\trs3\tsd_units",
+    "a1\tp1\tHeight\tHeight primary\t1\t1100000\tA\tC\t3.0\t0.20\trs2\tsd",
+    "a1\tp1\tHeight\tHeight primary\t1\t1200000\tA\tG\t1.5\t0.30\trs3\tsd",
 ]
 
 
@@ -730,7 +730,7 @@ def signal_source_path(tmp_path: Path) -> Path:
         if i == _SIGNAL_MISSING_IDX:
             continue
         rows.append(
-            f"a1\tp1\tHeight\tHeight primary\t1\t{pos}\tA\tG\t{z:.6f}\t0.2\trs{i}\tsd_units"
+            f"a1\tp1\tHeight\tHeight primary\t1\t{pos}\tA\tG\t{z:.6f}\t0.2\trs{i}\tsd"
         )
     path = tmp_path / "signal_associations.tsv"
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")

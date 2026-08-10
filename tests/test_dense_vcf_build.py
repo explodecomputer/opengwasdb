@@ -169,7 +169,7 @@ def test_stored_effect_scale_matches_vcf_study_type(two_trait_store):
     query = query_store(two_trait_store)
     analyses = query.analyses_table()
     by_id = {v["analysis_id"]: v for v in analyses.values()}
-    assert by_id["trait_a"]["stored_effect_scale"] == "sd_units"
+    assert by_id["trait_a"]["stored_effect_scale"] == "sd"
     assert by_id["trait_b"]["stored_effect_scale"] == "log_or"
 
 

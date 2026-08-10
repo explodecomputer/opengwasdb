@@ -174,7 +174,7 @@ The v0.1 target dtype for dense statistics is `float16`, subject to validation b
 Each Analysis MUST declare Stored Effect Scale from the controlled vocabulary:
 
 ```text
-sd_units
+sd
 log_or
 log_hazard
 ```
@@ -210,6 +210,7 @@ original_effect_scale
 original_sd
 original_sd_method
 original_sd_dispersion
+completed_against   (Reference-Completed releases only; null when unimputed)
 completion_median_pearson_r   (Reference-Completed releases only)
 completion_n_imputed_total
 completion_n_missing_total
@@ -231,18 +232,17 @@ Sample size semantics are represented by kind and scope.
 Sample Size Kind:
 
 ```text
-participants
+total
 case_control
 effective
-unknown
+variant_level
 ```
 
 Sample Size Scope:
 
 ```text
-analysis
-variant
-none
+analysis_level
+variant_level
 ```
 
 OpenGWASDB MUST NOT present sample size inferred from effect statistics as an observed participant count.

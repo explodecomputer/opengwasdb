@@ -29,7 +29,7 @@ class NormalisedAssociation:
     phenotype_id: str | None = None
     phenotype_label: str | None = None
     analysis_label: str | None = None
-    stored_effect_scale: StoredEffectScale = StoredEffectScale.SD_UNITS
+    stored_effect_scale: StoredEffectScale = StoredEffectScale.SD
     eaf: float | None = None
 
 
@@ -120,7 +120,7 @@ def _normalise_row(row: dict[str, str], row_number: int) -> NormalisedAssociatio
 
     scale_text = field("stored_effect_scale", "effect_scale", required=False)
     try:
-        scale = StoredEffectScale(scale_text) if scale_text else StoredEffectScale.SD_UNITS
+        scale = StoredEffectScale(scale_text) if scale_text else StoredEffectScale.SD
     except ValueError as exc:
         message = f"row {row_number}: invalid stored_effect_scale {scale_text!r}"
         raise SourceRowError(message) from exc

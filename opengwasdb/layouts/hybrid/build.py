@@ -509,7 +509,7 @@ def _safe_study_type(file_path: str) -> StoredEffectScale:
     try:
         return read_vcf_study_type(file_path)
     except Exception:  # noqa: BLE001 - non-VCF or missing header → default scale
-        return StoredEffectScale.SD_UNITS
+        return StoredEffectScale.SD
 
 
 def _write_variant_table(

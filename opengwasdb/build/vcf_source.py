@@ -40,7 +40,7 @@ def _infer_study_type(path: str, header: str) -> StoredEffectScale:
     if study_type == "CaseControl":
         return StoredEffectScale.LOG_OR
     if study_type == "Continuous":
-        return StoredEffectScale.SD_UNITS
+        return StoredEffectScale.SD
     raise ValueError(f"Unrecognised StudyType {study_type!r} in {path}")
 
 

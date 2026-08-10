@@ -2,7 +2,7 @@
 
 ADR-0004 assigns Stored Effect Scale purely from the source `StudyType` label, and
 ADR-0005 deliberately keeps `z`/`se` reconstruction independent of allele frequency
-and sample size. Together these mean a Continuous study is labelled `sd_units`
+and sample size. Together these mean a Continuous study is labelled `sd`
 without ever being verified or actually standardised — the store trusts that the
 source's reported units already are per-SD. That trust is not safe: `ieu-a-7`
 (Coronary Heart Disease, unambiguously a case-control trait) carries
@@ -25,21 +25,27 @@ estimate than a single robust per-study scalar.
 `sd` is obtained by the best available method, recorded per Analysis as
 `original_sd_method`, in priority order:
 
-1. `source_provided` — the source declares phenotype SD directly (including the
+1. `declared_standardised` — the source's own metadata declares the statistics
+   are already on the SD scale (for example, the OpenGWAS API's `unit` field
+   reporting `SD` for a study, independent of the source file's own header),
+   so no rescaling is applied and no `original_sd` magnitude is recorded.
+   Distinct from `source_provided` below: this is a scale declaration, not a
+   phenotype-SD value to divide by.
+2. `source_provided` — the source declares phenotype SD directly (including the
    `sd = 1` case when the source declares rank-inverse-normalisation).
-2. `estimated_from_source_maf` — a robust, median-based estimator over the
+3. `estimated_from_source_maf` — a robust, median-based estimator over the
    study's own observed variants: `sd_hat = median(se_raw · √(2·f·(1−f))) · √N`,
    the same formulation as `scalar_n_se` (`opengwasdb/completion/impute.py`),
    repurposed from reference-completion's per-study SE-scale constant to a
    phenotype-SD estimate.
-3. `estimated_from_reference_maf` — the same estimator, substituting the
+4. `estimated_from_reference_maf` — the same estimator, substituting the
    ancestry-matched Ancestry Reference Panel frequency where source AF is absent.
-4. `estimated_from_beta_distribution` — recovering `sd` from the spread of random
+5. `estimated_from_beta_distribution` — recovering `sd` from the spread of random
    common-variant betas when neither AF source is usable; the lowest-confidence
    rung, restricted to common-variant random samples.
-5. `binary_trait` — not applicable; case-control effects are `log_or`, not
+6. `binary_trait` — not applicable; case-control effects are `log_or`, not
    SD-rescaled.
-6. `unavailable` — `N` could not be established from any source; the study is
+7. `unavailable` — `N` could not be established from any source; the study is
    flagged rather than guessed at, since the formula only ever yields `sd/√N` as
    a combined quantity without `N`.
 

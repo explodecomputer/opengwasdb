@@ -149,7 +149,7 @@ def test_stream_vcf_associations_continuous_study_type(tmp_path):
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="Continuous")
 
     assocs = list(stream_vcf_associations(vcf))
-    assert assocs[0][6] == StoredEffectScale.SD_UNITS
+    assert assocs[0][6] == StoredEffectScale.SD
 
 
 def test_stream_vcf_associations_case_control_study_type(tmp_path):
