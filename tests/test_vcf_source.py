@@ -1,19 +1,21 @@
-"""Tests for opengwasdb.build.vcf_source."""
+"""Tests for opengwasdb.build.vcf_source.
+
+As of issue #17, this module carries no effect-scale information at all --
+`stored_effect_scale` is Analytical Metadata the build manifest supplies, not
+something derivable from a GWAS-VCF header. `study_type` remains a parameter
+of the shared `_write_vcf` fixture helper purely as harmless realism (a
+``##SAMPLE`` header some tests still include), not because anything here
+reads it.
+"""
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from opengwasdb.build.vcf_source import (
-    read_vcf_study_type,
-    stream_vcf_associations,
-    stream_vcf_variants,
-)
-from opengwasdb.model.enums import StoredEffectScale
+from opengwasdb.build.vcf_source import stream_vcf_associations, stream_vcf_variants
 
 
 def _write_vcf(path: Path, body: str, study_type: str = "Continuous") -> None:
@@ -21,9 +23,9 @@ def _write_vcf(path: Path, body: str, study_type: str = "Continuous") -> None:
     header = f"""\
 ##fileformat=VCFv4.2
 ##FILTER=<ID=PASS,Description="All filters passed">
-##FORMAT=<ID=ES,Number=A,Type=Float,Description="Effect size estimate relative to the alternative allele">
-##FORMAT=<ID=SE,Number=A,Type=Float,Description="Standard error of effect size estimate">
-##FORMAT=<ID=EZ,Number=A,Type=Float,Description="Z-score provided if it was used to derive the EFFECT and SE fields">
+##FORMAT=<ID=ES,Number=A,Type=Float,Description="Effect size relative to ALT">
+##FORMAT=<ID=SE,Number=A,Type=Float,Description="Standard error of effect size">
+##FORMAT=<ID=EZ,Number=A,Type=Float,Description="Z-score, if used to derive EFFECT/SE">
 ##SAMPLE=<ID=STUDY1,StudyType={study_type}>
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSTUDY1
 """
@@ -85,7 +87,7 @@ def test_stream_vcf_associations_uses_ez_when_present(tmp_path):
     assocs = list(stream_vcf_associations(vcf))
 
     assert len(assocs) == 1
-    chrom, pos, ref, alt, z, se, scale = assocs[0]
+    chrom, pos, ref, alt, z, se = assocs[0]
     assert z == pytest.approx(-5.0, rel=1e-4)
 
 
@@ -144,53 +146,19 @@ def test_stream_vcf_associations_skips_zero_se(tmp_path):
     assert assocs[0][1] == 200
 
 
-def test_stream_vcf_associations_continuous_study_type(tmp_path):
-    vcf = tmp_path / "test.vcf"
-    _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="Continuous")
-
-    assocs = list(stream_vcf_associations(vcf))
-    assert assocs[0][6] == StoredEffectScale.SD
-
-
-def test_stream_vcf_associations_case_control_study_type(tmp_path):
-    vcf = tmp_path / "test.vcf"
-    _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="CaseControl")
-
-    assocs = list(stream_vcf_associations(vcf))
-    assert assocs[0][6] == StoredEffectScale.LOG_OR
-
-
-def test_stream_vcf_associations_raises_on_unknown_study_type(tmp_path):
+def test_stream_vcf_associations_yields_six_element_tuples(tmp_path):
+    """No effect-scale element (issue #17): the tuple is exactly
+    (chrom, pos, ref, alt, z, se), regardless of the header's StudyType."""
     vcf = tmp_path / "test.vcf"
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="Unknown")
 
-    with pytest.raises(ValueError, match="StudyType"):
-        list(stream_vcf_associations(vcf))
+    assocs = list(stream_vcf_associations(vcf))
+
+    assert len(assocs) == 1
+    assert len(assocs[0]) == 6
 
 
-def test_stream_vcf_associations_raises_on_missing_study_type(tmp_path):
-    vcf = tmp_path / "no_sample.vcf"
-    vcf.write_text(
-        "##fileformat=VCFv4.2\n"
-        "##FORMAT=<ID=ES,Number=A,Type=Float,Description=\"Effect size\">\n"
-        "##FORMAT=<ID=SE,Number=A,Type=Float,Description=\"Standard error\">\n"
-        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSTUDY1\n"
-        "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="StudyType"):
-        list(stream_vcf_associations(vcf))
-
-
-def test_read_vcf_study_type_returns_scale(tmp_path):
-    vcf = tmp_path / "test.vcf"
-    _write_vcf(vcf, "", study_type="CaseControl")
-
-    assert read_vcf_study_type(vcf) == StoredEffectScale.LOG_OR
-
-
-def test_all_three_functions_raise_when_bcftools_not_on_path(tmp_path):
+def test_all_functions_raise_when_bcftools_not_on_path(tmp_path):
     vcf = tmp_path / "test.vcf"
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n")
 
@@ -201,7 +169,3 @@ def test_all_three_functions_raise_when_bcftools_not_on_path(tmp_path):
     with patch("shutil.which", return_value=None):
         with pytest.raises(RuntimeError, match="bcftools"):
             list(stream_vcf_associations(vcf))
-
-    with patch("shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="bcftools"):
-            read_vcf_study_type(vcf)

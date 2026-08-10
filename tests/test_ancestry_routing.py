@@ -102,6 +102,9 @@ def test_finalize_catalogue_augments_and_tallies(tmp_path):
     assert rows["s4"]["routing_ancestry"] == "EUR" and rows["s4"]["low_coverage"] == "True"
     assert rows["s4"]["store_eligible"] == "False"
 
-    # Still a manifest superset: the unchanged reader consumes it.
-    from opengwasdb.layouts.dense.build_vcf import _read_manifest
-    assert {m.trait_id for m in _read_manifest(out)} == {"s1", "s2", "s3", "s4"}
+    # Still carries the build manifest's own trait_id/file_path/trait_name/n
+    # columns, though not on its own a complete build manifest as of issue
+    # #17: stored_effect_scale is a genuinely separate build input ancestry
+    # routing never needs.
+    assert set(rows) == {"s1", "s2", "s3", "s4"}
+    assert rows["s1"]["file_path"] == "/d/s1.vcf.gz"

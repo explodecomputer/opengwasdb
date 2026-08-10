@@ -260,11 +260,23 @@ def test_catalogue_is_manifest_superset(tmp_path, reference):
     assert "assigned_ancestry" in header and "catalogue_version" in header
     assert catalogue_fieldnames(reference.superpops) == header
 
-    # The unchanged build-manifest reader consumes it, ignoring the extra columns.
-    manifest = _read_manifest(path)
-    assert [m.trait_id for m in manifest] == ["t1", "t2"]
-    assert manifest[0].file_path == "/data/t1.vcf.gz"
-    assert manifest[0].n == 1000
+    # The Catalogue carries BUILD_COLUMNS (trait_id/file_path/trait_name/n)
+    # plus its ancestry annotations, but is not on its own a complete build
+    # manifest as of issue #17: stored_effect_scale is a genuinely separate
+    # build input ancestry assignment never needs (it may run before a
+    # study's effect scale is even resolved), so _read_manifest correctly
+    # rejects a Catalogue file until something adds that column
+    # (opengwasdb.ancestry.subset does this when bridging into an actual
+    # build).
+    import csv
+
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    assert [r["trait_id"] for r in rows] == ["t1", "t2"]
+    assert rows[0]["file_path"] == "/data/t1.vcf.gz"
+    assert rows[0]["n"] == "1000"
+    with pytest.raises(ValueError, match="stored_effect_scale"):
+        _read_manifest(path)
 
     # Parked (non-EUR/Unassigned) analyses are present and labelled, not dropped.
     import csv

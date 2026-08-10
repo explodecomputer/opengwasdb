@@ -1,10 +1,13 @@
-"""GWAS-VCF SourceReader (issue #19).
+"""GWAS-VCF SourceReader (issue #19; updated for #17).
 
 Wraps the existing bcftools-based `opengwasdb.build.vcf_source` logic behind
-the `SourceReader` interface with no behaviour change: `stream_associations`
-is a thin re-shaping of `stream_vcf_associations`'s existing tuples.
-`extract_at_sites` is new surface -- a combined AF+SE-at-sites lookup did not
-exist as a single function before this reader -- built from the same
+the `SourceReader` interface. `stream_associations` is a thin re-shaping of
+`stream_vcf_associations`'s existing tuples, attaching `stored_effect_scale`
+supplied at construction rather than reading it from the VCF -- the source
+header is not authoritative for effect scale (issue #17, the ieu-a-7 fix:
+`opengwasdb.build.vcf_source` no longer reads it at all). `extract_at_sites`
+is new surface -- a combined AF+SE-at-sites lookup did not exist as a single
+function before this reader -- built from the same
 bcftools-query-plus-`orient_to_canonical` pattern
 `opengwasdb.ancestry.extract.extract_af_at_sites` already established for AF
 alone, reusing its regions-file, palindrome-filtering, and AF-parsing helpers
@@ -21,6 +24,7 @@ from pathlib import Path
 
 from opengwasdb.ancestry.extract import _parse_af, is_palindromic, write_regions_file
 from opengwasdb.build.vcf_source import _require_bcftools, stream_vcf_associations
+from opengwasdb.model.enums import StoredEffectScale
 from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics
 from opengwasdb.variants.normalise import VariantNormalisationError, orient_to_canonical
 
@@ -29,12 +33,18 @@ GWAS_VCF_CAPABILITY = "opengwasdb.gwas-vcf"
 
 @dataclass(frozen=True)
 class GwasVcfReader:
-    """SourceReader for one GWAS-VCF file."""
+    """SourceReader for one GWAS-VCF file.
+
+    `stored_effect_scale` is Analytical Metadata for this file's Analysis,
+    resolved by the caller from the build manifest (issue #16's schema) --
+    not derived from the file itself.
+    """
 
     path: str | Path
+    stored_effect_scale: StoredEffectScale
 
     def stream_associations(self) -> Iterator[ReaderAssociation]:
-        for chrom, pos, ref, alt, z, se, scale in stream_vcf_associations(self.path):
+        for chrom, pos, ref, alt, z, se in stream_vcf_associations(self.path):
             yield ReaderAssociation(
                 chromosome=chrom,
                 position=pos,
@@ -42,7 +52,7 @@ class GwasVcfReader:
                 alt=alt,
                 z=z,
                 se=se,
-                stored_effect_scale=scale,
+                stored_effect_scale=self.stored_effect_scale,
             )
 
     def extract_at_sites(self, alids: Iterable[str]) -> dict[str, SiteMetrics]:

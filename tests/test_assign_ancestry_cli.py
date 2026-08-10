@@ -178,11 +178,15 @@ def test_assign_ancestry_cli(scenario):
     assert summary["n_parked"] == 1
     assert summary["superpops"] == ["AFR", "EAS", "EUR"]
 
-    # The Catalogue is a superset of the build manifest: the unchanged reader loads it.
-    from opengwasdb.layouts.dense.build_vcf import _read_manifest
-
-    loaded = _read_manifest(catalogue)
-    assert [m.trait_id for m in loaded] == ["eur1", "afr1", "mix1"]
-
+    # The Catalogue carries trait_id/file_path/trait_name/n (the build
+    # manifest's own columns) plus its ancestry annotations, in order. It is
+    # not, on its own, a complete build manifest as of issue #17:
+    # stored_effect_scale is a genuinely separate build input ancestry
+    # assignment never needs (opengwasdb.ancestry.subset stamps it on when
+    # bridging a Catalogue subset into an actual build).
     header = catalogue.read_text().splitlines()[0].split("\t")
+    assert header[:4] == ["trait_id", "file_path", "trait_name", "n"]
     assert "catalogue_version" in header and "ancestry_reference_version" in header
+
+    rows = catalogue.read_text().splitlines()[1:]
+    assert [r.split("\t")[0] for r in rows] == ["eur1", "afr1", "mix1"]

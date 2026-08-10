@@ -19,11 +19,7 @@ import zarr
 from numcodecs import Blosc
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.build.vcf_source import (
-    read_vcf_study_type,
-    stream_vcf_associations,
-    stream_vcf_variants,
-)
+from opengwasdb.build.vcf_source import stream_vcf_associations, stream_vcf_variants
 from opengwasdb.index import connect, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import AnalysisMetadata, DenseBuildResult
 from opengwasdb.layouts.dense.constants import (
@@ -33,7 +29,12 @@ from opengwasdb.layouts.dense.constants import (
     TOP_HIT_THRESHOLDS,
 )
 from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
-from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
+from opengwasdb.model.enums import (
+    AssociationCoverage,
+    CompletionState,
+    PrimaryStorageLayout,
+    StoredEffectScale,
+)
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 from opengwasdb.variants.normalise import chromosome_sort_key
@@ -49,6 +50,7 @@ class _ManifestRow:
     file_path: str
     trait_name: str
     n: int
+    stored_effect_scale: str
 
 
 # Pass 2 fork-safe lookup + spill dir, set in the parent immediately before the
@@ -198,7 +200,7 @@ def _resolve_column(
         zs.clear()
         ses.clear()
 
-    for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(file_path):
+    for chrom, pos, ref, alt, z, se in stream_vcf_associations(file_path):
         chroms.append(chrom)
         poss.append(pos)
         refs.append(ref)
@@ -299,7 +301,13 @@ def build_dense_from_vcf_manifest(
     Parameters
     ----------
     manifest_path:
-        TSV with columns ``trait_id``, ``file_path``, ``trait_name``, ``n``.
+        TSV with columns ``trait_id``, ``file_path``, ``trait_name``, ``n``
+        (also the Analysis Catalogue's ``BUILD_COLUMNS`` --
+        `opengwasdb.ancestry.catalogue` -- so a Catalogue-annotated file
+        remains readable here), plus a required ``stored_effect_scale``
+        (issue #17): Analytical Metadata the manifest supplies, never
+        inferred from the VCF header. A missing column or out-of-vocabulary
+        value fails the build before any I/O.
     output_path:
         Destination directory for the store.
     chain_file:
@@ -370,20 +378,20 @@ def build_dense_from_vcf_manifest(
     analysis_index: dict[str, int] = {row.trait_id: i for i, row in enumerate(manifest_rows)}
 
     # ------------------------------------------------------------------
-    # Read study types (lightweight header scan per VCF)
+    # Analytical Metadata: stored_effect_scale comes from the manifest, not
+    # the VCF header (issue #17 -- the ieu-a-7 fix: the source header is not
+    # authoritative for effect scale).
     # ------------------------------------------------------------------
-    analyses: list[AnalysisMetadata] = []
-    for row in manifest_rows:
-        stored_effect_scale = read_vcf_study_type(row.file_path)
-        analyses.append(
-            AnalysisMetadata(
-                analysis_id=row.trait_id,
-                phenotype_id=row.trait_id,
-                phenotype_label=row.trait_name,
-                analysis_label=row.trait_id,
-                stored_effect_scale=stored_effect_scale.value,
-            )
+    analyses: list[AnalysisMetadata] = [
+        AnalysisMetadata(
+            analysis_id=row.trait_id,
+            phenotype_id=row.trait_id,
+            phenotype_label=row.trait_name,
+            analysis_label=row.trait_id,
+            stored_effect_scale=row.stored_effect_scale,
         )
+        for row in manifest_rows
+    ]
 
     # ------------------------------------------------------------------
     # Write SQLite index + tabix variant axis
@@ -509,17 +517,48 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
+    """Read the build manifest: the existing ``trait_id``/``file_path``/
+    ``trait_name``/``n`` columns -- also the Analysis Catalogue's
+    ``BUILD_COLUMNS`` (`opengwasdb.ancestry.catalogue`), so a
+    Catalogue-annotated file remains readable here for those four columns --
+    plus a now-required ``stored_effect_scale`` column (issue #17).
+
+    `stored_effect_scale` is deliberately NOT part of the Catalogue/ancestry
+    manifest shape: ancestry assignment runs on allele frequencies alone and
+    may run before a study's effect scale is even resolved, so the two
+    concerns stay independent build inputs rather than one combined schema.
+    A manifest missing the column, or carrying an out-of-vocabulary value,
+    fails the build loudly rather than falling back to the old VCF-header
+    inference or a silent default.
+    """
     with open(manifest_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
-        return [
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if "stored_effect_scale" not in fieldnames:
+        raise ValueError(
+            f"manifest {manifest_path} is missing required column: 'stored_effect_scale'"
+        )
+    result = []
+    for row in rows:
+        scale = row["stored_effect_scale"]
+        try:
+            StoredEffectScale(scale)
+        except ValueError as exc:
+            raise ValueError(
+                f"manifest {manifest_path}: analysis {row['trait_id']!r} has invalid "
+                f"stored_effect_scale {scale!r}"
+            ) from exc
+        result.append(
             _ManifestRow(
                 trait_id=row["trait_id"],
                 file_path=row["file_path"],
                 trait_name=row.get("trait_name", row["trait_id"]),
                 n=int(row.get("n", 0) or 0),
+                stored_effect_scale=scale,
             )
-            for row in reader
-        ]
+        )
+    return result
 
 
 def _alid_sort_key(alid: str) -> tuple:

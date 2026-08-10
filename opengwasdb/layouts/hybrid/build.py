@@ -23,11 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.build.vcf_source import (
-    read_vcf_study_type,
-    stream_vcf_associations,
-    stream_vcf_variants,
-)
+from opengwasdb.build.vcf_source import stream_vcf_associations, stream_vcf_variants
 from opengwasdb.layouts.dense.build import AnalysisMetadata
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
@@ -53,12 +49,7 @@ from opengwasdb.layouts.hybrid.layout import (
 )
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
-from opengwasdb.model.enums import (
-    AssociationCoverage,
-    CompletionState,
-    PrimaryStorageLayout,
-    StoredEffectScale,
-)
+from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 
@@ -232,7 +223,7 @@ def _resolve_column_hybrid(
         for lst in (chroms, poss, refs, alts, zs, ses):
             lst.clear()
 
-    for chrom, pos, ref, alt, z, se, _ in stream_vcf_associations(file_path):
+    for chrom, pos, ref, alt, z, se in stream_vcf_associations(file_path):
         chroms.append(chrom)
         poss.append(pos)
         refs.append(ref)
@@ -405,13 +396,16 @@ def build_hybrid_from_vcf_manifest(
         else:
             hg38_to_source[hg38_alid] = origin
 
+    # stored_effect_scale comes from the manifest, not the VCF header (issue
+    # #17 -- the ieu-a-7 fix: the source header is not authoritative for
+    # effect scale).
     analyses = [
         AnalysisMetadata(
             analysis_id=row.trait_id,
             phenotype_id=row.trait_id,
             phenotype_label=row.trait_name,
             analysis_label=row.trait_id,
-            stored_effect_scale=_safe_study_type(row.file_path).value,
+            stored_effect_scale=row.stored_effect_scale,
         )
         for row in manifest_rows
     ]
@@ -503,13 +497,6 @@ def build_hybrid_from_vcf_manifest(
         output_path=out, n_variants=n_shared, n_analyses=n_analyses,
         n_panel=n_panel, n_off_panel=n_off_panel, n_overflow=n_overflow,
     )
-
-
-def _safe_study_type(file_path: str) -> StoredEffectScale:
-    try:
-        return read_vcf_study_type(file_path)
-    except Exception:  # noqa: BLE001 - non-VCF or missing header → default scale
-        return StoredEffectScale.SD
 
 
 def _write_variant_table(

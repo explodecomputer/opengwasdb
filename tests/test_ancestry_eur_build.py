@@ -91,7 +91,7 @@ def _catalogue(tmp_path: Path) -> Path:
 def test_subset_catalogue_is_pure_row_filter(tmp_path):
     catalogue = _catalogue(tmp_path)
     manifest = tmp_path / "eur_manifest.tsv"
-    result = subset_catalogue(catalogue, manifest, ancestry="EUR")
+    result = subset_catalogue(catalogue, manifest, ancestry="EUR", stored_effect_scale="sd")
     assert result.n_total == 4 and result.n_kept == 2
     assert result.subset_filter == "assigned_ancestry == EUR"
     assert result.catalogue_version == "cat-v1"
@@ -113,6 +113,7 @@ def test_build_eur_hybrid_records_provenance_and_validates(tmp_path):
         reference_panel=_panel(tmp_path),
         store_id="eur-store",
         release_id="v1",
+        stored_effect_scale="sd",
         ancestry="EUR",
     )
     assert subset.n_kept == 2
@@ -152,6 +153,8 @@ def test_build_hybrid_from_catalogue_cli(tmp_path):
             "eur-store",
             "--release-id",
             "v1",
+            "--stored-effect-scale",
+            "sd",
         ],
     )
     assert result.exit_code == 0, result.output

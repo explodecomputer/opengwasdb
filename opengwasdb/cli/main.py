@@ -112,7 +112,8 @@ def build_dense_vcf_command(
 ) -> None:
     """Build a Dense Observed-Only store from a manifest of GWAS-VCF files.
 
-    MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n.
+    MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n,
+    stored_effect_scale (issue #17 -- never inferred from the VCF header).
     VCF files must be in GRCh37/hg19 coordinates; liftover to hg38 is applied inline.
 
     The zarr chunk shape (default 1000x1000) can be tuned with --chunk-variants /
@@ -161,7 +162,8 @@ def build_hybrid_command(
 ) -> None:
     """Build a Hybrid store (Dense Component + Ragged Overflow) from a VCF manifest.
 
-    MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n. On-panel
+    MANIFEST_PATH is a TSV with columns: trait_id, file_path, trait_name, n,
+    stored_effect_scale (issue #17 -- never inferred from the VCF header). On-panel
     variants (in --reference-panel) fill the nested Dense Component; off-panel variants
     go to the Ragged Overflow. VCFs are hg19; liftover to hg38 is applied inline.
     """
@@ -197,6 +199,9 @@ def build_hybrid_from_catalogue_command(
     reference_panel: Path = typer.Option(..., help="Dense Component axis: reference-panel ALIDs"),
     store_id: str = typer.Option(...),
     release_id: str = typer.Option(...),
+    stored_effect_scale: str = typer.Option(
+        ..., help="Effect scale for every kept Analysis (issue #17): sd, log_or, or log_hazard"
+    ),
     ancestry: str = typer.Option("EUR", help="Assigned Ancestry to subset the Catalogue to"),
     overwrite: bool = typer.Option(False),
     n_workers: int = typer.Option(1, help="Fork-based process pool size for Pass 2"),
@@ -206,9 +211,11 @@ def build_hybrid_from_catalogue_command(
     """Subset the Catalogue to one ancestry and build a Hybrid store from it.
 
     Row-filters the Catalogue to ``assigned_ancestry == ANCESTRY`` (a manifest the
-    unchanged build reads), runs build-hybrid, and records per-Analysis Assigned
-    Ancestry + Catalogue provenance in the store sidecar. Non-matching Analyses are
-    absent from the store (still parked in the Catalogue).
+    unchanged build reads, plus STORED_EFFECT_SCALE stamped onto every kept row --
+    the Catalogue itself never carries this column, issue #17), runs build-hybrid,
+    and records per-Analysis Assigned Ancestry + Catalogue provenance in the store
+    sidecar. Non-matching Analyses are absent from the store (still parked in the
+    Catalogue).
     """
     from opengwasdb.ancestry.subset import build_hybrid_from_catalogue
 
@@ -218,6 +225,7 @@ def build_hybrid_from_catalogue_command(
         reference_panel=reference_panel,
         store_id=store_id,
         release_id=release_id,
+        stored_effect_scale=stored_effect_scale,
         ancestry=ancestry,
         overwrite=overwrite,
         n_workers=n_workers,
