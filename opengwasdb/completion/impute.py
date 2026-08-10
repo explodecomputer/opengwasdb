@@ -11,6 +11,8 @@ import numpy as np
 import scipy.linalg
 from sklearn.linear_model import ElasticNetCV
 
+from opengwasdb.build.phenotype_sd import se_scale_constant
+
 log = logging.getLogger(__name__)
 
 
@@ -187,12 +189,9 @@ def scalar_n_se(
 
     Returns float64 array of length len(eaf_ref). NaN where EAF is 0, 1, or NaN.
     """
-    valid = np.isfinite(se_obs) & np.isfinite(eaf_obs) & (eaf_obs > 0) & (eaf_obs < 1)
-    if valid.sum() == 0:
+    se_scale = se_scale_constant(se_obs, eaf_obs)
+    if np.isnan(se_scale):
         return np.full(len(eaf_ref), np.nan)
-
-    het_obs = 2.0 * eaf_obs[valid] * (1.0 - eaf_obs[valid])
-    se_scale = float(np.median(se_obs[valid] * np.sqrt(het_obs)))
 
     het_ref = 2.0 * eaf_ref * (1.0 - eaf_ref)
     with np.errstate(divide="ignore", invalid="ignore"):
