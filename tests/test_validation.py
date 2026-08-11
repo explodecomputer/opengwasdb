@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import sqlite3
-
 import numpy as np
 import zarr
 
+from opengwasdb.model.analyses import read_analyses, write_analyses
 from opengwasdb.validation import validate_store
 
 
@@ -39,11 +38,12 @@ def test_validator_rejects_inconsistent_missingness(dense_store_path):
 
 
 def test_validator_rejects_invalid_stored_effect_scale(dense_store_path):
-    with sqlite3.connect(dense_store_path / "index.sqlite") as connection:
-        connection.execute(
-            "UPDATE analyses SET stored_effect_scale = 'kg' WHERE analysis_id = 'a1'"
-        )
-        connection.commit()
+    analyses_path = dense_store_path / "analyses.tsv"
+    table = read_analyses(analyses_path)
+    for row in table.rows:
+        if row["analysis_id"] == "a1":
+            row["stored_effect_scale"] = "kg"
+    write_analyses(analyses_path, table)
 
     result = validate_store(dense_store_path)
 

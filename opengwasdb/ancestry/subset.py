@@ -10,21 +10,24 @@ allele frequencies alone and may run before a study's effect scale or
 phenotype SD is even resolved, so they stay genuinely separate build inputs --
 supplied by the caller here and stamped onto the filtered rows before writing
 the manifest, not something ancestry assignment should ever need to know
-about. After the build, the store's per-Analysis Assigned Ancestry and
-Catalogue provenance are recorded in a sidecar (``opengwasdb.ancestry.store``).
+about.
+
+The Catalogue's own ``assigned_ancestry`` column rides through the filtered
+manifest verbatim (a kept row already carries it), so the build itself writes
+per-Analysis Assigned Ancestry straight into the store's ``analyses.tsv`` --
+there is no separate post-build sidecar write anymore (issue #22). Only the
+release-level Catalogue provenance (which Catalogue version, which subset
+filter, which reference version) has nowhere else to live, so
+``record_catalogue_provenance`` folds it into the store's ``manifest.json``.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-
-from opengwasdb.ancestry.store import (
-    write_ancestry_provenance,
-    write_ancestry_sidecar,
-)
 
 log = logging.getLogger(__name__)
 
@@ -102,15 +105,23 @@ def subset_catalogue(
     )
 
 
-def record_store_ancestry(store_path: str | Path, subset: SubsetResult) -> None:
-    """Write the ancestry sidecar + provenance into a freshly built store."""
-    write_ancestry_sidecar(store_path, subset.analyses)
-    write_ancestry_provenance(
-        store_path,
-        catalogue_version=subset.catalogue_version,
-        subset_filter=subset.subset_filter,
-        ancestry_reference_version=subset.ancestry_reference_version,
-        n_analyses=subset.n_kept,
+def record_catalogue_provenance(store_path: str | Path, subset: SubsetResult) -> None:
+    """Fold release-level Catalogue provenance into the store's ``manifest.json``
+    (issue #22) -- per-Analysis Assigned Ancestry itself already rode through
+    into ``analyses.tsv`` as part of the build (``subset_catalogue``'s kept
+    rows carry ``assigned_ancestry`` verbatim), so only the Catalogue-level
+    facts (which version, which filter) have nowhere else to live.
+    """
+    manifest_path = Path(store_path) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["provenance"]["ancestry"] = {
+        "catalogue_version": subset.catalogue_version,
+        "subset_filter": subset.subset_filter,
+        "ancestry_reference_version": subset.ancestry_reference_version,
+        "n_analyses": subset.n_kept,
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
@@ -139,8 +150,9 @@ def build_hybrid_from_catalogue(
     some other way.
 
     Uses the unchanged ``build_hybrid_from_vcf_manifest`` on the row-filtered
-    manifest, then records per-Analysis Assigned Ancestry + Catalogue provenance
-    in the store sidecar.
+    manifest -- Assigned Ancestry rides through into ``analyses.tsv`` as part
+    of the build itself -- then folds release-level Catalogue provenance into
+    ``manifest.json``.
     """
     # Imported here to keep the ancestry package importable without the heavy
     # build stack (and to avoid a build → ancestry → build import cycle).
@@ -170,7 +182,7 @@ def build_hybrid_from_catalogue(
         n_workers=n_workers,
         chunk_shape=chunk_shape or DEFAULT_CHUNK_SHAPE,
     )
-    record_store_ancestry(output_path, subset)
+    record_catalogue_provenance(output_path, subset)
     return subset
 
 

@@ -27,7 +27,7 @@ from numcodecs import Blosc
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
 from opengwasdb.index import connect, initialise_schema, set_metadata
-from opengwasdb.layouts.dense.build import AnalysisMetadata, DenseBuildResult
+from opengwasdb.layouts.dense.build import AnalysisMetadata, DenseBuildResult, write_analyses_tsv
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
@@ -35,7 +35,9 @@ from opengwasdb.layouts.dense.constants import (
     TOP_HIT_THRESHOLDS,
 )
 from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
+from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX
 from opengwasdb.model.enums import (
+    AncestryAssignmentMethod,
     AssociationCoverage,
     CompletionState,
     OriginalSdMethod,
@@ -63,6 +65,43 @@ class _ManifestRow:
     se_divisor: float  # divides original_se to standardise to SD units (issue #18); 1.0 = no-op
     source_reader_capability: str  # resolves to a SourceReader (issue #20); GWAS_VCF_CAPABILITY
     # when the manifest omits the column -- the only format this builder has ever supported.
+    original_sd_method: str  # raw manifest value, carried into analyses.tsv (issue #22)
+    original_sd: str  # raw manifest value ("" when the sd_method tier carries no magnitude)
+    assigned_ancestry: str  # optional manifest column (issue #22); "" when the manifest omits it
+    # or carries no assignment for this row -- e.g. a Catalogue subset's kept rows (already
+    # filtered to one target ancestry) stamp this in verbatim; a bare manifest has no column.
+    ancestry_prop: dict[str, str]  # {population: proportion}, from any ancestry_prop_<pop>
+    # column(s) the manifest carries -- a Catalogue subset's kept rows already have these
+    # (the Catalogue writes one per reference super-population); empty for a bare manifest.
+
+
+def _manifest_row_to_analysis_metadata(row: _ManifestRow) -> AnalysisMetadata:
+    """A manifest row's Analytical Metadata (issue #22), shared by the dense
+    and hybrid manifest builders.
+
+    ``ancestry_assignment_method`` is derived, not guessed: every
+    ``assigned_ancestry`` this builder ever sees comes from a Catalogue's
+    AF-based NNLS mixture fit (`opengwasdb.ancestry.mixture.assign_ancestry`),
+    so naming that method for a row that carries an assignment is reporting
+    fact, not inference. A row with no ``assigned_ancestry`` gets no method
+    either -- ancestry was never attempted for it, which is a different state
+    from ``AncestryAssignmentMethod.UNASSIGNED`` (attempted, gates failed).
+    """
+    return AnalysisMetadata(
+        analysis_id=row.trait_id,
+        phenotype_id=row.trait_id,
+        phenotype_label=row.trait_name,
+        analysis_label=row.trait_id,
+        stored_effect_scale=row.stored_effect_scale,
+        assigned_ancestry=row.assigned_ancestry,
+        ancestry_assignment_method=(
+            AncestryAssignmentMethod.AF_ASSIGNED.value if row.assigned_ancestry else ""
+        ),
+        ancestry_prop=row.ancestry_prop,
+        sample_size=str(row.n) if row.n else "",
+        original_sd_method=row.original_sd_method,
+        original_sd=row.original_sd,
+    )
 
 
 # original_sd_method tiers that carry an actual phenotype-SD magnitude to divide
@@ -448,20 +487,14 @@ def build_dense_from_vcf_manifest(
     # authoritative for effect scale).
     # ------------------------------------------------------------------
     analyses: list[AnalysisMetadata] = [
-        AnalysisMetadata(
-            analysis_id=row.trait_id,
-            phenotype_id=row.trait_id,
-            phenotype_label=row.trait_name,
-            analysis_label=row.trait_id,
-            stored_effect_scale=row.stored_effect_scale,
-        )
-        for row in manifest_rows
+        _manifest_row_to_analysis_metadata(row) for row in manifest_rows
     ]
 
     # ------------------------------------------------------------------
-    # Write SQLite index + tabix variant axis
+    # Write SQLite index + analyses.tsv + tabix variant axis
     # ------------------------------------------------------------------
     _write_index(out, hg38_alids, analyses, chunk_shape, dtype)
+    write_analyses_tsv(out, analyses)
     canonical_variants = [
         CanonicalVariant(
             chromosome=chrom,
@@ -619,6 +652,13 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     ``SourceReader`` each row is built through; a manifest that omits it (every
     manifest before this change) defaults every row to ``GWAS_VCF_CAPABILITY``,
     the only format this builder has ever supported.
+
+    An optional ``assigned_ancestry`` column (issue #22) carries a row's
+    Assigned Ancestry straight into the built store's ``analyses.tsv`` --
+    a Catalogue subset's kept rows already have this column (the Catalogue
+    is a superset of the build manifest), so ``opengwasdb.ancestry.subset``
+    no longer needs a separate post-build sidecar write to record it. Blank
+    or absent for a manifest with no ancestry annotation.
     """
     with open(manifest_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -653,8 +693,8 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                 "established upstream, so the build cannot standardise its effects (issue #18)"
             )
         se_divisor = 1.0
+        original_sd_raw = row.get("original_sd", "")
         if sd_method in _SD_RESCALE_METHODS:
-            original_sd_raw = row.get("original_sd", "")
             try:
                 se_divisor = float(original_sd_raw)
             except ValueError as exc:
@@ -668,14 +708,12 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                     f"manifest {manifest_path}: analysis {trait_id!r} has "
                     f"non-positive original_sd {original_sd_raw!r}"
                 )
-        else:
-            stray_sd = row.get("original_sd", "")
-            if stray_sd:
-                raise ValueError(
-                    f"manifest {manifest_path}: analysis {trait_id!r} has "
-                    f"original_sd_method={sd_method.value!r}, which carries no SD "
-                    f"magnitude, but original_sd={stray_sd!r} was supplied"
-                )
+        elif original_sd_raw:
+            raise ValueError(
+                f"manifest {manifest_path}: analysis {trait_id!r} has "
+                f"original_sd_method={sd_method.value!r}, which carries no SD "
+                f"magnitude, but original_sd={original_sd_raw!r} was supplied"
+            )
         result.append(
             _ManifestRow(
                 trait_id=trait_id,
@@ -685,6 +723,14 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                 stored_effect_scale=scale,
                 se_divisor=se_divisor,
                 source_reader_capability=row.get("source_reader_capability") or GWAS_VCF_CAPABILITY,
+                original_sd_method=sd_method_raw,
+                original_sd=original_sd_raw,
+                assigned_ancestry=row.get("assigned_ancestry") or "",
+                ancestry_prop={
+                    key[len(ANCESTRY_PROP_PREFIX):]: value
+                    for key, value in row.items()
+                    if key.startswith(ANCESTRY_PROP_PREFIX) and value
+                },
             )
         )
     return result
@@ -722,26 +768,6 @@ def _write_index(
             [
                 (i, alid, *_parse_alid(alid))
                 for i, alid in enumerate(hg38_alids)
-            ],
-        )
-        connection.executemany(
-            """
-            INSERT INTO analyses(
-                analysis_index, analysis_id, phenotype_id, phenotype_label,
-                analysis_label, stored_effect_scale
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    i,
-                    a.analysis_id,
-                    a.phenotype_id,
-                    a.phenotype_label,
-                    a.analysis_label,
-                    a.stored_effect_scale,
-                )
-                for i, a in enumerate(analyses)
             ],
         )
         connection.commit()

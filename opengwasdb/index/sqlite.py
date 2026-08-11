@@ -42,15 +42,6 @@ def initialise_schema(connection: sqlite3.Connection) -> None:
             variant_index INTEGER NOT NULL,
             PRIMARY KEY(alias, variant_index)
         );
-
-        CREATE TABLE IF NOT EXISTS analyses (
-            analysis_index INTEGER PRIMARY KEY,
-            analysis_id TEXT NOT NULL UNIQUE,
-            phenotype_id TEXT,
-            phenotype_label TEXT,
-            analysis_label TEXT,
-            stored_effect_scale TEXT NOT NULL
-        );
         """
     )
 
@@ -119,10 +110,3 @@ def _parse_canonical_alid(identifier: str) -> tuple[str, int, str, str] | None:
         )
     except (TypeError, ValueError, VariantNormalisationError):
         return None
-
-
-def analysis_by_id(connection: sqlite3.Connection, analysis_id: str) -> sqlite3.Row | None:
-    return cast(sqlite3.Row | None, connection.execute(
-        "SELECT * FROM analyses WHERE analysis_id = ?",
-        (analysis_id,),
-    ).fetchone())

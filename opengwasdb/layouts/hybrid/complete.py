@@ -24,8 +24,11 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.index import connect
-from opengwasdb.layouts.dense.build import AnalysisMetadata
+from opengwasdb.layouts.dense.build import (
+    AnalysisMetadata,
+    analysis_metadata_from_row,
+    write_analyses_tsv,
+)
 from opengwasdb.layouts.dense.build_vcf import _alid_sort_key, _write_index
 from opengwasdb.layouts.dense.complete import complete_dense_store
 from opengwasdb.layouts.dense.constants import DEFAULT_COMPRESSOR, DEFAULT_DTYPE
@@ -37,6 +40,7 @@ from opengwasdb.layouts.hybrid.layout import (
 )
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader, RaggedCSRWriter
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -94,25 +98,18 @@ def complete_hybrid_store(
         shutil.rmtree(dst)
     dst.mkdir(parents=True)
 
-    # Per-Analysis ancestry-match filter (ADR 0028): if the store carries an
-    # ancestry sidecar, only impute Analyses whose Assigned Ancestry matches the
-    # applied panel; the rest are carried through observed-only. Absent sidecar =
-    # impute everything (no behaviour change).
-    from opengwasdb.ancestry.store import (
-        read_ancestry_provenance,
-        read_ancestry_sidecar,
-        write_ancestry_provenance,
-        write_ancestry_sidecar,
-    )
-
-    src_ancestry = read_ancestry_sidecar(src)
+    # Per-Analysis ancestry-match filter (ADR 0028): if the store's analyses.tsv
+    # carries Assigned Ancestry, only impute Analyses whose value matches the
+    # applied panel; the rest are carried through observed-only. No ancestry
+    # information anywhere = impute everything (no behaviour change).
+    src_analyses = read_analyses(src / "analyses.tsv").rows
     impute_ids: set[str] | None = None
-    if src_ancestry:
-        matched = {r["trait_id"] for r in src_ancestry if r["assigned_ancestry"] == ancestry}
+    if any(r.get("assigned_ancestry") for r in src_analyses):
+        matched = {r["analysis_id"] for r in src_analyses if r.get("assigned_ancestry") == ancestry}
         impute_ids = matched
         log.info(
             "Ancestry-matched completion: %d/%d analyses match panel ancestry %s",
-            len(matched), len(src_ancestry), ancestry,
+            len(matched), len(src_analyses), ancestry,
         )
 
     try:
@@ -161,8 +158,13 @@ def complete_hybrid_store(
         n_off_panel = n_shared - n_panel
 
         # ── 3. Write shared table + index at the destination ──────────────────
+        # The completed Dense Component's analyses.tsv already carries
+        # completed_against (written by complete_dense_store, issue #22) --
+        # re-reading it here and writing it back at the shared root is the one
+        # place Analysis metadata is written, not a second provenance carry.
         analyses = _read_analyses(dense_component_path(dst))
         _write_index(dst, union, analyses, _chunk_shape(src_manifest), DEFAULT_DTYPE)
+        write_analyses_tsv(dst, analyses)
         source_by_alid = {a: source_alid_by_alid.get(a) for a in union}
         _write_variant_table(dst, union, source_by_alid)
 
@@ -199,25 +201,6 @@ def complete_hybrid_store(
             csr.n_associations, dense_result.n_imputed,
         )
 
-        # ── 7. Carry the ancestry sidecar forward, recording completed_against ─
-        if src_ancestry:
-            analyses_ancestry = [(r["trait_id"], r["assigned_ancestry"]) for r in src_ancestry]
-            completed_against = {
-                r["trait_id"]: (ancestry if r["assigned_ancestry"] == ancestry else "")
-                for r in src_ancestry
-            }
-            write_ancestry_sidecar(dst, analyses_ancestry, completed_against=completed_against)
-            prov = read_ancestry_provenance(src)
-            if prov:
-                prov_n = prov.get("n_analyses")
-                write_ancestry_provenance(
-                    dst,
-                    catalogue_version=str(prov.get("catalogue_version", "")),
-                    subset_filter=str(prov.get("subset_filter", "")),
-                    ancestry_reference_version=str(prov.get("ancestry_reference_version", "")),
-                    n_analyses=prov_n if isinstance(prov_n, int) else len(src_ancestry),
-                )
-
         log.info(
             "Hybrid completion complete: %d shared variants (%d panel + %d off-panel), "
             "%d imputed dense cells, %d overflow associations (observed-only)",
@@ -243,21 +226,10 @@ def _chunk_shape(manifest: StoreManifest) -> tuple[int, int]:
 
 
 def _read_analyses(dense_dir: Path) -> list[AnalysisMetadata]:
-    with connect(dense_dir / "index.sqlite") as conn:
-        rows = conn.execute(
-            "SELECT analysis_index, analysis_id, phenotype_id, phenotype_label, "
-            "analysis_label, stored_effect_scale FROM analyses ORDER BY analysis_index"
-        ).fetchall()
-    return [
-        AnalysisMetadata(
-            analysis_id=r["analysis_id"],
-            phenotype_id=r["phenotype_id"],
-            phenotype_label=r["phenotype_label"],
-            analysis_label=r["analysis_label"],
-            stored_effect_scale=r["stored_effect_scale"],
-        )
-        for r in rows
-    ]
+    rows = sorted(
+        read_analyses(dense_dir / "analyses.tsv").rows, key=lambda r: int(r["analysis_index"])
+    )
+    return [analysis_metadata_from_row(r) for r in rows]
 
 
 def _write_completed_manifest(

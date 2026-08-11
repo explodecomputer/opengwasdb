@@ -21,11 +21,15 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.ancestry.store import read_ancestry_sidecar, write_ancestry_sidecar
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
+
+
+def _analyses_by_id(store: Path) -> dict[str, dict[str, str]]:
+    return {row["analysis_id"]: row for row in read_analyses(store / "analyses.tsv").rows}
 
 PANEL_ALIDS = [
     "1:100000:A:G",
@@ -104,9 +108,12 @@ def _make_ld_panel(tmp_path: Path) -> Path:
 def _build_source(tmp_path: Path, ancestry: dict[str, str]) -> Path:
     vcfs = {name: _vcf(tmp_path, name) for name in ancestry}
     manifest = tmp_path / "manifest.tsv"
-    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\toriginal_sd_method"]
-    for name in ancestry:
-        lines.append(f"{name}\t{vcfs[name]}\t{name}\t1000\tsd\tdeclared_standardised")
+    lines = [
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\toriginal_sd_method"
+        "\tassigned_ancestry"
+    ]
+    for name, anc in ancestry.items():
+        lines.append(f"{name}\t{vcfs[name]}\t{name}\t1000\tsd\tdeclared_standardised\t{anc}")
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     panel = tmp_path / "panel.txt"
     panel.write_text("\n".join(PANEL_ALIDS) + "\n", encoding="utf-8")
@@ -115,7 +122,6 @@ def _build_source(tmp_path: Path, ancestry: dict[str, str]) -> Path:
     build_hybrid_from_vcf_manifest(
         manifest, src, reference_panel=panel, store_id="hyb", release_id="v1"
     )
-    write_ancestry_sidecar(src, list(ancestry.items()))
     return src
 
 
@@ -135,11 +141,11 @@ def test_mixed_store_imputes_only_matching_ancestry(tmp_path):
     eas = q.analysis("trait_eas")
     assert set(eas["association_status"].tolist()) == {"observed"}
 
-    # completed_against recorded per Analysis (panel ancestry, or empty).
-    sidecar = {r["trait_id"]: r for r in read_ancestry_sidecar(dst)}
-    assert sidecar["trait_eur"]["completed_against"] == "EUR"
-    assert sidecar["trait_eas"]["completed_against"] == ""
-    assert sidecar["trait_eas"]["assigned_ancestry"] == "EAS"  # still recorded
+    # completed_against recorded per Analysis (panel ancestry, or empty), in analyses.tsv.
+    analyses = _analyses_by_id(dst)
+    assert analyses["trait_eur"]["completed_against"] == "EUR"
+    assert analyses["trait_eas"]["completed_against"] == ""
+    assert analyses["trait_eas"]["assigned_ancestry"] == "EAS"  # still recorded
 
 
 def test_homogeneous_eur_store_no_regression(tmp_path):
@@ -155,9 +161,9 @@ def test_homogeneous_eur_store_no_regression(tmp_path):
     for tid in ("trait_eur", "trait_eur2"):
         assert "imputed" in set(q.analysis(tid)["association_status"].tolist())
 
-    sidecar = {r["trait_id"]: r for r in read_ancestry_sidecar(dst)}
-    assert sidecar["trait_eur"]["completed_against"] == "EUR"
-    assert sidecar["trait_eur2"]["completed_against"] == "EUR"
+    analyses = _analyses_by_id(dst)
+    assert analyses["trait_eur"]["completed_against"] == "EUR"
+    assert analyses["trait_eur2"]["completed_against"] == "EUR"
 
 
 def test_mixed_store_imputes_fewer_cells_than_homogeneous(tmp_path):

@@ -220,15 +220,13 @@ class TestCompletionFiles:
         conn.close()
         assert "completion_quality" in tables
 
-    def test_analyses_table_has_n_missing_off_panel(self, completed_store):
-        import sqlite3
-        conn = sqlite3.connect(str(completed_store / "index.sqlite"))
-        conn.row_factory = sqlite3.Row
+    def test_analyses_tsv_has_completion_n_missing_total(self, completed_store):
+        from opengwasdb.model.analyses import read_analyses
+
         rows = {
-            r["analysis_id"]: r["n_missing_off_panel"]
-            for r in conn.execute("SELECT * FROM analyses")
+            r["analysis_id"]: int(r["completion_n_missing_total"])
+            for r in read_analyses(completed_store / "analyses.tsv").rows
         }
-        conn.close()
         # a1 observed the off-panel chr1:1200000 variant; a2 never did.
         assert rows["a1"] == 0
         assert rows["a2"] == 1
