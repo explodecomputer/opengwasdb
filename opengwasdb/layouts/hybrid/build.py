@@ -537,7 +537,8 @@ def build_hybrid_from_vcf_manifest(
     # Top-Hit Counts here are the Dense Component's and Ragged Overflow
     # Component's counts summed (ADR 0032): the two partition an Analysis's
     # associations disjointly, so neither alone is the whole picture.
-    shared_analyses = add_hit_counts(out, add_hit_counts(dense_dir, analyses))
+    dense_counted = add_hit_counts(dense_dir, analyses)
+    shared_analyses = add_hit_counts(out, dense_counted)
     _write_index(out, shared_sorted, analyses, chunk_shape, dtype)
     write_analyses_tsv(out, shared_analyses)
     _write_variant_table(out, shared_sorted, hg38_to_source)

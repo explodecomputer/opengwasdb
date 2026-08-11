@@ -35,16 +35,22 @@ signal of study power and test-statistic-inflation risk) in the table itself.
   `analyses.tsv`), so leaving these columns blank there would fabricate an
   "unavailable" the script's own docstring says to avoid.
 - **The standalone `overview.html` regeneration command (issue #23 AC3) reads
-  only `analyses.tsv`.** Because Top-Hit Counts are persisted columns rather than
-  computed from the zarr index at render time, this holds without a special case.
+  only the store's already-persisted data** — `analyses.tsv`, `manifest.json`
+  for the header, and a directory scan for the Guide tab — **never the zarr
+  top-hit index.** Because Top-Hit Counts are persisted `analyses.tsv` columns
+  rather than computed at render time, the one thing that would otherwise force
+  a heavier read (re-deriving counts from the zarr index) never applies here;
+  the command still needs more than `analyses.tsv` alone for the header and
+  Guide tab, but never a rebuild of anything.
 
 ## Considered options
 
 - **Compute Top-Hit Counts at `overview.html` render time**, reading the zarr
-  top-hit index directly. Rejected: makes the standalone regeneration command's
-  "from `analyses.tsv` alone" guarantee silently false for this one column, and
-  splits Analytical Metadata across two files for no benefit — the count doesn't
-  change, only its access path would.
+  top-hit index directly. Rejected: would force the standalone regeneration
+  command to read store internals substantially heavier than the already-cheap
+  `analyses.tsv`/`manifest.json`/directory-listing reads it needs anyway, and
+  splits Analytical Metadata across two files for no benefit — the count
+  doesn't change, only its access path would.
 - **Separate HTML files per tab** (`overview.html`, `ancestry.html`,
   `guide.html`), cross-linked by a nav bar. Rejected: `overview.html` is the only
   filename the spec/validator actually requires; adding sibling files means
