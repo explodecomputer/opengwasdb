@@ -106,6 +106,17 @@ tbody tr:nth-child(even) td.sticky-col { background: var(--paper); }
   overflow: hidden; vertical-align: middle; margin-right: 6px;
 }
 .bar-fill { display: block; height: 100%; background: var(--accent); }
+.guide-intro { max-width: 62ch; color: var(--ink-soft); font-size: 13.5px; margin: 0 0 16px; }
+table.guide { border-collapse: collapse; width: 100%; max-width: 760px; font-size: 13px; }
+table.guide td { padding: 8px 4px; border-bottom: 1px solid var(--hairline); white-space: normal; }
+table.guide td.fname { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; padding-right: 24px; }
+table.guide td.fdesc { color: var(--ink-soft); }
+.badge {
+  font-family: var(--mono); font-size: 10px; padding: 1px 7px; border-radius: 999px; margin-left: 8px;
+  letter-spacing: 0.02em;
+}
+.badge.human { background: var(--accent-wash); color: var(--accent); }
+.badge.internal { background: var(--hairline); color: var(--ink-soft); }
 """
 
 _SCRIPT = """
@@ -168,6 +179,7 @@ _TEMPLATE = """<!doctype html>
 <nav class="tabs">
   <button data-tab="analyses" class="active">Analyses</button>
   <button data-tab="ancestry">Ancestry</button>
+  <button data-tab="guide">Guide</button>
 </nav>
 <main>
 <section id="tab-analyses" class="tab-panel">
@@ -176,11 +188,86 @@ _TEMPLATE = """<!doctype html>
 <section id="tab-ancestry" class="tab-panel hidden">
 {ancestry_section}
 </section>
+<section id="tab-guide" class="tab-panel hidden">
+{guide_section}
+</section>
 </main>
 <script>{script}</script>
 </body>
 </html>
 """
+
+
+# (kind, description) for each known top-level store entry -- "human" files
+# are safe to open directly, "internal" ones are read by the query API and
+# should not be hand-edited. Matched by filename against a directory scan
+# (issue #38), not hand-maintained per layout, so it can never silently omit
+# a file: an unrecognised entry still appears, via the fallback below.
+_FILE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
+    "manifest.json": ("human", "Store identity, format version, and provenance. Plain JSON."),
+    "analyses.tsv": (
+        "human",
+        "Analytical Metadata -- the source of truth for the Analyses tab. "
+        "Plain tab-delimited text.",
+    ),
+    "overview.html": ("human", "This page."),
+    "index.sqlite": ("internal", "Variant alias lookup index. Read via the query API."),
+    "variants.tsv.gz": ("internal", "Tabix-indexed variant table. Read via the query API."),
+    "variants.tsv.gz.tbi": ("internal", "Tabix index for variants.tsv.gz."),
+    "variant_offsets.npy": ("internal", "Variant axis row-offset index."),
+    "variant_alid_bytes.npy": ("internal", "Variant axis identifier index."),
+    "variant_alid_rows.npy": ("internal", "Variant axis identifier index."),
+    "data.zarr": (
+        "internal",
+        "Association statistics (Z/SE) and top-hit indexes, chunked and compressed. "
+        "Read via the query API.",
+    ),
+    "dense": (
+        "internal",
+        "Dense Component -- a nested Dense store holding the Hybrid layout's shared "
+        "reference-panel variants (has its own manifest.json/analyses.tsv/overview.html).",
+    ),
+    "dense_to_shared.npy": ("internal", "Dense Component row -> shared variant table index map."),
+}
+_FALLBACK_DESCRIPTION = ("internal", "Internal store file.")
+
+
+def _scan_store_files(output_path: Path) -> list[tuple[str, str, str]]:
+    """`(name, kind, description)` for every top-level entry actually present
+    in the store, sorted by name. A live directory scan rather than a
+    hand-maintained per-layout list, so it can't drift as Dense/Hybrid or
+    Observed-Only/Reference-Completed stores add or omit files (issue #38).
+    """
+    entries_by_name: dict[str, tuple[str, str]] = (
+        {
+            path.name: _FILE_DESCRIPTIONS.get(path.name, _FALLBACK_DESCRIPTION)
+            for path in output_path.iterdir()
+        }
+        if output_path.is_dir()
+        else {}
+    )
+    # overview.html is being written by this very call on a fresh build (it
+    # doesn't exist on disk yet at scan time), or already exists on a
+    # regeneration (issue #39) -- list it either way so the Guide never omits
+    # itself.
+    entries_by_name.setdefault("overview.html", _FILE_DESCRIPTIONS["overview.html"])
+    return [(name, kind, description) for name, (kind, description) in sorted(entries_by_name.items())]
+
+
+def _render_guide_section(output_path: Path) -> str:
+    rows = "\n".join(
+        "<tr>"
+        f'<td class="fname">{html.escape(name)}<span class="badge {kind}">{kind}</span></td>'
+        f'<td class="fdesc">{html.escape(description)}</td>'
+        "</tr>"
+        for name, kind, description in _scan_store_files(output_path)
+    )
+    return (
+        '<p class="guide-intro">Files in this Store Release, generated at build time. '
+        '"human" files are safe to open directly; "internal" files are read by the '
+        "query API and should not be edited by hand.</p>\n"
+        f"<table class=\"guide\">\n<tbody>\n{rows}\n</tbody>\n</table>"
+    )
 
 
 def _read_manifest_summary(output_path: Path) -> tuple[str, str, str]:
@@ -325,6 +412,7 @@ def write_overview_html(
         sticky_column="analysis_id",
         bar_columns=frozenset(_ancestry_prop_columns(table.fieldnames)),
     )
+    guide_section = _render_guide_section(output_path)
 
     out_path = output_path / "overview.html"
     out_path.write_text(
@@ -334,6 +422,7 @@ def write_overview_html(
             meta=html.escape(" · ".join(meta_parts)),
             analyses_section=analyses_section,
             ancestry_section=ancestry_section,
+            guide_section=guide_section,
             script=_SCRIPT,
         ),
         encoding="utf-8",

@@ -38,6 +38,10 @@ def _write_manifest(store_path: Path) -> None:
     (store_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
+def _guide_section(content: str) -> str:
+    return content.split('id="tab-guide"')[1]
+
+
 def test_overview_html_uses_house_style_palette(tmp_path):
     _write_manifest(tmp_path)
     out = write_overview_html(tmp_path, _table())
@@ -150,3 +154,50 @@ def test_ancestry_tab_scoped_to_ancestry_columns_with_inline_bars(tmp_path):
     assert '<span class="bar-wrap"><span class="bar-fill" style="width:2.0%">' in ancestry_section
     # a2 has no composition data -- still the muted blank, not a zero-width bar.
     assert '<td class="blank">—</td>' in ancestry_section
+
+
+def test_guide_tab_lists_files_actually_present(tmp_path):
+    _write_manifest(tmp_path)
+    (tmp_path / "index.sqlite").write_bytes(b"")
+    (tmp_path / "data.zarr").mkdir()
+    (tmp_path / "analyses.tsv").write_text("", encoding="utf-8")
+
+    out = write_overview_html(tmp_path, _table())
+    guide = _guide_section(out.read_text(encoding="utf-8"))
+
+    assert 'class="fname">manifest.json<span class="badge human">human</span>' in guide
+    assert 'class="fname">index.sqlite<span class="badge internal">internal</span>' in guide
+    assert 'class="fname">data.zarr<span class="badge internal">internal</span>' in guide
+    # overview.html describes itself even though it doesn't exist on disk yet
+    # at scan time (it's being written by this very call) -- it must not be
+    # silently missing from its own Guide tab.
+    assert 'class="fname">overview.html<span class="badge human">human</span>' in guide
+
+
+def test_guide_tab_falls_back_for_unrecognised_files(tmp_path):
+    _write_manifest(tmp_path)
+    (tmp_path / "some_future_file.bin").write_bytes(b"")
+
+    out = write_overview_html(tmp_path, _table())
+    guide = _guide_section(out.read_text(encoding="utf-8"))
+
+    assert "some_future_file.bin" in guide
+    assert 'class="fname">some_future_file.bin<span class="badge internal">internal</span>' in guide
+    assert "Internal store file." in guide
+
+
+def test_guide_tab_differs_between_dense_and_hybrid_directory_contents(tmp_path):
+    dense_dir = tmp_path / "dense"
+    dense_dir.mkdir()
+    _write_manifest(dense_dir)
+    dense_out = write_overview_html(dense_dir, _table())
+    dense_guide = _guide_section(dense_out.read_text(encoding="utf-8"))
+    assert 'class="fname">dense<' not in dense_guide
+
+    hybrid_dir = tmp_path / "hybrid"
+    hybrid_dir.mkdir()
+    (hybrid_dir / "dense").mkdir()
+    _write_manifest(hybrid_dir)
+    hybrid_out = write_overview_html(hybrid_dir, _table())
+    hybrid_guide = _guide_section(hybrid_out.read_text(encoding="utf-8"))
+    assert 'class="fname">dense<span class="badge internal">internal</span>' in hybrid_guide
