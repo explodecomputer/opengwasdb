@@ -510,6 +510,9 @@ def build_hybrid_from_vcf_manifest(
         )
         log.info("Writing Dense Component top-hit index (%d candidates)", len(all_rows))
         write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se)
+        # manifest.json before analyses.tsv/overview.html: overview.html
+        # reads manifest.json fresh from output_path for its header (ADR 0032).
+        _write_dense_manifest(dense_dir, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
         write_analyses_tsv(dense_dir, add_hit_counts(dense_dir, analyses))
 
         # Overflow CSR assembly (reuses RaggedCSRWriter).
@@ -523,7 +526,14 @@ def build_hybrid_from_vcf_manifest(
     log.info("Building Ragged Overflow top-hit index")
     build_ragged_top_hit_indexes(out)
 
-    # ── Shared union table + shared index + manifests ────────────────────────
+    # manifest.json before analyses.tsv/overview.html, same reasoning as the
+    # Dense Component write above.
+    _write_hybrid_manifest(
+        out, store_id, release_id, n_shared, n_analyses, n_panel, n_off_panel,
+        n_overflow, chain_file, chunk_shape, dtype,
+    )
+
+    # ── Shared union table + shared index ─────────────────────────────────────
     # Top-Hit Counts here are the Dense Component's and Ragged Overflow
     # Component's counts summed (ADR 0032): the two partition an Analysis's
     # associations disjointly, so neither alone is the whole picture.
@@ -531,12 +541,6 @@ def build_hybrid_from_vcf_manifest(
     _write_index(out, shared_sorted, analyses, chunk_shape, dtype)
     write_analyses_tsv(out, shared_analyses)
     _write_variant_table(out, shared_sorted, hg38_to_source)
-
-    _write_dense_manifest(dense_dir, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
-    _write_hybrid_manifest(
-        out, store_id, release_id, n_shared, n_analyses, n_panel, n_off_panel,
-        n_overflow, chain_file, chunk_shape, dtype,
-    )
 
     log.info(
         "Hybrid build complete: %d shared variants (%d panel + %d off-panel), "

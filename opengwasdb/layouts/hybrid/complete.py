@@ -192,19 +192,22 @@ def complete_hybrid_store(
             order = np.argsort(new_vi, kind="stable")
             csr.add_analysis(new_vi[order], z[order], se[order])
         csr.flush(dst)
+
+        # ── 6. Hybrid manifest (reference-completed) ──────────────────────────
+        # Written before analyses.tsv/overview.html below: overview.html
+        # reads manifest.json fresh from output_path for its header (ADR 0032).
+        new_release = release_id or f"{src_manifest.release_id}-completed"
+        _write_completed_manifest(
+            dst, src_manifest, new_release, n_shared, n_analyses, n_panel, n_off_panel,
+            csr.n_associations, dense_result.n_imputed,
+        )
+
         build_ragged_top_hit_indexes(dst)
         # Dense Component counts already live on `analyses` (read back from
         # complete_dense_store's already-completed output); add the Ragged
         # Overflow Component's counts on top -- the two partition an
         # Analysis's associations disjointly (ADR 0032).
         write_analyses_tsv(dst, add_hit_counts(dst, analyses))
-
-        # ── 6. Hybrid manifest (reference-completed) ──────────────────────────
-        new_release = release_id or f"{src_manifest.release_id}-completed"
-        _write_completed_manifest(
-            dst, src_manifest, new_release, n_shared, n_analyses, n_panel, n_off_panel,
-            csr.n_associations, dense_result.n_imputed,
-        )
 
         log.info(
             "Hybrid completion complete: %d shared variants (%d panel + %d off-panel), "
