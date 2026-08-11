@@ -104,9 +104,9 @@ def _make_ld_panel(tmp_path: Path) -> Path:
 def _build_source(tmp_path: Path, ancestry: dict[str, str]) -> Path:
     vcfs = {name: _vcf(tmp_path, name) for name in ancestry}
     manifest = tmp_path / "manifest.tsv"
-    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"]
+    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\toriginal_sd_method"]
     for name in ancestry:
-        lines.append(f"{name}\t{vcfs[name]}\t{name}\t1000\tsd")
+        lines.append(f"{name}\t{vcfs[name]}\t{name}\t1000\tsd\tdeclared_standardised")
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     panel = tmp_path / "panel.txt"
     panel.write_text("\n".join(PANEL_ALIDS) + "\n", encoding="utf-8")

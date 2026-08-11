@@ -53,19 +53,32 @@ def _make_manifest(
     tmp_path: Path,
     entries: list[tuple[str, Path, str]],
     scales: dict[str, str] | None = None,
+    sd_methods: dict[str, str] | None = None,
+    sds: dict[str, str] | None = None,
 ) -> Path:
     """Write the build manifest: trait_id/file_path/trait_name/n (also the
-    Analysis Catalogue's BUILD_COLUMNS) plus the now-required
-    stored_effect_scale (issue #17). `scales` overrides the scale per
-    trait_id (default `"sd"`), letting a test declare a scale that disagrees
-    with its VCF's own ``##SAMPLE`` header -- the manifest always wins.
+    Analysis Catalogue's BUILD_COLUMNS) plus the required stored_effect_scale
+    (issue #17) and original_sd_method/original_sd (issue #18). `scales`/
+    `sd_methods`/`sds` override the value per trait_id (defaults `"sd"` and
+    `"declared_standardised"` -- i.e. no rescaling, `original_sd` blank),
+    letting a test declare values that disagree with its VCF's own
+    ``##SAMPLE`` header -- the manifest always wins.
     """
     scales = scales or {}
+    sd_methods = sd_methods or {}
+    sds = sds or {}
     manifest = tmp_path / "manifest.tsv"
-    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"]
+    lines = [
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd"
+    ]
     for trait_id, file_path, trait_name in entries:
         scale = scales.get(trait_id, "sd")
-        lines.append(f"{trait_id}\t{file_path}\t{trait_name}\t1000\t{scale}")
+        sd_method = sd_methods.get(trait_id, "declared_standardised")
+        sd = sds.get(trait_id, "")
+        lines.append(
+            f"{trait_id}\t{file_path}\t{trait_name}\t1000\t{scale}\t{sd_method}\t{sd}"
+        )
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return manifest
 
@@ -210,6 +223,121 @@ def test_missing_required_manifest_field_fails_the_build_loudly(tmp_path):
     with pytest.raises(ValueError, match="stored_effect_scale"):
         build_dense_from_vcf_manifest(
             manifest_path, tmp_path / "store.opengwasdb", store_id="s", release_id="r"
+        )
+
+
+def test_missing_original_sd_method_fails_the_build_loudly(tmp_path):
+    """A manifest missing original_sd_method must fail the build the same way
+    a missing stored_effect_scale does (issue #18)."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest_path = tmp_path / "manifest.tsv"
+    manifest_path.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\tsd\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="original_sd_method"):
+        build_dense_from_vcf_manifest(
+            manifest_path, tmp_path / "store.opengwasdb", store_id="s", release_id="r"
+        )
+
+
+def test_continuous_trait_rescaled_by_manifest_original_sd(tmp_path):
+    """issue #18 AC1: a continuous-trait Analysis with a manifest-supplied
+    original_sd != 1 has its se divided by that SD in the built store; z is
+    unchanged (z = beta/se is invariant to dividing both by the same
+    constant)."""
+    vcf = _make_vcf(
+        tmp_path,
+        "trait_a",
+        [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"],  # z=4.0, flip→-4.0, se=0.5
+    )
+    manifest = _make_manifest(
+        tmp_path,
+        [("trait_a", vcf, "Trait A")],
+        sd_methods={"trait_a": "source_provided"},
+        sds={"trait_a": "2.0"},
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
+
+    result = query_store(store_path).analysis("trait_a")
+    assert result["z"][0] == pytest.approx(-4.0, rel=5e-3)
+    assert result["se"][0] == pytest.approx(0.25, rel=5e-3)  # 0.5 / 2.0
+
+
+def test_binary_trait_never_rescaled(tmp_path):
+    """issue #18 AC2: original_sd_method=binary_trait is never rescaled by an
+    inapplicable SD scalar, regardless of stored_effect_scale."""
+    vcf = _make_vcf(
+        tmp_path,
+        "trait_b",
+        [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"],
+        study_type="CaseControl",
+    )
+    manifest = _make_manifest(
+        tmp_path,
+        [("trait_b", vcf, "Trait B")],
+        scales={"trait_b": "log_or"},
+        sd_methods={"trait_b": "binary_trait"},
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
+
+    result = query_store(store_path).analysis("trait_b")
+    assert result["se"][0] == pytest.approx(0.5, rel=5e-3)
+
+
+def test_original_sd_method_unavailable_fails_the_build_loudly(tmp_path):
+    """issue #18 AC3: original_sd_method=unavailable is handled the same way
+    #17 handles any other missing required field -- flagged/failed, not
+    silently assumed to be 1."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest = _make_manifest(
+        tmp_path, [("trait_a", vcf, "Trait A")], sd_methods={"trait_a": "unavailable"}
+    )
+
+    with pytest.raises(ValueError, match="unavailable"):
+        build_dense_from_vcf_manifest(
+            manifest, tmp_path / "store.opengwasdb", store_id="s", release_id="r"
+        )
+
+
+def test_sd_rescale_method_without_original_sd_fails_the_build_loudly(tmp_path):
+    """A method that carries an SD magnitude (e.g. source_provided) but no
+    usable original_sd value must fail loudly rather than silently skip
+    rescaling (issue #18)."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest = _make_manifest(
+        tmp_path, [("trait_a", vcf, "Trait A")], sd_methods={"trait_a": "source_provided"}
+    )  # original_sd left blank
+
+    with pytest.raises(ValueError, match="original_sd"):
+        build_dense_from_vcf_manifest(
+            manifest, tmp_path / "store.opengwasdb", store_id="s", release_id="r"
+        )
+
+
+def test_stray_original_sd_without_a_rescale_method_fails_the_build_loudly(tmp_path):
+    """A tier that carries no SD magnitude (declared_standardised, binary_trait)
+    must reject a stray original_sd value rather than silently ignoring it --
+    a manifest declaring both is self-contradictory (issue #18)."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest = _make_manifest(
+        tmp_path,
+        [("trait_a", vcf, "Trait A")],
+        sd_methods={"trait_a": "declared_standardised"},
+        sds={"trait_a": "1.5"},
+    )
+
+    with pytest.raises(ValueError, match="original_sd"):
+        build_dense_from_vcf_manifest(
+            manifest, tmp_path / "store.opengwasdb", store_id="s", release_id="r"
         )
 
 

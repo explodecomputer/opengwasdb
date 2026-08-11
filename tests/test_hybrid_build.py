@@ -53,16 +53,27 @@ def _make_manifest(
     tmp_path: Path,
     entries: list[tuple[str, Path, str]],
     scales: dict[str, str] | None = None,
+    sd_methods: dict[str, str] | None = None,
+    sds: dict[str, str] | None = None,
 ) -> Path:
     """Write the build manifest; see the identical helper in
     test_dense_vcf_build.py for the full rationale -- this builder shares
     its manifest reader with the dense one."""
     scales = scales or {}
+    sd_methods = sd_methods or {}
+    sds = sds or {}
     manifest = tmp_path / "manifest.tsv"
-    lines = ["trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"]
+    lines = [
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd"
+    ]
     for trait_id, file_path, trait_name in entries:
         scale = scales.get(trait_id, "sd")
-        lines.append(f"{trait_id}\t{file_path}\t{trait_name}\t1000\t{scale}")
+        sd_method = sd_methods.get(trait_id, "declared_standardised")
+        sd = sds.get(trait_id, "")
+        lines.append(
+            f"{trait_id}\t{file_path}\t{trait_name}\t1000\t{scale}\t{sd_method}\t{sd}"
+        )
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return manifest
 
@@ -153,6 +164,82 @@ def test_missing_required_manifest_field_fails_the_build_loudly(tmp_path):
     with pytest.raises(ValueError, match="stored_effect_scale"):
         build_hybrid_from_vcf_manifest(
             manifest_path, tmp_path / "store.opengwasdb",
+            reference_panel=_panel(tmp_path), store_id="s", release_id="r",
+        )
+
+
+def test_continuous_trait_rescaled_by_manifest_original_sd(tmp_path):
+    """issue #18 AC1, hybrid path: a continuous-trait Analysis with a
+    manifest-supplied original_sd != 1 has its se divided by that SD, for
+    both the on-panel (Dense Component) and off-panel (overflow) associations
+    of the same study."""
+    vcf = _make_vcf(
+        tmp_path,
+        "trait_a",
+        [
+            f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",  # on-panel, se=0.5
+            f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.4\n",  # off-panel, se=0.4
+        ],
+    )
+    manifest = _make_manifest(
+        tmp_path,
+        [("trait_a", vcf, "Trait A")],
+        sd_methods={"trait_a": "source_provided"},
+        sds={"trait_a": "2.0"},
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=_panel(tmp_path), store_id="s", release_id="r",
+    )
+
+    q = query_store(store_path)
+    on_panel = q.lookup([HG38_ALID_1], ["trait_a"])
+    off_panel = q.lookup([HG38_ALID_2], ["trait_a"])
+    assert on_panel["se"][0] == pytest.approx(0.25, rel=5e-3)  # 0.5 / 2.0
+    assert off_panel["se"][0] == pytest.approx(0.2, rel=5e-3)  # 0.4 / 2.0
+
+
+def test_binary_trait_never_rescaled(tmp_path):
+    """issue #18 AC2, hybrid path: original_sd_method=binary_trait is never
+    rescaled, for either the on-panel or off-panel associations of the study."""
+    vcf = _make_vcf(
+        tmp_path,
+        "trait_b",
+        [
+            f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",  # on-panel, se=0.5
+            f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.4\n",  # off-panel, se=0.4
+        ],
+    )
+    manifest = _make_manifest(
+        tmp_path,
+        [("trait_b", vcf, "Trait B")],
+        scales={"trait_b": "log_or"},
+        sd_methods={"trait_b": "binary_trait"},
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=_panel(tmp_path), store_id="s", release_id="r",
+    )
+
+    q = query_store(store_path)
+    on_panel = q.lookup([HG38_ALID_1], ["trait_b"])
+    off_panel = q.lookup([HG38_ALID_2], ["trait_b"])
+    assert on_panel["se"][0] == pytest.approx(0.5, rel=5e-3)
+    assert off_panel["se"][0] == pytest.approx(0.4, rel=5e-3)
+
+
+def test_original_sd_method_unavailable_fails_the_build_loudly(tmp_path):
+    """issue #18 AC3, hybrid path: original_sd_method=unavailable fails the
+    build rather than assuming sd=1."""
+    rows = [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    vcf = _make_vcf(tmp_path, "trait_a", rows)
+    manifest = _make_manifest(
+        tmp_path, [("trait_a", vcf, "Trait A")], sd_methods={"trait_a": "unavailable"}
+    )
+
+    with pytest.raises(ValueError, match="unavailable"):
+        build_hybrid_from_vcf_manifest(
+            manifest, tmp_path / "store.opengwasdb",
             reference_panel=_panel(tmp_path), store_id="s", release_id="r",
         )
 

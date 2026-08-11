@@ -81,8 +81,8 @@ def test_cli_build_hybrid_validate_and_query(tmp_path):
     )
     manifest = tmp_path / "manifest.tsv"
     manifest.write_text(
-        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\n"
-        f"trait_a\t{vcf}\tTrait A\t1000\tsd\n",
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\toriginal_sd_method\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\tsd\tdeclared_standardised\n",
         encoding="utf-8",
     )
     panel = tmp_path / "panel.txt"
