@@ -8,6 +8,11 @@ and its `ancestry.tsv` sidecar, when present, derives what it can from them,
 writes `analyses.tsv` + `overview.html`, drops the SQLite `analyses` table, and
 folds `ancestry_provenance.json` (when present) into `manifest.json`.
 
+Top-Hit Counts (`n_hits_5e8`/`n_hits_5e6`/`n_hits_5e4`, ADR 0032) are computed
+for real from the store's existing top-hit index -- that index predates
+`analyses.tsv` entirely, so unlike the fields below it is genuinely recoverable,
+not something this script's "don't guess" rule applies to.
+
 Fields the old layout never recorded are written honestly, not guessed:
 
   * `original_sd_method` becomes `unavailable` (`OriginalSdMethod.UNAVAILABLE`)
@@ -41,7 +46,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from opengwasdb.layouts.dense.build import AnalysisMetadata, write_analyses_tsv
+from opengwasdb.layouts.dense.build import AnalysisMetadata, add_hit_counts, write_analyses_tsv
 from opengwasdb.model.enums import OriginalSdMethod
 
 _ANCESTRY_SIDECAR = "ancestry.tsv"
@@ -135,7 +140,7 @@ def migrate_store(store_path: str | Path) -> list[str]:
             )
         )
 
-    write_analyses_tsv(store_path, analyses)
+    write_analyses_tsv(store_path, add_hit_counts(store_path, analyses))
     _drop_analyses_table(index_path)
     _fold_ancestry_provenance(store_path)
     (store_path / _ANCESTRY_SIDECAR).unlink(missing_ok=True)
