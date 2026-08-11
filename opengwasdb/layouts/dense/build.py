@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from opengwasdb.layouts.dense.constants import (
     DEFAULT_DTYPE,
 )
 from opengwasdb.layouts.dense.overview import write_overview_html
-from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
+from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes, read_top_hit_counts
 from opengwasdb.model.analyses import (
     ANCESTRY_PROP_PREFIX,
     SHARED_CORE_COLUMNS,
@@ -78,6 +78,9 @@ class AnalysisMetadata:
     completion_median_pearson_r: str = ""
     completion_n_imputed_total: str = ""
     completion_n_missing_total: str = ""
+    n_hits_5e8: str = ""
+    n_hits_5e6: str = ""
+    n_hits_5e4: str = ""
 
 
 # SHARED_CORE_COLUMNS/STORE_ONLY_COLUMNS come from opengwasdb.model.analyses
@@ -124,6 +127,9 @@ def _analysis_metadata_row(
         "completion_median_pearson_r": a.completion_median_pearson_r,
         "completion_n_imputed_total": a.completion_n_imputed_total,
         "completion_n_missing_total": a.completion_n_missing_total,
+        "n_hits_5e8": a.n_hits_5e8,
+        "n_hits_5e6": a.n_hits_5e6,
+        "n_hits_5e4": a.n_hits_5e4,
     }
     for column in fieldnames:
         if column.startswith(ANCESTRY_PROP_PREFIX):
@@ -162,7 +168,35 @@ def analysis_metadata_from_row(row: dict[str, str]) -> AnalysisMetadata:
         completion_median_pearson_r=row.get("completion_median_pearson_r", ""),
         completion_n_imputed_total=row.get("completion_n_imputed_total", ""),
         completion_n_missing_total=row.get("completion_n_missing_total", ""),
+        n_hits_5e8=row.get("n_hits_5e8", ""),
+        n_hits_5e6=row.get("n_hits_5e6", ""),
+        n_hits_5e4=row.get("n_hits_5e4", ""),
     )
+
+
+def add_hit_counts(
+    store_path: str | Path, analyses: list[AnalysisMetadata]
+) -> list[AnalysisMetadata]:
+    """Add per-Analysis Top-Hit Counts from ``store_path``'s already-built
+    top-hit index onto whatever each ``AnalysisMetadata`` already carries
+    (ADR 0032).
+
+    Blank ``n_hits_*`` fields act as zero, so this both sets counts from
+    scratch (a fresh build's analyses start blank) and accumulates a Hybrid
+    store's Dense Component and Ragged Overflow Component contributions onto
+    the same Analysis when called once per component -- the two partition an
+    Analysis's associations disjointly (CONTEXT.md, Query Component).
+    """
+    counts = read_top_hit_counts(store_path)
+    return [
+        replace(
+            a,
+            n_hits_5e8=str(int(a.n_hits_5e8 or 0) + counts["n_hits_5e8"][i]),
+            n_hits_5e6=str(int(a.n_hits_5e6 or 0) + counts["n_hits_5e6"][i]),
+            n_hits_5e4=str(int(a.n_hits_5e4 or 0) + counts["n_hits_5e4"][i]),
+        )
+        for i, a in enumerate(analyses)
+    ]
 
 
 def build_analyses_table(analyses: list[AnalysisMetadata]) -> AnalysesTable:
@@ -238,9 +272,9 @@ def build_dense_observed_store(
         _write_manifest(work, store_id, release_id, reference_assembly, records, chunk_shape, dtype)
         write_variant_axis(work, variants, rsid_by_alid)
         _write_index(work, variants, analyses, records, chunk_shape, dtype)
-        write_analyses_tsv(work, analyses)
         _write_zarr(work, z, se, chunk_shape, dtype)
         build_top_hit_indexes(work)
+        write_analyses_tsv(work, add_hit_counts(work, analyses))
         if out.exists():
             shutil.rmtree(out)
         work.rename(out)

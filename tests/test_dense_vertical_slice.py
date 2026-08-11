@@ -5,6 +5,7 @@ import pytest
 import zarr
 
 from opengwasdb.index import connect, get_metadata
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
 
@@ -56,6 +57,15 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     assert dense_meta["compressor"]["cname"] == "zstd"
     assert dense_meta["compressor"]["shuffle"] == "bitshuffle"
     assert dense_meta["variant_axis"]["format"] == "tabix_tsv_v1"
+
+
+def test_analyses_tsv_has_real_top_hit_counts(dense_store_path):
+    # a1: z=2.0, z=-3.0 -- neither passes any threshold (loosest is 5e-4).
+    # a2: z=6.0, z=6.0 -- both pass all three thresholds (ADR 0032).
+    rows = {r["analysis_id"]: r for r in read_analyses(dense_store_path / "analyses.tsv").rows}
+    for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+        assert rows["a1"][column] == "0"
+        assert rows["a2"][column] == "2"
 
 
 def test_query_facade_supports_variant_range_analysis_phewas_top_hits_and_metadata(

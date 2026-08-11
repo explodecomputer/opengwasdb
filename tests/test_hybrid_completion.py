@@ -15,8 +15,10 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
@@ -134,6 +136,28 @@ def test_hybrid_completion(tmp_path):
     assert "imputed" not in dst_ovf
     assert np.array_equal(src_ovf["z"][:], dst_ovf["z"][:])
     assert np.array_equal(src_ovf["se"][:], dst_ovf["se"][:])
+
+
+def test_hit_counts_sum_dense_and_overflow_after_completion(tmp_path):
+    # The completed Dense Component's own analyses.tsv already carries
+    # correct post-completion counts (test_dense_completion.py); the shared
+    # root's counts must be that plus the Ragged Overflow's own top-hit
+    # index (ADR 0032) -- neither component alone is double-counted.
+    src = _build_source(tmp_path)
+    ld = _make_ld_panel(tmp_path)
+    dst = tmp_path / "dst.opengwasdb"
+    complete_hybrid_store(src, dst, ld, min_cor=0.0, thresh=0.9)
+
+    rows = sorted(
+        read_analyses(dst / "analyses.tsv").rows, key=lambda r: int(r["analysis_index"])
+    )
+    dense_counts = read_top_hit_counts(dst / "dense")
+    overflow_counts = read_top_hit_counts(dst)
+    for column in dense_counts:
+        expected = [
+            d + o for d, o in zip(dense_counts[column], overflow_counts[column], strict=True)
+        ]
+        assert [int(r[column]) for r in rows] == expected
 
 
 def test_completed_status_only_on_dense(tmp_path):

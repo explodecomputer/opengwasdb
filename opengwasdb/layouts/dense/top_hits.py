@@ -11,6 +11,7 @@ from numcodecs import Blosc
 from scipy.special import erfc, erfcinv  # type: ignore[import-untyped]
 
 from opengwasdb.layouts.dense.constants import TOP_HIT_THRESHOLDS
+from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS
 
 TOP_HIT_CHUNK_SIZE = 16_384
 
@@ -33,6 +34,24 @@ class DenseTopHitReader:
     def read(self, name: str, bounds: tuple[int, int], dtype: str) -> np.ndarray:
         start, stop = bounds
         return np.asarray(self.group[name][start:stop], dtype=dtype)
+
+
+def read_top_hit_counts(
+    store_path: str | Path, thresholds: tuple[float, ...] = TOP_HIT_THRESHOLDS
+) -> dict[str, list[int]]:
+    """Per-Analysis hit counts for each threshold tier, from an already-built
+    top-hit index (``build_top_hit_indexes``/``write_top_hit_indexes``/
+    ``build_ragged_top_hit_indexes`` -- all three share this schema). Keyed by
+    the ``analyses.tsv`` column each tier persists to (ADR 0032), in
+    ``analysis_index`` order.
+    """
+    root = zarr.open_group(str(Path(store_path) / "data.zarr"), mode="r")
+    top = root["top_hits"]
+    counts: dict[str, list[int]] = {}
+    for threshold, column in zip(thresholds, TOP_HIT_COUNT_COLUMNS, strict=True):
+        offsets = np.asarray(top[threshold_key(threshold)]["analysis_offsets"], dtype=np.int64)
+        counts[column] = (offsets[1:] - offsets[:-1]).tolist()
+    return counts
 
 
 def threshold_key(threshold: float) -> str:

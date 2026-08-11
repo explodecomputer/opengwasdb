@@ -231,6 +231,22 @@ class TestCompletionFiles:
         assert rows["a1"] == 0
         assert rows["a2"] == 1
 
+    def test_analyses_tsv_hit_counts_match_the_completed_stores_own_index(self, completed_store):
+        # Completion changes z/se via imputation, so persisted Top-Hit Counts
+        # (ADR 0032) must reflect *this* store's post-completion top-hit
+        # index, not be carried forward (or double-counted) from the
+        # pre-completion source's counts.
+        from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
+        from opengwasdb.model.analyses import read_analyses
+
+        rows = sorted(
+            read_analyses(completed_store / "analyses.tsv").rows,
+            key=lambda r: int(r["analysis_index"]),
+        )
+        expected = read_top_hit_counts(completed_store)
+        for column, values in expected.items():
+            assert [int(r[column]) for r in rows] == values
+
     def test_overwrite_raises_without_flag(
         self, tmp_path, observed_store, ld_panel, completed_store
     ):

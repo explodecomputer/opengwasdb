@@ -26,6 +26,7 @@ import numpy as np
 
 from opengwasdb.layouts.dense.build import (
     AnalysisMetadata,
+    add_hit_counts,
     analysis_metadata_from_row,
     write_analyses_tsv,
 )
@@ -164,7 +165,6 @@ def complete_hybrid_store(
         # place Analysis metadata is written, not a second provenance carry.
         analyses = _read_analyses(dense_component_path(dst))
         _write_index(dst, union, analyses, _chunk_shape(src_manifest), DEFAULT_DTYPE)
-        write_analyses_tsv(dst, analyses)
         source_by_alid = {a: source_alid_by_alid.get(a) for a in union}
         _write_variant_table(dst, union, source_by_alid)
 
@@ -193,6 +193,11 @@ def complete_hybrid_store(
             csr.add_analysis(new_vi[order], z[order], se[order])
         csr.flush(dst)
         build_ragged_top_hit_indexes(dst)
+        # Dense Component counts already live on `analyses` (read back from
+        # complete_dense_store's already-completed output); add the Ragged
+        # Overflow Component's counts on top -- the two partition an
+        # Analysis's associations disjointly (ADR 0032).
+        write_analyses_tsv(dst, add_hit_counts(dst, analyses))
 
         # ── 6. Hybrid manifest (reference-completed) ──────────────────────────
         new_release = release_id or f"{src_manifest.release_id}-completed"

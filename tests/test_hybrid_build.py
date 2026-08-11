@@ -19,6 +19,7 @@ import pytest
 import zarr
 
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
@@ -338,6 +339,23 @@ def test_top_hits_selects_and_merges_one_analysis(hybrid_store):
         np.testing.assert_array_equal(selected[name], global_result[name][expected])
     assert len(selected["z"]) == 2  # one Dense hit and one overflow hit
     assert q.top_hits(analysis_id="unknown", threshold=5e-4)["z"].size == 0
+
+
+def test_top_hit_counts_sum_dense_and_overflow_components(hybrid_store):
+    # trait_a: z=-4.0 (dense), z=-5.0 (overflow), z=3.0 (dense).
+    #   5e-8: none pass (z_critical=5.45)          -> 0
+    #   5e-6: only |5.0| passes (z_critical=4.56)  -> 1
+    #   5e-4: |4.0| and |5.0| pass (z_critical=3.48) -> 2
+    # trait_b: z=-12.0 (dense), z=4.0 (dense).
+    #   5e-8/5e-6: only |12.0| passes -> 1
+    #   5e-4: both pass -> 2
+    rows = {r["analysis_id"]: r for r in read_analyses(hybrid_store / "analyses.tsv").rows}
+    assert rows["trait_a"]["n_hits_5e8"] == "0"
+    assert rows["trait_a"]["n_hits_5e6"] == "1"
+    assert rows["trait_a"]["n_hits_5e4"] == "2"
+    assert rows["trait_b"]["n_hits_5e8"] == "1"
+    assert rows["trait_b"]["n_hits_5e6"] == "1"
+    assert rows["trait_b"]["n_hits_5e4"] == "2"
 
 
 # ── Validation (issue 059) ───────────────────────────────────────────────────

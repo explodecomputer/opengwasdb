@@ -214,6 +214,9 @@ completed_against   (Reference-Completed releases only; null when unimputed)
 completion_median_pearson_r   (Reference-Completed releases only)
 completion_n_imputed_total
 completion_n_missing_total
+n_hits_5e8   (count of associations at p <= 5e-8, genome-wide significant)
+n_hits_5e6   (count of associations at p <= 5e-6, suggestive)
+n_hits_5e4   (count of associations at p <= 5e-4, nominal)
 ```
 
 `analyses.tsv` MUST be sufficient on its own to interpret every Analysis's stored
@@ -224,6 +227,14 @@ makes concrete. `index.sqlite` MUST NOT duplicate any column of `analyses.tsv`;
 large, fine-grained, tooling-only evidence (such as Reference Completion Quality
 at LD-block-by-Analysis granularity, §12) stays SQLite-only, with only its
 per-Analysis rollup appearing in `analyses.tsv`.
+
+`n_hits_5e8`/`n_hits_5e6`/`n_hits_5e4` are Analytical Metadata too (ADR 0032): a
+signal of study power and test-statistic-inflation risk, derived at build time
+from the store's own top-hit index (§18) and never recomputed at query or render
+time. A store whose associations are split across more than one on-disk top-hit
+index for the same Analysis (a Hybrid store's Dense Component and Ragged
+Overflow Component) records the sum, since the two partition an Analysis's
+associations disjointly.
 
 ## 8. Sample size metadata
 

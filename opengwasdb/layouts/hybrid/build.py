@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.layouts.dense.build import AnalysisMetadata, write_analyses_tsv
+from opengwasdb.layouts.dense.build import AnalysisMetadata, add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
     _alid_sort_key,
@@ -441,7 +441,6 @@ def build_hybrid_from_vcf_manifest(
 
     # ── Write the Dense Component skeleton (a valid dense store) ──────────────
     _write_index(dense_dir, panel_sorted, analyses, chunk_shape, dtype)
-    write_analyses_tsv(dense_dir, analyses)
     _write_variant_table(dense_dir, panel_sorted, hg38_to_source)
     effective_chunks = _create_dense_zarr(dense_dir, n_panel, n_analyses, chunk_shape, dtype)
 
@@ -511,6 +510,7 @@ def build_hybrid_from_vcf_manifest(
         )
         log.info("Writing Dense Component top-hit index (%d candidates)", len(all_rows))
         write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se)
+        write_analyses_tsv(dense_dir, add_hit_counts(dense_dir, analyses))
 
         # Overflow CSR assembly (reuses RaggedCSRWriter).
         log.info("Assembling Ragged Overflow CSR from %d columns", n_analyses)
@@ -524,8 +524,12 @@ def build_hybrid_from_vcf_manifest(
     build_ragged_top_hit_indexes(out)
 
     # ── Shared union table + shared index + manifests ────────────────────────
+    # Top-Hit Counts here are the Dense Component's and Ragged Overflow
+    # Component's counts summed (ADR 0032): the two partition an Analysis's
+    # associations disjointly, so neither alone is the whole picture.
+    shared_analyses = add_hit_counts(out, add_hit_counts(dense_dir, analyses))
     _write_index(out, shared_sorted, analyses, chunk_shape, dtype)
-    write_analyses_tsv(out, analyses)
+    write_analyses_tsv(out, shared_analyses)
     _write_variant_table(out, shared_sorted, hg38_to_source)
 
     _write_dense_manifest(dense_dir, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
