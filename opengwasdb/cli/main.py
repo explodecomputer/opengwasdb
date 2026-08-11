@@ -21,6 +21,7 @@ from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
+from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.query import query_store
@@ -485,6 +486,46 @@ def build_ragged_besd_command(
         release_id=release_id,
         tissue=tissue or None,
         source_build=source_build,
+        overwrite=overwrite,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": str(result.output_path),
+                "n_variants": result.n_variants,
+                "n_analyses": result.n_analyses,
+                "n_associations": result.n_associations,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("build-ragged-ssf")
+def build_ragged_ssf_command(
+    manifest_path: Path,
+    filtered_dir: Path,
+    output_path: Path,
+    store_id: str = typer.Option(...),
+    release_id: str = typer.Option(...),
+    stored_effect_scale: str = typer.Option("sd", help="sd, log_or, or log_hazard"),
+    overwrite: bool = typer.Option(False),
+) -> None:
+    """Build a Ragged Observed-Only store from filtered GWAS-SSF files.
+
+    MANIFEST_PATH is a TSV with columns: analysis_index, analysis_id, trait_id,
+    gene_id, gene_name, trait_chr, trait_bp, n, tissue, context, mhc,
+    filtered_file. FILTERED_DIR holds one filtered GWAS-SSF ``.tsv.gz`` per
+    analysis (as produced by the opengwasdb-stores download+filter step),
+    named by each row's filtered_file column.
+    """
+    result = build_ragged_from_ssf(
+        manifest_path,
+        filtered_dir,
+        output_path,
+        store_id=store_id,
+        release_id=release_id,
+        stored_effect_scale=stored_effect_scale,
         overwrite=overwrite,
     )
     typer.echo(
