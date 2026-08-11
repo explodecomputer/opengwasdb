@@ -17,6 +17,7 @@ from opengwasdb.layouts.dense.complete import (
     resume_dense_completion,
 )
 from opengwasdb.layouts.dense.constants import DEFAULT_CHUNK_SHAPE
+from opengwasdb.layouts.dense.overview import write_overview_html
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
@@ -24,6 +25,7 @@ from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
@@ -667,6 +669,16 @@ def build_dense_top_hits_command(store_path: Path) -> None:
     """Build (or rebuild) the top-hit index for a Dense store."""
     build_top_hit_indexes(store_path)
     typer.echo("done")
+
+
+@app.command("regenerate-overview")
+def regenerate_overview_command(store_path: Path) -> None:
+    """Rewrite overview.html from a store's already-persisted data --
+    analyses.tsv, manifest.json, and a directory scan (issue #23 AC3, ADR
+    0032). No other store artifact is rebuilt or touched."""
+    table = read_analyses(store_path / "analyses.tsv")
+    out_path = write_overview_html(store_path, table)
+    typer.echo(f"wrote {out_path}")
 
 
 @app.command("query-phewas")
