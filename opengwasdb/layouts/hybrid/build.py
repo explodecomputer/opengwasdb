@@ -6,6 +6,10 @@ dense two-pass builder's liftover, key-lookup, disk-spill, band-write and
 fork-pool machinery (``opengwasdb.layouts.dense.build_vcf``) and the ragged
 ``RaggedCSRWriter`` — the only new logic is per-variant on-panel/off-panel
 routing in the single Pass 2 read that both components share.
+
+Like the dense builder, association streaming and the union-variant pass go
+through a ``SourceReader`` resolved from each row's ``source_reader_capability``
+(issue #20) rather than importing ``opengwasdb.build.vcf_source`` directly.
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.build.vcf_source import stream_vcf_associations, stream_vcf_variants
 from opengwasdb.layouts.dense.build import AnalysisMetadata
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
@@ -50,8 +53,15 @@ from opengwasdb.layouts.hybrid.layout import (
 )
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
-from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
+from opengwasdb.model.enums import (
+    AssociationCoverage,
+    CompletionState,
+    PrimaryStorageLayout,
+    StoredEffectScale,
+)
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY
+from opengwasdb.readers.registry import resolve_reader
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 
 log = logging.getLogger(__name__)
@@ -180,6 +190,9 @@ def _resolve_column_hybrid(
     targets_sorted: np.ndarray,
     ispanel_sorted: np.ndarray,
     se_divisor: float = 1.0,
+    *,
+    capability: str = GWAS_VCF_CAPABILITY,
+    stored_effect_scale: str = StoredEffectScale.SD.value,
 ) -> tuple[
     tuple[np.ndarray, np.ndarray, np.ndarray],
     tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -188,11 +201,16 @@ def _resolve_column_hybrid(
     or the ragged overflow (off-panel). Returns ``(dense, overflow)`` where each is
     ``(index int64, z f32, se f32)`` deduped last-wins by index.
 
+    ``capability`` resolves a ``SourceReader`` (issue #20) rather than this
+    module streaming a VCF itself; ``stored_effect_scale`` is required to
+    construct one (see ``dense.build_vcf._resolve_column``).
+
     ``se_divisor`` divides every returned ``se`` value, dense and overflow alike
     (continuous-trait phenotype-SD standardisation, issue #18): a study's SD
     rescaling applies uniformly regardless of which component an association
     routes to. Defaults to 1.0 (no-op).
     """
+    reader = resolve_reader(capability, file_path, StoredEffectScale(stored_effect_scale))
     d_idx: list[np.ndarray] = []
     d_z: list[np.ndarray] = []
     d_se: list[np.ndarray] = []
@@ -230,13 +248,13 @@ def _resolve_column_hybrid(
         for lst in (chroms, poss, refs, alts, zs, ses):
             lst.clear()
 
-    for chrom, pos, ref, alt, z, se in stream_vcf_associations(file_path):
-        chroms.append(chrom)
-        poss.append(pos)
-        refs.append(ref)
-        alts.append(alt)
-        zs.append(z)
-        ses.append(se)
+    for assoc in reader.stream_associations():
+        chroms.append(assoc.chromosome)
+        poss.append(assoc.position)
+        refs.append(assoc.ref)
+        alts.append(assoc.alt)
+        zs.append(assoc.z)
+        ses.append(assoc.se)
         if len(zs) >= _RESOLVE_BATCH:
             _flush()
     _flush()
@@ -278,14 +296,20 @@ def _spill_hybrid_column(
         tmp.replace(final)
 
 
-def _pass2_worker(task: tuple[int, str, float]) -> int:
+def _pass2_worker(task: tuple[int, str, float, str, str]) -> int:
     assert _pass2_keys_sorted is not None
     assert _pass2_targets_sorted is not None
     assert _pass2_ispanel_sorted is not None
     assert _pass2_spill_dir is not None
-    col_idx, file_path, se_divisor = task
+    col_idx, file_path, se_divisor, capability, stored_effect_scale = task
     dense, overflow = _resolve_column_hybrid(
-        file_path, _pass2_keys_sorted, _pass2_targets_sorted, _pass2_ispanel_sorted, se_divisor
+        file_path,
+        _pass2_keys_sorted,
+        _pass2_targets_sorted,
+        _pass2_ispanel_sorted,
+        se_divisor,
+        capability=capability,
+        stored_effect_scale=stored_effect_scale,
     )
     _spill_hybrid_column(_pass2_spill_dir, col_idx, dense, overflow)
     return col_idx
@@ -365,7 +389,10 @@ def build_hybrid_from_vcf_manifest(
     hg19_tuples: set[tuple[str, int, str, str]] = set()
     t0 = time.monotonic()
     for i, row in enumerate(manifest_rows):
-        hg19_tuples.update(stream_vcf_variants(row.file_path))
+        reader = resolve_reader(
+            row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+        )
+        hg19_tuples.update(reader.stream_variants())
         _log_progress("Pass 1", i + 1, len(manifest_rows), t0,
                       f"{len(hg19_tuples)} unique variants", every=250)
     log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
@@ -442,7 +469,13 @@ def build_hybrid_from_vcf_manifest(
             for i, row in enumerate(manifest_rows):
                 col = analysis_index[row.trait_id]
                 dense, overflow = _resolve_column_hybrid(
-                    row.file_path, keys_sorted, targets_sorted, ispanel_sorted, row.se_divisor
+                    row.file_path,
+                    keys_sorted,
+                    targets_sorted,
+                    ispanel_sorted,
+                    row.se_divisor,
+                    capability=row.source_reader_capability,
+                    stored_effect_scale=row.stored_effect_scale,
                 )
                 _spill_hybrid_column(spill_dir, col, dense, overflow)
                 _log_progress("Pass 2", i + 1, n_analyses, t2, f"last: {row.trait_id}", every=25)
@@ -457,7 +490,13 @@ def build_hybrid_from_vcf_manifest(
             try:
                 with _fork_pool(n_workers) as pool:
                     tasks = [
-                        (analysis_index[row.trait_id], row.file_path, row.se_divisor)
+                        (
+                            analysis_index[row.trait_id],
+                            row.file_path,
+                            row.se_divisor,
+                            row.source_reader_capability,
+                            row.stored_effect_scale,
+                        )
                         for row in manifest_rows
                     ]
                     futures = [pool.submit(_pass2_worker, t) for t in tasks]

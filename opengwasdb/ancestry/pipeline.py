@@ -19,9 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opengwasdb.ancestry.catalogue import CatalogueRow, write_catalogue
-from opengwasdb.ancestry.extract import write_regions_file
 from opengwasdb.ancestry.mixture import AncestryAssignment, Gates, assign_from_vcf
 from opengwasdb.ancestry.reference import AncestryReference
+from opengwasdb.readers.gwas_vcf import write_regions_file
 
 log = logging.getLogger(__name__)
 

@@ -1,4 +1,11 @@
-"""Two-pass Dense Observed-Only writer from GWAS-VCF manifests with inline liftover."""
+"""Two-pass Dense Observed-Only writer from GWAS-VCF manifests with inline liftover.
+
+Association streaming and the union-variant pass go through a ``SourceReader``
+resolved from each row's ``source_reader_capability`` (issue #20) rather than
+importing ``opengwasdb.build.vcf_source`` directly -- GWAS-VCF remains the only
+implementation, so nothing about the build changes, but no bcftools-specific
+assumption is left in this module.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +26,6 @@ import zarr
 from numcodecs import Blosc
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.build.vcf_source import stream_vcf_associations, stream_vcf_variants
 from opengwasdb.index import connect, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import AnalysisMetadata, DenseBuildResult
 from opengwasdb.layouts.dense.constants import (
@@ -37,6 +43,8 @@ from opengwasdb.model.enums import (
     StoredEffectScale,
 )
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY
+from opengwasdb.readers.registry import resolve_reader
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 from opengwasdb.variants.normalise import chromosome_sort_key
 
@@ -53,6 +61,8 @@ class _ManifestRow:
     n: int
     stored_effect_scale: str
     se_divisor: float  # divides original_se to standardise to SD units (issue #18); 1.0 = no-op
+    source_reader_capability: str  # resolves to a SourceReader (issue #20); GWAS_VCF_CAPABILITY
+    # when the manifest omits the column -- the only format this builder has ever supported.
 
 
 # original_sd_method tiers that carry an actual phenotype-SD magnitude to divide
@@ -189,10 +199,17 @@ def _apply_se_divisor(se: np.ndarray, se_divisor: float) -> np.ndarray:
 
 
 def _resolve_column(
-    file_path: str, keys_sorted: np.ndarray, rows_sorted: np.ndarray, se_divisor: float = 1.0
+    file_path: str,
+    keys_sorted: np.ndarray,
+    rows_sorted: np.ndarray,
+    se_divisor: float = 1.0,
+    *,
+    capability: str = GWAS_VCF_CAPABILITY,
+    stored_effect_scale: str = StoredEffectScale.SD.value,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Stream one VCF, resolve each association's variant to a row via the sorted
-    key lookup, and return deduped ``(rows int64, z f32, se f32)`` for the column.
+    """Stream one source file, resolve each association's variant to a row via
+    the sorted key lookup, and return deduped ``(rows int64, z f32, se f32)``
+    for the column.
 
     The stream is processed in ``_RESOLVE_BATCH``-sized batches (vectorised
     searchsorted per batch), so worker peak memory is bounded by one batch rather
@@ -201,12 +218,18 @@ def _resolve_column(
     once: when two source variants lift to the same row, the later stream
     occurrence wins, making the scattered matrix cell deterministic.
 
+    ``capability`` resolves a ``SourceReader`` (issue #20) rather than this
+    module streaming a VCF itself -- ``stored_effect_scale`` is required to
+    construct one but unused past construction here (it is a Pass-2 concern
+    only for readers that attach it to each yielded association).
+
     ``se_divisor`` divides the returned ``se`` (continuous-trait phenotype-SD
     standardisation, issue #18: ``stored_se = original_se / sd``). ``z`` is left
     untouched -- ``z = beta/se`` is invariant to dividing both by the same
     constant, so only ``se`` needs rescaling. Defaults to 1.0 (no-op) for
     binary-trait analyses and callers that pre-date issue #18.
     """
+    reader = resolve_reader(capability, file_path, StoredEffectScale(stored_effect_scale))
     rows_parts: list[np.ndarray] = []
     z_parts: list[np.ndarray] = []
     se_parts: list[np.ndarray] = []
@@ -231,13 +254,13 @@ def _resolve_column(
         zs.clear()
         ses.clear()
 
-    for chrom, pos, ref, alt, z, se in stream_vcf_associations(file_path):
-        chroms.append(chrom)
-        poss.append(pos)
-        refs.append(ref)
-        alts.append(alt)
-        zs.append(z)
-        ses.append(se)
+    for assoc in reader.stream_associations():
+        chroms.append(assoc.chromosome)
+        poss.append(assoc.position)
+        refs.append(assoc.ref)
+        alts.append(assoc.alt)
+        zs.append(assoc.z)
+        ses.append(assoc.se)
         if len(zs) >= _RESOLVE_BATCH:
             _flush()
     _flush()
@@ -277,14 +300,21 @@ def _spill_column(
     tmp.replace(final)
 
 
-def _pass2_worker(task: tuple[int, str, float]) -> int:
-    """Resolve one VCF column against the fork-inherited numpy lookup and spill it.
+def _pass2_worker(task: tuple[int, str, float, str, str]) -> int:
+    """Resolve one column against the fork-inherited numpy lookup and spill it.
     Returns col_idx only — the compact result stays on disk, never in a pipe."""
     assert _pass2_keys_sorted is not None
     assert _pass2_rows_sorted is not None
     assert _pass2_spill_dir is not None
-    col_idx, file_path, se_divisor = task
-    rows, z, se = _resolve_column(file_path, _pass2_keys_sorted, _pass2_rows_sorted, se_divisor)
+    col_idx, file_path, se_divisor, capability, stored_effect_scale = task
+    rows, z, se = _resolve_column(
+        file_path,
+        _pass2_keys_sorted,
+        _pass2_rows_sorted,
+        se_divisor,
+        capability=capability,
+        stored_effect_scale=stored_effect_scale,
+    )
     _spill_column(_pass2_spill_dir, col_idx, rows, z, se)
     return col_idx
 
@@ -382,7 +412,10 @@ def build_dense_from_vcf_manifest(
     pass1_start = time.monotonic()
     n_rows = len(manifest_rows)
     for i, row in enumerate(manifest_rows):
-        hg19_tuples.update(stream_vcf_variants(row.file_path))
+        reader = resolve_reader(
+            row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+        )
+        hg19_tuples.update(reader.stream_variants())
         _log_progress(
             "Pass 1", i + 1, n_rows, pass1_start,
             f"{len(hg19_tuples)} unique variants so far", every=250,
@@ -489,7 +522,12 @@ def build_dense_from_vcf_manifest(
             for i, row in enumerate(manifest_rows):
                 col_idx = analysis_index[row.trait_id]
                 rows, z, se = _resolve_column(
-                    row.file_path, keys_sorted, rows_sorted, row.se_divisor
+                    row.file_path,
+                    keys_sorted,
+                    rows_sorted,
+                    row.se_divisor,
+                    capability=row.source_reader_capability,
+                    stored_effect_scale=row.stored_effect_scale,
                 )
                 _spill_column(spill_dir, col_idx, rows, z, se)
                 _log_progress(
@@ -504,7 +542,13 @@ def build_dense_from_vcf_manifest(
             try:
                 with _fork_pool(n_workers) as pool:
                     tasks = [
-                        (analysis_index[row.trait_id], row.file_path, row.se_divisor)
+                        (
+                            analysis_index[row.trait_id],
+                            row.file_path,
+                            row.se_divisor,
+                            row.source_reader_capability,
+                            row.stored_effect_scale,
+                        )
                         for row in manifest_rows
                     ]
                     futures = [pool.submit(_pass2_worker, t) for t in tasks]
@@ -570,6 +614,11 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     no SD magnitude (``declared_standardised``, ``binary_trait``), fails the
     build loudly rather than falling back to the old VCF-header inference or a
     silently assumed ``sd=1`` (issue #18 AC3).
+
+    An optional ``source_reader_capability`` column (issue #20) selects the
+    ``SourceReader`` each row is built through; a manifest that omits it (every
+    manifest before this change) defaults every row to ``GWAS_VCF_CAPABILITY``,
+    the only format this builder has ever supported.
     """
     with open(manifest_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -635,6 +684,7 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                 n=int(row.get("n", 0) or 0),
                 stored_effect_scale=scale,
                 se_divisor=se_divisor,
+                source_reader_capability=row.get("source_reader_capability") or GWAS_VCF_CAPABILITY,
             )
         )
     return result

@@ -17,14 +17,12 @@ from opengwasdb.ancestry import (
     assign_ancestry,
     assign_from_vcf,
     catalogue_fieldnames,
-    extract_af_at_sites,
-    is_palindromic,
     load_reference,
     write_catalogue,
 )
 from opengwasdb.ancestry.catalogue import BUILD_COLUMNS, CatalogueRow
-from opengwasdb.ancestry.extract import write_regions_file
 from opengwasdb.layouts.dense.build_vcf import _read_manifest
+from opengwasdb.readers.gwas_vcf import write_regions_file
 
 # Fine groups (two EUR subgroups + one AFR + one EAS) and their super-populations.
 GROUPS = ["United Kingdom", "Finland", "Africa (West)", "Asia (East)"]
@@ -92,64 +90,26 @@ def test_reference_maf_floor_drops_monomorphic(tmp_path):
     assert ref.n_variants == N_VARIANTS - 1
 
 
-# --- AF extraction: orientation & palindromic exclusion --------------------
+# --- AF extraction (moved to tests/test_readers.py, issue #21) -------------
+#
+# `extract_af_at_sites`'s orientation/palindrome/liftover behaviour is now
+# `GwasVcfReader.extract_at_sites`'s, tested alongside the rest of the reader
+# in `tests/test_readers.py`.
 
 
 def _af_vcf(tmp_path: Path, rows: list[str]) -> Path:
+    # AF and SE FORMAT fields: extract_at_sites (issue #21) is a combined AF+SE
+    # lookup and drops a site missing either, so every row must carry both.
     header = (
         "##fileformat=VCFv4.2\n"
         '##FORMAT=<ID=AF,Number=A,Type=Float,Description="Allele frequency">\n'
+        '##FORMAT=<ID=SE,Number=A,Type=Float,Description="Standard error">\n'
         "##SAMPLE=<ID=S1,StudyType=Continuous>\n"
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
     )
     path = tmp_path / "study.vcf"
     path.write_text(header + "".join(rows), encoding="utf-8")
     return path
-
-
-def test_extract_orients_and_excludes_palindromic(tmp_path):
-    # Variant 1: REF=C ALT=A → A1=A=ALT (not flipped) → af stays 0.30.
-    # Variant 2: REF=A ALT=G → A1=A=REF (ALT flipped) → af = 1 - 0.30 = 0.70.
-    # Variant 3: REF=A ALT=T → palindromic → excluded.
-    vcf = _af_vcf(
-        tmp_path,
-        [
-            "1\t1000\t.\tC\tA\t.\tPASS\t.\tAF\t0.30\n",
-            "1\t1001\t.\tA\tG\t.\tPASS\t.\tAF\t0.30\n",
-            "1\t1002\t.\tA\tT\t.\tPASS\t.\tAF\t0.30\n",
-        ],
-    )
-    wanted = {"1:1000:A:C", "1:1001:A:G", "1:1002:A:T"}
-    afs = extract_af_at_sites(vcf, wanted)
-    assert afs["1:1000:A:C"] == pytest.approx(0.30)
-    assert afs["1:1001:A:G"] == pytest.approx(0.70)
-    assert "1:1002:A:T" not in afs  # palindromic dropped
-
-
-def test_is_palindromic():
-    assert is_palindromic("A", "T") and is_palindromic("C", "G")
-    assert not is_palindromic("A", "C") and not is_palindromic("A", "G")
-
-
-class _FakeLiftover:
-    """Stand-in for pyliftover.LiftOver: shifts chr1 positions by +64620."""
-
-    def convert_coordinate(self, chrom, pos0):  # noqa: D401
-        if chrom != "chr1":
-            return []
-        return [("chr1", pos0 + 64620, "+", 0)]
-
-
-def test_extract_applies_liftover(tmp_path):
-    # Study is on an older build; the reference ALIDs are on the lifted build.
-    vcf = _af_vcf(
-        tmp_path,
-        ["1\t1000\t.\tC\tA\t.\tPASS\t.\tAF\t0.25\n"],  # pos 1000 → 65620 after lift
-    )
-    wanted = {"1:65620:A:C"}  # canonical A1=A (ALT), lifted position
-    afs = extract_af_at_sites(vcf, wanted, liftover=_FakeLiftover())
-    assert set(afs) == {"1:65620:A:C"}
-    assert afs["1:65620:A:C"] == pytest.approx(0.25)  # unflipped (A is canonical A1)
 
 
 # --- mixture + gates -------------------------------------------------------
@@ -225,7 +185,7 @@ def test_assign_from_vcf_end_to_end(tmp_path, reference):
     for alid, af in study.items():
         _chrom, pos, _a1, _a2 = alid.split(":")
         # REF=C ALT=A → canonical A1=A=ALT, AF unflipped.
-        rows.append(f"1\t{pos}\t.\tC\tA\t.\tPASS\t.\tAF\t{af:.6g}\n")
+        rows.append(f"1\t{pos}\t.\tC\tA\t.\tPASS\t.\tAF:SE\t{af:.6g}:0.1\n")
     vcf = _bgzip_index(_af_vcf(tmp_path, rows))
     regions = write_regions_file(reference.index.keys(), tmp_path / "regions.txt")
     result = assign_from_vcf(vcf, reference, _gates(), regions_file=regions)

@@ -5,8 +5,20 @@
 from __future__ import annotations
 
 from opengwasdb.readers.fake import FakeReader
-from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY, GwasVcfReader
-from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics, SourceReader
+from opengwasdb.readers.gwas_vcf import (
+    GWAS_VCF_CAPABILITY,
+    GwasVcfReader,
+    is_palindromic,
+    load_liftover,
+    write_regions_file,
+)
+from opengwasdb.readers.interface import (
+    ReaderAssociation,
+    SiteMetrics,
+    SourceReader,
+    af_only,
+    site_metrics_arrays,
+)
 from opengwasdb.readers.registry import resolve_reader
 
 __all__ = [
@@ -16,5 +28,10 @@ __all__ = [
     "ReaderAssociation",
     "SiteMetrics",
     "SourceReader",
+    "af_only",
+    "is_palindromic",
+    "load_liftover",
     "resolve_reader",
+    "site_metrics_arrays",
+    "write_regions_file",
 ]
