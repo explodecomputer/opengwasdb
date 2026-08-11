@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from opengwasdb.index import analysis_by_id, connect
+from opengwasdb.index import AnalysesIndex, connect
 from opengwasdb.layouts.dense.top_hits import DenseTopHitReader, threshold_key
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
@@ -41,6 +41,7 @@ class StoreQuery:
     def __init__(self, store: OpenGWASDBStore):
         self.store = store
         self._connection = connect(store.index_path)
+        self._analyses = AnalysesIndex(store.path)
         self._root = zarr.open_group(str(store.data_path), mode="r")
         self._variant_axis = VariantAxis(store.path, self._connection)
         self._is_completed = (
@@ -97,23 +98,20 @@ class StoreQuery:
 
     def analyses_table(self) -> dict[int, dict]:
         """Return all analyses keyed by analysis_index."""
-        rows = self._connection.execute(
-            "SELECT * FROM analyses ORDER BY analysis_index"
-        ).fetchall()
         return {
-            int(row["analysis_index"]): {
-                "analysis_id": str(row["analysis_id"]),
-                "phenotype_id": row["phenotype_id"],
-                "phenotype_label": row["phenotype_label"],
-                "analysis_label": row["analysis_label"],
-                "stored_effect_scale": str(row["stored_effect_scale"]),
+            index: {
+                "analysis_id": row["analysis_id"],
+                "phenotype_id": row.get("phenotype_id") or None,
+                "phenotype_label": row.get("phenotype_label") or None,
+                "analysis_label": row.get("analysis_label") or None,
+                "stored_effect_scale": row["stored_effect_scale"],
             }
-            for row in rows
+            for index, row in self._analyses.all().items()
         }
 
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """Return all finite associations for one analysis."""
-        analysis = analysis_by_id(self._connection, analysis_id)
+        analysis = self._analyses.by_id(analysis_id)
         if analysis is None:
             return _empty_result()
         col = int(analysis["analysis_index"])
@@ -214,7 +212,7 @@ class StoreQuery:
         analyses = [
             a
             for aid in analysis_ids
-            if (a := analysis_by_id(self._connection, aid)) is not None
+            if (a := self._analyses.by_id(aid)) is not None
         ]
         if not variants or not analyses:
             return _empty_result()
@@ -261,7 +259,7 @@ class StoreQuery:
         group = self._root[path]
         analysis_index: int | None = None
         if analysis_id is not None:
-            analysis = analysis_by_id(self._connection, analysis_id)
+            analysis = self._analyses.by_id(analysis_id)
             if analysis is None or "analysis_offsets" not in group:
                 return _empty_result()
             analysis_index = int(analysis["analysis_index"])
@@ -699,7 +697,8 @@ class HybridStoreQuery:
         self._dense = StoreQuery(self._dense_store)
         self._dense_to_shared = np.load(dense_to_shared_path(store.path)).astype("int32")
         self._csr = RaggedCSRReader(store.path)  # overflow at store/data.zarr/ragged
-        self._connection = connect(store.index_path)  # shared analyses
+        self._connection = connect(store.index_path)
+        self._analyses = AnalysesIndex(store.path)  # shared analyses.tsv
         self._variant_axis = VariantAxis(store.path, self._connection)  # shared union table
 
     def close(self) -> None:
@@ -784,7 +783,7 @@ class HybridStoreQuery:
     # ── public query surface ─────────────────────────────────────────────────
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         dense = self._remap_dense(self._dense.analysis(analysis_id, observed_only=observed_only))
-        analysis = analysis_by_id(self._connection, analysis_id)
+        analysis = self._analyses.by_id(analysis_id)
         overflow = (
             self._overflow_for_analysis(int(analysis["analysis_index"]))
             if analysis is not None else _empty_result()
@@ -833,7 +832,7 @@ class HybridStoreQuery:
         wanted_cols = {
             int(a["analysis_index"])
             for aid in analysis_ids
-            if (a := analysis_by_id(self._connection, aid)) is not None
+            if (a := self._analyses.by_id(aid)) is not None
         }
         overflow = self._overflow_by_variants(off_shared)
         if len(overflow["z"]) and wanted_cols:
@@ -879,7 +878,7 @@ class HybridStoreQuery:
     ) -> dict[str, np.ndarray]:
         analysis_index = None
         if analysis_id is not None:
-            analysis = analysis_by_id(self._connection, analysis_id)
+            analysis = self._analyses.by_id(analysis_id)
             if analysis is None:
                 return _empty_result()
             analysis_index = int(analysis["analysis_index"])

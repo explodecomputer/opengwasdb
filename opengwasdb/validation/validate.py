@@ -11,11 +11,18 @@ from typing import Any
 import numpy as np
 import zarr
 
-from opengwasdb.index import connect, count_rows
+from opengwasdb.index import connect
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
-from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout, StoredEffectScale
+from opengwasdb.model.analyses import read_analyses
+from opengwasdb.model.enums import (
+    AncestryAssignmentMethod,
+    CompletionState,
+    OriginalSdMethod,
+    PrimaryStorageLayout,
+    StoredEffectScale,
+)
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.traits.axis import traits_table_path
@@ -96,6 +103,7 @@ def _validate_dense_store(
 ) -> ValidationResult:
     index_path = store_path / "index.sqlite"
     data_path = store_path / "data.zarr"
+    analyses_path = store_path / "analyses.tsv"
     variants_path = variant_table_path(store_path)
     tabix_path = variant_tabix_path(store_path)
     offsets_path = variant_offsets_path(store_path)
@@ -103,6 +111,8 @@ def _validate_dense_store(
         errors.append("missing index.sqlite")
     if not data_path.exists():
         errors.append("missing data.zarr")
+    if not analyses_path.exists():
+        errors.append("missing analyses.tsv")
     if not variants_path.exists():
         errors.append("missing variants.tsv.gz")
     if not tabix_path.exists():
@@ -130,13 +140,13 @@ def _validate_dense_store(
                 _validate_sqlite(connection, n_variants, errors)
             finally:
                 variant_axis.close()
-            n_analyses = count_rows(connection, "analyses")
+            n_analyses = _validate_analyses_tsv(analyses_path, errors)
             root = zarr.open_group(str(data_path), mode="r")
             imputed_arr = None
             on_panel_arr = None
             if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
                 imputed_arr, on_panel_arr = _validate_completion_metadata(
-                    root, connection, n_variants, n_analyses, errors
+                    root, connection, analyses_path, n_variants, n_analyses, errors
                 )
             if not errors:
                 _validate_dense_arrays(
@@ -152,6 +162,7 @@ def _validate_dense_store(
 def _validate_completion_metadata(
     root: Any,
     connection: sqlite3.Connection,
+    analyses_path: Path,
     n_variants: int,
     n_analyses: int,
     errors: list[str],
@@ -204,11 +215,26 @@ def _validate_completion_metadata(
             errors.append(
                 f"completion_quality table is missing columns: {', '.join(sorted(missing_cols))}"
             )
+        else:
+            # completion_quality.analysis_index is a positional reference into
+            # analyses.tsv, not a SQL foreign key (ADR 0030 consequences) --
+            # this is the validator rule that decision says must stand in for
+            # the database engine's constraint.
+            out_of_range = connection.execute(
+                "SELECT COUNT(*) FROM completion_quality "
+                "WHERE analysis_index < 0 OR analysis_index >= ?",
+                (n_analyses,),
+            ).fetchone()[0]
+            if out_of_range:
+                errors.append(
+                    f"completion_quality has {out_of_range} row(s) with analysis_index "
+                    f"outside analyses.tsv's range [0, {n_analyses})"
+                )
 
-    analyses_cols = {r[1] for r in connection.execute("PRAGMA table_info(analyses)").fetchall()}
-    if "n_missing_off_panel" not in analyses_cols:
+    analyses_cols = set(read_analyses(analyses_path).fieldnames)
+    if "completion_n_missing_total" not in analyses_cols:
         errors.append(
-            "analyses table is missing n_missing_off_panel for a reference-completed store"
+            "analyses.tsv is missing completion_n_missing_total for a reference-completed store"
         )
 
     # Only hand the arrays to the band pass if they are well-formed; a shape
@@ -656,15 +682,70 @@ def _validate_sqlite(
         variant_index = int(row["variant_index"])
         if variant_index < 0 or variant_index >= n_variants:
             errors.append(f"alias {row['alias']!r} points to missing variant {variant_index}")
-    rows = connection.execute("SELECT analysis_id, stored_effect_scale FROM analyses").fetchall()
-    for row in rows:
+    tables = {
+        r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "analyses" in tables:
+        errors.append(
+            "index.sqlite still contains an analyses table -- analyses.tsv is the sole "
+            "source of truth for Analytical Metadata (ADR 0030, issue #22)"
+        )
+
+
+def _validate_analyses_tsv(analyses_path: Path, errors: list[str]) -> int:
+    """Validate `analyses.tsv` (store-format spec §20, ADR 0030) and return its
+    row count -- the `n_analyses` the rest of dense validation cross-checks
+    zarr array shapes against.
+
+    Deliberately narrower than `opengwasdb.model.analyses.validate_analyses`
+    (issue #16): that function's `REQUIRED_COLUMNS` enforces non-blank
+    `sample_size_kind`/`sample_size_scope`/`sample_size`/`original_effect_scale`
+    per row, which is the contract a *registry* manifest must satisfy before a
+    build even runs. No current build path here has a source for those fields
+    (issue #22 scope note), so a built store leaves them honestly blank; a
+    store-level validator that required them would fail every store this
+    package can currently build. This function instead checks only what a
+    *built* store can actually promise: structural integrity (one row per
+    `analysis_index`, no duplicate `analysis_id`) and vocabulary conformance
+    for whichever controlled-vocabulary columns are present.
+    """
+    table = read_analyses(analyses_path)
+    n = len(table.rows)
+    seen_index: set[int] = set()
+    seen_id: set[str] = set()
+    for row in table.rows:
+        raw_index = row.get("analysis_index", "")
         try:
-            StoredEffectScale(row["stored_effect_scale"])
+            index = int(raw_index)
         except ValueError:
-            errors.append(
-                f"analysis {row['analysis_id']} has invalid stored_effect_scale "
-                f"{row['stored_effect_scale']!r}"
-            )
+            errors.append(f"analyses.tsv row has a non-integer analysis_index {raw_index!r}")
+            continue
+        if index in seen_index:
+            errors.append(f"analyses.tsv has more than one row for analysis_index {index}")
+        seen_index.add(index)
+        analysis_id = row.get("analysis_id", "")
+        if analysis_id in seen_id:
+            errors.append(f"analyses.tsv has more than one row for analysis_id {analysis_id!r}")
+        seen_id.add(analysis_id)
+    if seen_index and seen_index != set(range(n)):
+        errors.append(f"analyses.tsv analysis_index values are not exactly the range 0..{n - 1}")
+    for row in table.rows:
+        for column, vocabulary in (
+            ("stored_effect_scale", StoredEffectScale),
+            ("original_sd_method", OriginalSdMethod),
+            ("ancestry_assignment_method", AncestryAssignmentMethod),
+        ):
+            value = row.get(column, "")
+            if not value:
+                continue
+            try:
+                vocabulary(value)
+            except ValueError:
+                errors.append(
+                    f"analyses.tsv analysis {row.get('analysis_id')!r} has invalid "
+                    f"{column} {value!r}"
+                )
+    return n
 
 
 def _validate_variant_axis(variant_axis: VariantAxis, errors: list[str]) -> int:
@@ -1126,11 +1207,10 @@ def _validate_source_fidelity(
                 va.close()
 
     # Resolve analysis ids to columns.
-    with connect(store_path / "index.sqlite") as conn:
-        col_by_aid = {
-            str(r["analysis_id"]): int(r["analysis_index"])
-            for r in conn.execute("SELECT analysis_id, analysis_index FROM analyses").fetchall()
-        }
+    col_by_aid = {
+        row["analysis_id"]: int(row["analysis_index"])
+        for row in read_analyses(store_path / "analyses.tsv").rows
+    }
 
     pairs: list[tuple[int, int, float, float, str]] = []
     n_unmatched_variant = 0

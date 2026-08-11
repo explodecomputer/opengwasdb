@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.layouts.dense.build import AnalysisMetadata
+from opengwasdb.layouts.dense.build import AnalysisMetadata, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
     _alid_sort_key,
@@ -36,6 +36,7 @@ from opengwasdb.layouts.dense.build_vcf import (
     _encode_variant_keys,
     _fork_pool,
     _log_progress,
+    _manifest_row_to_analysis_metadata,
     _read_manifest,
     _write_dense_bands,
     _write_index,
@@ -434,19 +435,13 @@ def build_hybrid_from_vcf_manifest(
     # stored_effect_scale comes from the manifest, not the VCF header (issue
     # #17 -- the ieu-a-7 fix: the source header is not authoritative for
     # effect scale).
-    analyses = [
-        AnalysisMetadata(
-            analysis_id=row.trait_id,
-            phenotype_id=row.trait_id,
-            phenotype_label=row.trait_name,
-            analysis_label=row.trait_id,
-            stored_effect_scale=row.stored_effect_scale,
-        )
-        for row in manifest_rows
+    analyses: list[AnalysisMetadata] = [
+        _manifest_row_to_analysis_metadata(row) for row in manifest_rows
     ]
 
     # ── Write the Dense Component skeleton (a valid dense store) ──────────────
     _write_index(dense_dir, panel_sorted, analyses, chunk_shape, dtype)
+    write_analyses_tsv(dense_dir, analyses)
     _write_variant_table(dense_dir, panel_sorted, hg38_to_source)
     effective_chunks = _create_dense_zarr(dense_dir, n_panel, n_analyses, chunk_shape, dtype)
 
@@ -530,6 +525,7 @@ def build_hybrid_from_vcf_manifest(
 
     # ── Shared union table + shared index + manifests ────────────────────────
     _write_index(out, shared_sorted, analyses, chunk_shape, dtype)
+    write_analyses_tsv(out, analyses)
     _write_variant_table(out, shared_sorted, hg38_to_source)
 
     _write_dense_manifest(dense_dir, store_id, release_id, n_panel, n_analyses, chain_file, dtype)

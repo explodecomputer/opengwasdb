@@ -23,7 +23,7 @@ import os
 import shutil
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,12 +47,14 @@ from opengwasdb.completion.ld_panel import (
     snp_position as _snp_position,
 )
 from opengwasdb.index import connect, initialise_schema, set_metadata
+from opengwasdb.layouts.dense.build import analysis_metadata_from_row, write_analyses_tsv
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
     DEFAULT_DTYPE,
 )
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.variants import (
@@ -386,6 +388,31 @@ def resume_dense_completion(
 # ── Shared pipeline core ────────────────────────────────────────────────────
 
 
+def _completion_quality_rollup(
+    connection: Any, n_analyses: int
+) -> dict[int, tuple[str, str]]:
+    """Per-Analysis ``(completion_median_pearson_r, completion_n_imputed_total)``
+    strings, rolled up from the LD-block-by-Analysis ``completion_quality``
+    table (issue #22) -- the large, fine-grained table stays SQLite-only per
+    ADR 0030; only this rollup travels into ``analyses.tsv``.
+    """
+    per_analysis_r: dict[int, list[float]] = {}
+    per_analysis_imputed: dict[int, int] = {}
+    for row in connection.execute(
+        "SELECT analysis_index, pearson_r, n_imputed FROM completion_quality"
+    ):
+        idx = int(row["analysis_index"])
+        if row["pearson_r"] is not None:
+            per_analysis_r.setdefault(idx, []).append(float(row["pearson_r"]))
+        per_analysis_imputed[idx] = per_analysis_imputed.get(idx, 0) + int(row["n_imputed"])
+    rollup: dict[int, tuple[str, str]] = {}
+    for idx in range(n_analyses):
+        r_values = per_analysis_r.get(idx, [])
+        median_r = f"{float(np.median(r_values)):.6g}" if r_values else ""
+        rollup[idx] = (median_r, str(per_analysis_imputed.get(idx, 0)))
+    return rollup
+
+
 def _run_completion(
     source_path: Path,
     dest_path: Path,
@@ -430,10 +457,9 @@ def _run_completion(
         src_variant_axis.close()
         src_alid_to_idx = {v.alid: v.variant_index for v in src_variants}
 
-        with connect(src / "index.sqlite") as src_conn:
-            src_analyses = [dict(r) for r in src_conn.execute(
-                "SELECT * FROM analyses ORDER BY analysis_index"
-            ).fetchall()]
+        src_analyses = sorted(
+            read_analyses(src / "analyses.tsv").rows, key=lambda r: int(r["analysis_index"])
+        )
         n_analyses = len(src_analyses)
         print(f"Source: {len(src_variants):,} variants, {n_analyses:,} analyses")
 
@@ -516,9 +542,6 @@ def _run_completion(
         with connect(work / "index.sqlite") as dst_db:
             initialise_schema(dst_db)
             dst_db.execute(
-                "ALTER TABLE analyses ADD COLUMN n_missing_off_panel INTEGER NOT NULL DEFAULT 0"
-            )
-            dst_db.execute(
                 """
                 CREATE TABLE completion_quality (
                     analysis_index INTEGER NOT NULL,
@@ -534,8 +557,8 @@ def _run_completion(
             set_metadata(dst_db, "n_variants", n_variants)
             set_metadata(dst_db, "n_analyses", n_analyses)
             dst_db.commit()
-            # analyses rows are inserted after the band write, once
-            # n_missing_off_panel is known (issue 044).
+            # analyses.tsv is written after the band write, once
+            # n_missing_off_panel is known (issue 044; issue #22).
 
         # ── Phase 2: parallel LD-block completion ───────────────────────────
         print(f"Running reference completion across {len(tsv_paths):,} LD blocks "
@@ -617,25 +640,20 @@ def _run_completion(
             f"{n_missing_off_panel_total:,} off-panel missing"
         )
 
-        print("Writing analyses table...")
+        print("Writing analyses.tsv...")
         with connect(work / "index.sqlite") as dst_db:
-            dst_db.executemany(
-                """
-                INSERT INTO analyses (
-                    analysis_index, analysis_id, phenotype_id, phenotype_label,
-                    analysis_label, stored_effect_scale, n_missing_off_panel
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        int(row["analysis_index"]), row["analysis_id"], row["phenotype_id"],
-                        row["phenotype_label"], row["analysis_label"], row["stored_effect_scale"],
-                        int(n_missing_off_panel[i]),
-                    )
-                    for i, row in enumerate(src_analyses)
-                ],
+            quality_rollup = _completion_quality_rollup(dst_db, n_analyses)
+        dst_analyses = [
+            replace(
+                analysis_metadata_from_row(row),
+                completed_against=ancestry if impute_mask is None or impute_mask[i] else "",
+                completion_median_pearson_r=quality_rollup[i][0],
+                completion_n_imputed_total=quality_rollup[i][1],
+                completion_n_missing_total=str(int(n_missing_off_panel[i])),
             )
-            dst_db.commit()
+            for i, row in enumerate(src_analyses)
+        ]
+        write_analyses_tsv(work, dst_analyses)
 
         print("Building top-hit indexes...")
         build_top_hit_indexes(work)

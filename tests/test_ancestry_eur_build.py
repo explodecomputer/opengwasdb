@@ -1,32 +1,41 @@
 """Build a EUR Hybrid store from an Analysis Catalogue subset (issue 065).
 
 The Catalogue is a superset of the build manifest, so selecting EUR is a pure row
-filter. The unchanged build-hybrid consumes it; the store then carries per-Analysis
-Assigned Ancestry + Catalogue provenance in a sidecar. Non-EUR/Unassigned Analyses
-are absent from the store (still parked in the Catalogue).
+filter. The unchanged build-hybrid consumes it; per-Analysis Assigned Ancestry
+rides straight into the store's ``analyses.tsv`` as part of the build (issue #22),
+and release-level Catalogue provenance is folded into ``manifest.json``.
+Non-EUR/Unassigned Analyses are absent from the store (still parked in the
+Catalogue).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
 
-from opengwasdb.ancestry.store import read_ancestry_map, read_ancestry_provenance
 from opengwasdb.ancestry.subset import build_hybrid_from_catalogue, subset_catalogue
 from opengwasdb.cli.main import app
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.validation import validate_store
 
 
 def _store_analysis_ids(store: Path) -> set[str]:
-    """Read the store's analysis ids from its SQLite index."""
-    import sqlite3
+    """Read the store's analysis ids from its analyses.tsv."""
+    return {row["analysis_id"] for row in read_analyses(store / "analyses.tsv").rows}
 
-    conn = sqlite3.connect(store / "index.sqlite")
-    try:
-        return {row[0] for row in conn.execute("SELECT analysis_id FROM analyses")}
-    finally:
-        conn.close()
+
+def _ancestry_map(store: Path) -> dict[str, str]:
+    """Return {analysis_id: assigned_ancestry} from the store's analyses.tsv."""
+    return {row["analysis_id"]: row["assigned_ancestry"] for row in read_analyses(
+        store / "analyses.tsv"
+    ).rows}
+
+
+def _ancestry_provenance(store: Path) -> dict:
+    manifest = json.loads((store / "manifest.json").read_text(encoding="utf-8"))
+    return manifest["provenance"]["ancestry"]
 
 # hg19 coordinates that liftover to the hybrid fixture's hg38 ALIDs.
 HG19_POS_1 = 100_000
@@ -71,15 +80,20 @@ def _catalogue(tmp_path: Path) -> Path:
         "n",
         "assigned_ancestry",
         "reported_population",
+        "ancestry_prop_EUR",
+        "ancestry_prop_AFR",
         "catalogue_version",
         "ancestry_reference_version",
     ]
     ver = ["cat-v1", "prive2022-hg38"]
     rows = [
-        ["eur_a", str(vcfs["eur_a"]), "EUR A", "1000", "EUR", "European", *ver],
-        ["eur_b", str(vcfs["eur_b"]), "EUR B", "1200", "EUR", "European", *ver],
-        ["afr_c", str(vcfs["afr_c"]), "AFR C", "900", "AFR", "African", *ver],
-        ["und_d", str(vcfs["unassigned_d"]), "Und", "800", "Unassigned", "Mixed", *ver],
+        ["eur_a", str(vcfs["eur_a"]), "EUR A", "1000", "EUR", "European", "0.95", "0.02", *ver],
+        ["eur_b", str(vcfs["eur_b"]), "EUR B", "1200", "EUR", "European", "0.91", "0.04", *ver],
+        ["afr_c", str(vcfs["afr_c"]), "AFR C", "900", "AFR", "African", "0.03", "0.92", *ver],
+        [
+            "und_d", str(vcfs["unassigned_d"]), "Und", "800", "Unassigned", "Mixed",
+            "0.4", "0.4", *ver,
+        ],
     ]
     path = tmp_path / "catalogue.tsv"
     path.write_text(
@@ -132,12 +146,20 @@ def test_build_eur_hybrid_records_provenance_and_validates(tmp_path):
     # Only EUR-assigned Analyses are present in the store.
     assert _store_analysis_ids(store) == {"eur_a", "eur_b"}
 
-    # Per-Analysis Assigned Ancestry sidecar.
-    ancestry_map = read_ancestry_map(store)
+    # Per-Analysis Assigned Ancestry, in analyses.tsv.
+    ancestry_map = _ancestry_map(store)
     assert ancestry_map == {"eur_a": "EUR", "eur_b": "EUR"}
 
+    # The Catalogue's ancestry_prop_* composition columns ride through the
+    # manifest verbatim and land in analyses.tsv too (issue #22) -- not just
+    # assigned_ancestry itself.
+    rows = {r["analysis_id"]: r for r in read_analyses(store / "analyses.tsv").rows}
+    assert rows["eur_a"]["ancestry_prop_EUR"] == "0.95"
+    assert rows["eur_a"]["ancestry_prop_AFR"] == "0.02"
+    assert rows["eur_b"]["ancestry_prop_EUR"] == "0.91"
+
     # Store-level provenance links back to the Catalogue.
-    prov = read_ancestry_provenance(store)
+    prov = _ancestry_provenance(store)
     assert prov["catalogue_version"] == "cat-v1"
     assert prov["subset_filter"] == "assigned_ancestry == EUR"
     assert prov["ancestry_reference_version"] == "prive2022-hg38"
@@ -167,9 +189,7 @@ def test_build_hybrid_from_catalogue_cli(tmp_path):
         ],
     )
     assert result.exit_code == 0, result.output
-    import json
-
     summary = json.loads(result.output.strip().splitlines()[-1])
     assert summary["ancestry"] == "EUR"
     assert summary["n_kept"] == 2 and summary["n_total"] == 4
-    assert read_ancestry_map(store) == {"eur_a": "EUR", "eur_b": "EUR"}
+    assert _ancestry_map(store) == {"eur_a": "EUR", "eur_b": "EUR"}

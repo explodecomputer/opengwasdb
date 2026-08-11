@@ -1,7 +1,7 @@
 """SQLite metadata and lookup indexes."""
 
+from opengwasdb.index.analyses import AnalysesIndex
 from opengwasdb.index.sqlite import (
-    analysis_by_id,
     connect,
     count_rows,
     create_lookup_indexes,
@@ -12,7 +12,7 @@ from opengwasdb.index.sqlite import (
 )
 
 __all__ = [
-    "analysis_by_id",
+    "AnalysesIndex",
     "connect",
     "count_rows",
     "create_lookup_indexes",
