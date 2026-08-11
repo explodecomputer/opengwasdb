@@ -15,7 +15,7 @@ from opengwasdb.index import connect
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
-from opengwasdb.model.analyses import read_analyses
+from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS, read_analyses
 from opengwasdb.model.enums import (
     AncestryAssignmentMethod,
     CompletionState,
@@ -745,6 +745,23 @@ def _validate_analyses_tsv(analyses_path: Path, errors: list[str]) -> int:
                     f"analyses.tsv analysis {row.get('analysis_id')!r} has invalid "
                     f"{column} {value!r}"
                 )
+    # Top-Hit Counts (ADR 0032) are computed by every build path, unlike the
+    # completion_* rollups above (Reference-Completed releases only) -- so,
+    # unlike those, their presence is checked unconditionally here.
+    missing_hit_columns = [c for c in TOP_HIT_COUNT_COLUMNS if c not in table.fieldnames]
+    if missing_hit_columns:
+        errors.append(
+            f"analyses.tsv is missing Top-Hit Count column(s): {', '.join(missing_hit_columns)}"
+        )
+    else:
+        for row in table.rows:
+            for column in TOP_HIT_COUNT_COLUMNS:
+                value = row.get(column, "")
+                if not value.isdigit():
+                    errors.append(
+                        f"analyses.tsv analysis {row.get('analysis_id')!r} has invalid "
+                        f"{column} {value!r} (must be a non-negative integer)"
+                    )
     return n
 
 

@@ -47,7 +47,11 @@ from opengwasdb.completion.ld_panel import (
     snp_position as _snp_position,
 )
 from opengwasdb.index import connect, initialise_schema, set_metadata
-from opengwasdb.layouts.dense.build import analysis_metadata_from_row, write_analyses_tsv
+from opengwasdb.layouts.dense.build import (
+    add_hit_counts,
+    analysis_metadata_from_row,
+    write_analyses_tsv,
+)
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
@@ -640,24 +644,10 @@ def _run_completion(
             f"{n_missing_off_panel_total:,} off-panel missing"
         )
 
-        print("Writing analyses.tsv...")
-        with connect(work / "index.sqlite") as dst_db:
-            quality_rollup = _completion_quality_rollup(dst_db, n_analyses)
-        dst_analyses = [
-            replace(
-                analysis_metadata_from_row(row),
-                completed_against=ancestry if impute_mask is None or impute_mask[i] else "",
-                completion_median_pearson_r=quality_rollup[i][0],
-                completion_n_imputed_total=quality_rollup[i][1],
-                completion_n_missing_total=str(int(n_missing_off_panel[i])),
-            )
-            for i, row in enumerate(src_analyses)
-        ]
-        write_analyses_tsv(work, dst_analyses)
-
-        print("Building top-hit indexes...")
-        build_top_hit_indexes(work)
-
+        # Write the completed manifest.json before analyses.tsv/overview.html
+        # below (rather than after, as this used to) -- overview.html reads
+        # manifest.json fresh from output_path for its header (ADR 0032), so
+        # it must already reflect the completed release, not the source's.
         new_release_id = release_id or f"{manifest.release_id}-completed"
         completed_manifest = StoreManifest(
             store_id=manifest.store_id,
@@ -689,6 +679,32 @@ def _run_completion(
             json.dumps(completed_manifest.to_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+
+        print("Writing analyses.tsv...")
+        with connect(work / "index.sqlite") as dst_db:
+            quality_rollup = _completion_quality_rollup(dst_db, n_analyses)
+        dst_analyses = [
+            replace(
+                analysis_metadata_from_row(row),
+                completed_against=ancestry if impute_mask is None or impute_mask[i] else "",
+                completion_median_pearson_r=quality_rollup[i][0],
+                completion_n_imputed_total=quality_rollup[i][1],
+                completion_n_missing_total=str(int(n_missing_off_panel[i])),
+                # Completion changes z/se via imputation, so the source's
+                # pre-completion Top-Hit Counts (carried forward by
+                # analysis_metadata_from_row) do not apply here -- zero them
+                # so add_hit_counts below sets fresh post-completion counts
+                # rather than adding onto stale ones.
+                n_hits_5e8="",
+                n_hits_5e6="",
+                n_hits_5e4="",
+            )
+            for i, row in enumerate(src_analyses)
+        ]
+
+        print("Building top-hit indexes...")
+        build_top_hit_indexes(work)
+        write_analyses_tsv(work, add_hit_counts(work, dst_analyses))
 
         if dst.exists():
             shutil.rmtree(dst)

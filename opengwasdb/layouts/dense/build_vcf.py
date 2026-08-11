@@ -27,7 +27,12 @@ from numcodecs import Blosc
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
 from opengwasdb.index import connect, initialise_schema, set_metadata
-from opengwasdb.layouts.dense.build import AnalysisMetadata, DenseBuildResult, write_analyses_tsv
+from opengwasdb.layouts.dense.build import (
+    AnalysisMetadata,
+    DenseBuildResult,
+    add_hit_counts,
+    write_analyses_tsv,
+)
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
@@ -494,7 +499,6 @@ def build_dense_from_vcf_manifest(
     # Write SQLite index + analyses.tsv + tabix variant axis
     # ------------------------------------------------------------------
     _write_index(out, hg38_alids, analyses, chunk_shape, dtype)
-    write_analyses_tsv(out, analyses)
     canonical_variants = [
         CanonicalVariant(
             chromosome=chrom,
@@ -612,6 +616,7 @@ def build_dense_from_vcf_manifest(
     )
     log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
     write_top_hit_indexes(out, all_rows, all_cols, all_z, all_se)
+    write_analyses_tsv(out, add_hit_counts(out, analyses))
     log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
 
     return DenseBuildResult(output_path=out, n_variants=n_variants, n_analyses=n_analyses)

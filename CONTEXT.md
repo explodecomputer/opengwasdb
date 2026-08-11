@@ -17,7 +17,10 @@ A self-contained logical distribution unit containing one or more Analyses and e
 An immutable, self-identifying published version of a Store. A release records Store identity, release identity, format version, creation time, completion state, provenance, and **Analytical Metadata** so downloaded or mirrored copies remain interpretable without a catalogue service.
 
 **Analytical Metadata**:
-Metadata that affects the interpretation of association statistics in a Store Release — Assigned Ancestry, Ancestry Composition, sample-size kind/scope/counts, Original Effect Scale and its derivation method and dispersion diagnostic, and a Reference Completion Quality rollup. Lives entirely in `analyses.tsv` (ADR 0030), one row per Analysis; never duplicated into `index.sqlite`. Distinct from a Trait Annotation (descriptive metadata curated after release) or build provenance (checksums, generator versions) — those stay registry-scoped, not store-scoped.
+Metadata that affects the interpretation of association statistics in a Store Release — Assigned Ancestry, Ancestry Composition, sample-size kind/scope/counts, Original Effect Scale and its derivation method and dispersion diagnostic, a Reference Completion Quality rollup, and per-Analysis Top-Hit Counts (a signal for study power and test-statistic inflation risk, ADR 0032). Lives entirely in `analyses.tsv` (ADR 0030), one row per Analysis; never duplicated into `index.sqlite`. Distinct from a Trait Annotation (descriptive metadata curated after release) or build provenance (checksums, generator versions) — those stay registry-scoped, not store-scoped.
+
+**Top-Hit Count**:
+The number of an Analysis's associations at or below a p-value threshold, one count per `TOP_HIT_THRESHOLDS` tier (genome-wide-significant `5e-8`, suggestive `5e-6`, nominal `5e-4`). Derived from the store's existing top-hit index at build time and persisted as Analytical Metadata columns in `analyses.tsv`, rather than recomputed at query or render time.
 _Avoid_: trait annotation, display metadata.
 
 **Format Version**:

@@ -54,6 +54,42 @@ def test_cli_build_validate_info_and_query_workflow(tmp_path, source_path):
     assert [row["z"] for row in json.loads(top_hits.output)] == [6.0, 6.0]
 
 
+def test_cli_regenerate_overview_rewrites_from_persisted_data_only(tmp_path, source_path):
+    runner = CliRunner()
+    store_path = tmp_path / "cli-store.opengwasdb"
+    build = runner.invoke(
+        app,
+        [
+            "build-dense",
+            str(source_path),
+            str(store_path),
+            "--store-id",
+            "cli-fixture",
+            "--release-id",
+            "observed-v1",
+        ],
+    )
+    assert build.exit_code == 0, build.output
+
+    index_sqlite_before = (store_path / "index.sqlite").read_bytes()
+    analyses_tsv_before = (store_path / "analyses.tsv").read_text(encoding="utf-8")
+
+    # Simulate a stale/corrupted overview.html the command must overwrite.
+    (store_path / "overview.html").write_text("stale", encoding="utf-8")
+
+    result = runner.invoke(app, ["regenerate-overview", str(store_path)])
+    assert result.exit_code == 0, result.output
+    assert "wrote" in result.output
+
+    content = (store_path / "overview.html").read_text(encoding="utf-8")
+    assert "cli-fixture" in content  # header reads manifest.json fresh
+    assert "stale" not in content
+
+    # No rebuild -- analyses.tsv and index.sqlite are untouched (issue #23 AC3).
+    assert (store_path / "index.sqlite").read_bytes() == index_sqlite_before
+    assert (store_path / "analyses.tsv").read_text(encoding="utf-8") == analyses_tsv_before
+
+
 def _hybrid_vcf(tmp_path, name, rows):
     header = (
         "##fileformat=VCFv4.2\n"

@@ -119,6 +119,13 @@ def test_migrate_preserves_analyses_and_ancestry(dense_store_path):
     assert rows["a1"]["ancestry_assignment_method"] == "af_assigned"
     assert rows["a1"]["phenotype_id"] == "p1"
 
+    # Top-Hit Counts (ADR 0032) are recovered for real from the pre-existing
+    # top-hit index (fixture z-values: a1=2.0,-3.0 -- no hits at any
+    # threshold; a2=6.0,6.0 -- hits at all three), not left blank.
+    for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+        assert rows["a1"][column] == "0"
+        assert rows["a2"][column] == "2"
+
     assert (dense_store_path / "overview.html").exists()
     assert not (dense_store_path / "ancestry.tsv").exists()
     assert not (dense_store_path / "ancestry_provenance.json").exists()

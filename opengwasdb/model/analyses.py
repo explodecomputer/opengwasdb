@@ -65,6 +65,13 @@ SHARED_CORE_COLUMNS: tuple[str, ...] = (
     "original_sd_dispersion",
 )
 
+# Top-Hit Count columns (ADR 0032, store-format spec §7a): one persisted
+# per-Analysis count per threshold tier in
+# opengwasdb.layouts.dense.constants.TOP_HIT_THRESHOLDS (5e-8/5e-6/5e-4, in
+# that order). Not imported from there to keep this module layout-independent
+# -- it is also the schema opengwasdb-stores validates manifests against.
+TOP_HIT_COUNT_COLUMNS: tuple[str, ...] = ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4")
+
 # Produced during or after the build; must not be required of a release
 # manifest, which is generated before a build runs.
 STORE_ONLY_COLUMNS: tuple[str, ...] = (
@@ -72,6 +79,7 @@ STORE_ONLY_COLUMNS: tuple[str, ...] = (
     "completion_median_pearson_r",
     "completion_n_imputed_total",
     "completion_n_missing_total",
+    *TOP_HIT_COUNT_COLUMNS,
 )
 
 # A reference listing of known registry build-input columns (issue #9's
