@@ -187,7 +187,7 @@ def add_hit_counts(
     the same Analysis when called once per component -- the two partition an
     Analysis's associations disjointly (CONTEXT.md, Query Component).
     """
-    counts = read_top_hit_counts(store_path)
+    counts = read_top_hit_counts(store_path, len(analyses))
     return [
         replace(
             a,

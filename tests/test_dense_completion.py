@@ -243,7 +243,7 @@ class TestCompletionFiles:
             read_analyses(completed_store / "analyses.tsv").rows,
             key=lambda r: int(r["analysis_index"]),
         )
-        expected = read_top_hit_counts(completed_store)
+        expected = read_top_hit_counts(completed_store, len(rows))
         for column, values in expected.items():
             assert [int(r[column]) for r in rows] == values
 

@@ -151,8 +151,8 @@ def test_hit_counts_sum_dense_and_overflow_after_completion(tmp_path):
     rows = sorted(
         read_analyses(dst / "analyses.tsv").rows, key=lambda r: int(r["analysis_index"])
     )
-    dense_counts = read_top_hit_counts(dst / "dense")
-    overflow_counts = read_top_hit_counts(dst)
+    dense_counts = read_top_hit_counts(dst / "dense", len(rows))
+    overflow_counts = read_top_hit_counts(dst, len(rows))
     for column in dense_counts:
         expected = [
             d + o for d, o in zip(dense_counts[column], overflow_counts[column], strict=True)

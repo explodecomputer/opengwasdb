@@ -15,6 +15,12 @@ from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS
 
 TOP_HIT_CHUNK_SIZE = 16_384
 
+# Positional pairing of TOP_HIT_THRESHOLDS with the analyses.tsv column each
+# tier persists to (model.analyses.TOP_HIT_COUNT_COLUMNS). A dict, not a zip
+# over the caller's own `thresholds`, so read_top_hit_counts accepts any
+# subset of TOP_HIT_THRESHOLDS rather than silently requiring exactly three.
+_THRESHOLD_COLUMNS = dict(zip(TOP_HIT_THRESHOLDS, TOP_HIT_COUNT_COLUMNS, strict=True))
+
 
 class DenseTopHitReader:
     """Address one threshold tier without exposing its physical arrays."""
@@ -37,20 +43,34 @@ class DenseTopHitReader:
 
 
 def read_top_hit_counts(
-    store_path: str | Path, thresholds: tuple[float, ...] = TOP_HIT_THRESHOLDS
+    store_path: str | Path,
+    n_analyses: int,
+    thresholds: tuple[float, ...] = TOP_HIT_THRESHOLDS,
 ) -> dict[str, list[int]]:
     """Per-Analysis hit counts for each threshold tier, from an already-built
     top-hit index (``build_top_hit_indexes``/``write_top_hit_indexes``/
     ``build_ragged_top_hit_indexes`` -- all three share this schema). Keyed by
     the ``analyses.tsv`` column each tier persists to (ADR 0032), in
     ``analysis_index`` order.
+
+    ``n_analyses`` is needed for the fallback path below, not just for
+    sizing a zero-filled result: real pre-issue-#22-era stores (e.g. ukb-b)
+    have a top-hit index that predates the ``analysis_offsets`` array this
+    function otherwise reads directly, so it falls back to counting the
+    flat ``analysis_index`` array by hand for those.
     """
     root = zarr.open_group(str(Path(store_path) / "data.zarr"), mode="r")
     top = root["top_hits"]
     counts: dict[str, list[int]] = {}
-    for threshold, column in zip(thresholds, TOP_HIT_COUNT_COLUMNS, strict=True):
-        offsets = np.asarray(top[threshold_key(threshold)]["analysis_offsets"], dtype=np.int64)
-        counts[column] = (offsets[1:] - offsets[:-1]).tolist()
+    for threshold in thresholds:
+        column = _THRESHOLD_COLUMNS[threshold]
+        group = top[threshold_key(threshold)]
+        if "analysis_offsets" in group:
+            offsets = np.asarray(group["analysis_offsets"], dtype=np.int64)
+            counts[column] = (offsets[1:] - offsets[:-1]).tolist()
+        else:
+            analysis_index = np.asarray(group["analysis_index"], dtype=np.int64)
+            counts[column] = np.bincount(analysis_index, minlength=n_analyses)[:n_analyses].tolist()
     return counts
 
 
