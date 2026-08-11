@@ -6,8 +6,13 @@ Build-time-derived, like `analyses.tsv` itself: written once by the builder
 edited. Self-contained (no external assets, no network requests) so it opens
 correctly from a downloaded store directory with no network access. Visual
 identity (palette, typography) matches `docs/opengwasdb-storage-format.html`,
-so OpenGWASDB's generated HTML artifacts read as one family (ADR 0032, issue
-#36) rather than unrelated one-off pages.
+so OpenGWASDB's generated HTML artifacts read as one family (ADR 0032).
+
+A single file, tab-switched client-side rather than split across sibling
+files (ADR 0032): AC1/AC2 (store-format spec §20, ADR 0030) both name
+`overview.html` specifically as the file a user browses Analyses in, and
+tabs keep the "no external assets, no network" self-containment property
+trivially true for the whole page at once (issue #37).
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import html
 import json
 from pathlib import Path
 
-from opengwasdb.model.analyses import AnalysesTable
+from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX, AnalysesTable
 
 _STYLE = """
 :root {
@@ -58,12 +63,23 @@ header {
 }
 header h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
 header .meta { margin-top: 6px; font-size: 13px; color: var(--ink-soft); font-family: var(--mono); }
+.tabs {
+  display: flex; gap: 4px; padding: 0 32px; background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+.tabs button {
+  font: inherit; font-size: 13px; padding: 10px 14px; border: none; background: none; cursor: pointer;
+  color: var(--ink-soft); border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tabs button:hover { color: var(--ink); }
+.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 main { padding: 20px 32px 60px; }
-#search {
+.tab-panel.hidden { display: none; }
+input[type="text"] {
   font: inherit; padding: 0.5rem 0.75rem; width: 24rem; max-width: 100%; margin-bottom: 0.9rem;
   border: 1px solid var(--hairline-strong); border-radius: 6px; background: var(--surface); color: var(--ink);
 }
-#search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+input[type="text"]:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .table-scroll {
   overflow-x: auto; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface);
 }
@@ -85,37 +101,53 @@ th.sticky-col, td.sticky-col {
 }
 th.sticky-col { z-index: 3; }
 tbody tr:nth-child(even) td.sticky-col { background: var(--paper); }
+.bar-wrap {
+  display: inline-block; width: 60px; height: 0.65em; background: var(--hairline); border-radius: 2px;
+  overflow: hidden; vertical-align: middle; margin-right: 6px;
+}
+.bar-fill { display: block; height: 100%; background: var(--accent); }
 """
 
 _SCRIPT = """
-const search = document.getElementById("search");
-const table = document.getElementById("analyses");
-const tbody = table.tBodies[0];
-const rows = Array.from(tbody.rows);
+function initTable(table) {
+  const search = document.getElementById(table.dataset.searchable);
+  const tbody = table.tBodies[0];
+  const rows = Array.from(tbody.rows);
 
-search.addEventListener("input", () => {
-  const q = search.value.toLowerCase();
-  for (const row of rows) {
-    row.style.display = row.textContent.toLowerCase().includes(q) ? "" : "none";
-  }
-});
+  search.addEventListener("input", () => {
+    const q = search.value.toLowerCase();
+    for (const row of rows) {
+      row.style.display = row.textContent.toLowerCase().includes(q) ? "" : "none";
+    }
+  });
 
-table.tHead.querySelectorAll("th").forEach((th, colIndex) => {
-  let ascending = true;
-  th.addEventListener("click", () => {
-    table.tHead.querySelectorAll("th").forEach(
-      (h) => h.classList.remove("sorted-asc", "sorted-desc")
-    );
-    const sorted = rows.slice().sort((a, b) => {
-      const av = a.cells[colIndex].textContent;
-      const bv = b.cells[colIndex].textContent;
-      const an = parseFloat(av), bn = parseFloat(bv);
-      const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv);
-      return ascending ? cmp : -cmp;
+  table.tHead.querySelectorAll("th").forEach((th, colIndex) => {
+    let ascending = true;
+    th.addEventListener("click", () => {
+      table.tHead.querySelectorAll("th").forEach(
+        (h) => h.classList.remove("sorted-asc", "sorted-desc")
+      );
+      const sorted = rows.slice().sort((a, b) => {
+        const av = a.cells[colIndex].textContent;
+        const bv = b.cells[colIndex].textContent;
+        const an = parseFloat(av), bn = parseFloat(bv);
+        const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv);
+        return ascending ? cmp : -cmp;
+      });
+      sorted.forEach((row) => tbody.appendChild(row));
+      th.classList.add(ascending ? "sorted-asc" : "sorted-desc");
+      ascending = !ascending;
     });
-    sorted.forEach((row) => tbody.appendChild(row));
-    th.classList.add(ascending ? "sorted-asc" : "sorted-desc");
-    ascending = !ascending;
+  });
+}
+document.querySelectorAll("table[data-searchable]").forEach(initTable);
+
+document.querySelectorAll(".tabs button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.add("hidden"));
+    btn.classList.add("active");
+    document.getElementById("tab-" + btn.dataset.tab).classList.remove("hidden");
   });
 });
 """
@@ -133,16 +165,17 @@ _TEMPLATE = """<!doctype html>
   <h1>{title}</h1>
   <div class="meta">{meta}</div>
 </header>
+<nav class="tabs">
+  <button data-tab="analyses" class="active">Analyses</button>
+  <button data-tab="ancestry">Ancestry</button>
+</nav>
 <main>
-<input id="search" type="text" placeholder="Filter rows...">
-<div class="table-scroll">
-<table id="analyses">
-<thead><tr>{header_cells}</tr></thead>
-<tbody>
-{body_rows}
-</tbody>
-</table>
-</div>
+<section id="tab-analyses" class="tab-panel">
+{analyses_section}
+</section>
+<section id="tab-ancestry" class="tab-panel hidden">
+{ancestry_section}
+</section>
 </main>
 <script>{script}</script>
 </body>
@@ -180,18 +213,85 @@ def _display_fieldnames(table: AnalysesTable) -> tuple[str, ...]:
     return ("analysis_id", *rest)
 
 
-def _render_row(row: dict[str, str], fieldnames: tuple[str, ...]) -> str:
+def _ancestry_prop_columns(fieldnames: tuple[str, ...]) -> list[str]:
+    return sorted(name for name in fieldnames if name.startswith(ANCESTRY_PROP_PREFIX))
+
+
+def _ancestry_fieldnames(table: AnalysesTable) -> tuple[str, ...]:
+    """`analysis_id`, `assigned_ancestry`, then every `ancestry_prop_<population>`
+    column present -- the same Ancestry Composition data already in
+    `analyses.tsv`, just a narrower column set than the Analyses tab
+    (issue #37)."""
+    return ("analysis_id", "assigned_ancestry", *_ancestry_prop_columns(table.fieldnames))
+
+
+def _bar_html(value: str) -> str:
+    """An inline width-bar for a 0..1 proportion, followed by its value --
+    an at-a-glance composition view with no charting library (issue #37)."""
+    try:
+        fraction = float(value)
+    except ValueError:
+        return html.escape(value)
+    pct = max(0.0, min(1.0, fraction)) * 100
+    return (
+        f'<span class="bar-wrap"><span class="bar-fill" style="width:{pct:.1f}%"></span></span>'
+        f"{html.escape(value)}"
+    )
+
+
+def _render_row(
+    row: dict[str, str],
+    fieldnames: tuple[str, ...],
+    *,
+    sticky_column: str | None,
+    bar_columns: frozenset[str],
+) -> str:
     cells = []
     for name in fieldnames:
         value = row.get(name, "")
         classes = " ".join(
             c
-            for c in ("sticky-col" if name == "analysis_id" else "", "" if value else "blank")
+            for c in ("sticky-col" if name == sticky_column else "", "" if value else "blank")
             if c
         )
         class_attr = f' class="{classes}"' if classes else ""
-        cells.append(f"<td{class_attr}>{html.escape(value) if value else '—'}</td>")
+        if value and name in bar_columns:
+            body = _bar_html(value)
+        else:
+            body = html.escape(value) if value else "—"
+        cells.append(f"<td{class_attr}>{body}</td>")
     return "<tr>" + "".join(cells) + "</tr>"
+
+
+def _render_table_section(
+    *,
+    table_id: str,
+    search_id: str,
+    search_placeholder: str,
+    fieldnames: tuple[str, ...],
+    rows: tuple[dict[str, str], ...],
+    sticky_column: str | None = None,
+    bar_columns: frozenset[str] = frozenset(),
+) -> str:
+    header_cells = "".join(
+        f'<th class="sticky-col">{html.escape(name)}</th>'
+        if name == sticky_column
+        else f"<th>{html.escape(name)}</th>"
+        for name in fieldnames
+    )
+    body_rows = "\n".join(
+        _render_row(row, fieldnames, sticky_column=sticky_column, bar_columns=bar_columns)
+        for row in rows
+    )
+    return (
+        f'<input id="{search_id}" type="text" placeholder="{html.escape(search_placeholder)}">\n'
+        '<div class="table-scroll">\n'
+        f'<table id="{table_id}" data-searchable="{search_id}">\n'
+        f"<thead><tr>{header_cells}</tr></thead>\n"
+        f"<tbody>\n{body_rows}\n</tbody>\n"
+        "</table>\n"
+        "</div>"
+    )
 
 
 def write_overview_html(
@@ -207,14 +307,24 @@ def write_overview_html(
     ]
     meta_parts.append(f"{len(table.rows)} Analyses")
 
-    fieldnames = _display_fieldnames(table)
-    header_cells = "".join(
-        f'<th class="sticky-col">{html.escape(name)}</th>'
-        if name == "analysis_id"
-        else f"<th>{html.escape(name)}</th>"
-        for name in fieldnames
+    analyses_section = _render_table_section(
+        table_id="analyses",
+        search_id="search-analyses",
+        search_placeholder="Filter rows...",
+        fieldnames=_display_fieldnames(table),
+        rows=table.rows,
+        sticky_column="analysis_id",
     )
-    body_rows = "\n".join(_render_row(row, fieldnames) for row in table.rows)
+    ancestry_fieldnames = _ancestry_fieldnames(table)
+    ancestry_section = _render_table_section(
+        table_id="ancestry",
+        search_id="search-ancestry",
+        search_placeholder="Filter analyses...",
+        fieldnames=ancestry_fieldnames,
+        rows=table.rows,
+        sticky_column="analysis_id",
+        bar_columns=frozenset(_ancestry_prop_columns(table.fieldnames)),
+    )
 
     out_path = output_path / "overview.html"
     out_path.write_text(
@@ -222,8 +332,8 @@ def write_overview_html(
             title=html.escape(title),
             style=_STYLE,
             meta=html.escape(" · ".join(meta_parts)),
-            header_cells=header_cells,
-            body_rows=body_rows,
+            analyses_section=analyses_section,
+            ancestry_section=ancestry_section,
             script=_SCRIPT,
         ),
         encoding="utf-8",
