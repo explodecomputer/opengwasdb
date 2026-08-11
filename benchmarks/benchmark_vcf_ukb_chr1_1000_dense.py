@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build and benchmark a Dense Observed-Only Store from 1000 UKB chr1 VCFs.
+"""Build and benchmark a Dense Observed-Only Store from UKB chr1 VCFs.
 
-Uses the 1000-trait chr1 GWAS-VCF dataset at
+Uses the chr1 GWAS-VCF dataset at
   /home/gh13047/repo/besdq/data/vcf-ukb-1000/
 which contains bgzipped, GRCh37/hg19 GWAS-VCFs in GWAS-SSF format.
 
@@ -11,9 +11,10 @@ repetitions each).
 
 Outputs:
   docs/benchmark-output/opengwasdb_vcf_ukb_chr1_1000_benchmark.json
+  docs/benchmark-output/opengwasdb_vcf_ukb_chr1_128_benchmark.json
 
 Usage:
-  python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py [--rebuild] [--reps N]
+  python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py [--analysis-count N] [--rebuild] [--reps N]
 """
 
 from __future__ import annotations
@@ -32,8 +33,10 @@ from opengwasdb.query import query_store
 from opengwasdb.validation import validate_store
 
 DEFAULT_MANIFEST = Path("/home/gh13047/repo/besdq/data/vcf-ukb-1000/manifest.tsv")
-DEFAULT_STORE = Path("/local-scratch/data/opengwas/opengwasdb/vcf_ukb_chr1_1000_dense.opengwasdb")
-DEFAULT_OUTPUT = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output/opengwasdb_vcf_ukb_chr1_1000_benchmark.json")
+DEFAULT_STORE_DIR = Path("/local-scratch/data/opengwas/opengwasdb")
+DEFAULT_OUTPUT_DIR = Path("/home/gh13047/repo/opengwasdb/docs/benchmark-output")
+MANIFEST_SCRATCH_DIR = Path("/tmp/opengwasdb-benchmark-manifests")
+DEFAULT_ANALYSIS_COUNT = 1000
 SLOWDOWN_FLAG_THRESHOLD = 2.0
 
 # Match besdq's benchmark region (dense_05_query_benchmark.py REGION constant)
@@ -45,6 +48,11 @@ RNG = np.random.default_rng(42)
 def main() -> None:
     args = _parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    build_manifest = (
+        _manifest_for_analysis_count(args.manifest, args.analysis_count, MANIFEST_SCRATCH_DIR)
+        if args.manifest.exists()
+        else args.manifest
+    )
 
     build_seconds = None
 
@@ -52,12 +60,12 @@ def main() -> None:
         shutil.rmtree(args.store)
 
     if args.rebuild or not args.store.exists():
-        print(f"Building store from {args.manifest} ...")
+        print(f"Building store from {build_manifest} ...")
         t0 = time.perf_counter()
         result = build_dense_from_vcf_manifest(
-            args.manifest,
+            build_manifest,
             args.store,
-            store_id="ukb-chr1-vcf-1000",
+            store_id=f"ukb-chr1-vcf-{args.analysis_count}",
             release_id="dense-observed-vcf-v1",
         )
         build_seconds = time.perf_counter() - t0
@@ -73,7 +81,7 @@ def main() -> None:
     print("Validation passed.")
 
     print(f"Running benchmark ({args.reps} reps per pattern) ...")
-    results = _run_benchmark(args.store, args.reps, build_seconds)
+    results = _run_benchmark(args.store, args.reps, build_seconds, build_manifest)
 
     args.output.write_text(
         json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -82,7 +90,12 @@ def main() -> None:
     _print_summary(results)
 
 
-def _run_benchmark(store_path: Path, n_reps: int, build_seconds: float | None) -> dict:
+def _run_benchmark(
+    store_path: Path,
+    n_reps: int,
+    build_seconds: float | None,
+    manifest_path: Path,
+) -> dict:
     query = query_store(store_path)
     selection = _choose_queries(store_path)
 
@@ -116,6 +129,7 @@ def _run_benchmark(store_path: Path, n_reps: int, build_seconds: float | None) -
         n_analyses = conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
 
     store_bytes = sum(f.stat().st_size for f in store_path.rglob("*") if f.is_file())
+    raw_vcf_bytes, n_source_files = _raw_vcf_bytes(manifest_path)
 
     return {
         "dataset": {
@@ -129,6 +143,9 @@ def _run_benchmark(store_path: Path, n_reps: int, build_seconds: float | None) -
         "storage": {
             "store_bytes": store_bytes,
             "store_mb": round(store_bytes / 1_000_000, 2),
+            "raw_vcf_bytes": raw_vcf_bytes,
+            "raw_vcf_mb": round(raw_vcf_bytes / 1_000_000, 2),
+            "n_source_files": n_source_files,
         },
         "selection": selection,
         "timings": timings,
@@ -178,6 +195,46 @@ def _choose_queries(store_path: Path) -> dict:
     }
 
 
+def _manifest_for_analysis_count(manifest_path: Path, analysis_count: int, output_dir: Path) -> Path:
+    """Return a manifest limited to the first ``analysis_count`` rows."""
+    if analysis_count <= 0:
+        raise ValueError("--analysis-count must be positive")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(manifest_path, encoding="utf-8") as src:
+        header = src.readline()
+        rows = [line for _, line in zip(range(analysis_count), src, strict=False)]
+
+    if len(rows) < analysis_count:
+        raise ValueError(
+            f"{manifest_path} contains only {len(rows)} analyses, "
+            f"cannot select {analysis_count}"
+        )
+
+    limited = output_dir / f"ukb_chr1_{analysis_count}_manifest.tsv"
+    limited.write_text(header + "".join(rows), encoding="utf-8")
+    return limited
+
+
+def _raw_vcf_bytes(manifest_path: Path) -> tuple[int, int]:
+    if not manifest_path.exists():
+        return 0, 0
+    paths = []
+    with open(manifest_path, encoding="utf-8") as handle:
+        next(handle)
+        for line in handle:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                paths.append(Path(parts[1]))
+    total = 0
+    for path in paths:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return total, len(paths)
+
+
 def _bench(fn, n_reps: int) -> tuple[float, float, int]:
     result = fn()  # warm-up
     times = []
@@ -209,11 +266,20 @@ def _print_summary(results: dict) -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--store", type=Path, default=DEFAULT_STORE)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--analysis-count", type=int, default=DEFAULT_ANALYSIS_COUNT)
+    parser.add_argument("--store", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--rebuild", action="store_true", default=False)
     parser.add_argument("--reps", type=int, default=10)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.store is None:
+        args.store = DEFAULT_STORE_DIR / f"vcf_ukb_chr1_{args.analysis_count}_dense.opengwasdb"
+    if args.output is None:
+        args.output = (
+            DEFAULT_OUTPUT_DIR
+            / f"opengwasdb_vcf_ukb_chr1_{args.analysis_count}_benchmark.json"
+        )
+    return args
 
 
 if __name__ == "__main__":

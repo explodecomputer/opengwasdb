@@ -45,6 +45,33 @@ python benchmarks/benchmark_vcf_ukb_chr1_dense.py \
 
 ---
 
+### `benchmark_vcf_ukb_chr1_1000_dense.py`
+
+Builds and benchmarks dense observed-only stores from the larger UKB chr1
+GWAS-VCF manifest. The `--analysis-count` flag selects the first N analyses from
+the source manifest, so the same script can produce the 128-analysis and
+1000-analysis comparison JSONs.
+
+**Output files written to `docs/benchmark-output/`:**
+
+| File | Description |
+|---|---|
+| `opengwasdb_vcf_ukb_chr1_128_benchmark.json` | 128-analysis scaling benchmark |
+| `opengwasdb_vcf_ukb_chr1_1000_benchmark.json` | 1000-analysis scaling benchmark |
+| `opengwasdb_vcf_ukb_chr1_1000_benchmark.qmd` | Standalone 128 vs 1000 report |
+
+**Usage**:
+
+```bash
+uv run python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py \
+  --analysis-count 128 --rebuild --reps 10
+
+uv run python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py \
+  --analysis-count 1000 --rebuild --reps 10
+```
+
+---
+
 ### `benchmark_ragged_besd.py`
 
 Benchmarks a ragged observed-only store built from BESD files.  Six query

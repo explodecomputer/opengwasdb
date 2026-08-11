@@ -1,6 +1,6 @@
 ---
-title: "UKB chr1 Dense Store — 1000-Analysis Benchmark"
-subtitle: "chr1 × 1000 UKB analyses · Dense Observed-Only store"
+title: "UKB chr1 Dense Store — 1000 vs 128 Analysis Benchmark"
+subtitle: "chr1 UKB analyses · Dense Observed-Only store"
 date: today
 format:
   html:
@@ -23,18 +23,17 @@ def load_json(path):
     return json.loads(p.read_text()) if p.exists() else None
 
 bench1k = load_json(HERE / "opengwasdb_vcf_ukb_chr1_1000_benchmark.json")
-bench100 = load_json(HERE / "opengwasdb_vcf_ukb_chr1_benchmark.json")
+bench128 = load_json(HERE / "opengwasdb_vcf_ukb_chr1_128_benchmark.json")
 
 # Raw source VCF sizes measured directly on disk (du -sb on the source manifests).
 # See benchmarks/README.md for provenance.
-RAW_VCF_MB_100 = 1308.16
 RAW_VCF_MB_1000 = 12632.86
 
 PATTERNS = ["regional", "phewas", "tophits", "bulk", "random_lookup"]
 
 PATTERN_DESC = {
     "regional": "All finite associations in a 1 Mb genomic window, all analyses",
-    "phewas": "One variant × all 1000 analyses",
+    "phewas": "One variant × all analyses",
     "tophits": "All GW-significant (p < 5×10⁻⁸) associations for one analysis",
     "bulk": "All finite associations for one analysis (~762 K variants)",
     "random_lookup": "100 random variants × 10 random analyses",
@@ -53,6 +52,14 @@ def fmt_ms(v):
         return "n/a"
     return f"{v:,.1f}"
 
+def raw_vcf_mb(data, fallback=None):
+    if data is None:
+        return fallback
+    return data.get("storage", {}).get("raw_vcf_mb") or fallback
+
+def ratio_str(a, b):
+    return f"{a/b:.1f}×" if a and b else "n/a"
+
 def md_table(headers, rows):
     sep = "|" + "|".join(["---:" if i else "---" for i in range(len(headers))]) + "|"
     head = "| " + " | ".join(headers) + " |"
@@ -62,11 +69,10 @@ def md_table(headers, rows):
 
 ## Overview
 
-This benchmark measures a **Dense Observed-Only Store** built from **1000 UK Biobank
-GWAS-VCF analyses** covering chromosome 1. It is the large-scale companion to the
-100-analysis benchmark (`opengwasdb_vcf_ukb_chr1_benchmark.qmd`): the same 762,080
-variants and the same source VCFs, with 10× the number of analyses. Its purpose is
-to show how build time, storage, and query latency scale with analysis count.
+This benchmark measures **Dense Observed-Only Stores** built from UK Biobank
+GWAS-VCF analyses covering chromosome 1. The main store has 1000 analyses; the
+scaling comparison uses a 128-analysis subset from the same source manifest to
+show how build time, storage, and query latency change as the analysis axis grows.
 
 ---
 
@@ -105,9 +111,10 @@ else:
 #| output: asis
 if bench1k:
     store_mb = bench1k["storage"]["store_mb"]
-    ratio = RAW_VCF_MB_1000 / store_mb
+    raw_mb = raw_vcf_mb(bench1k, RAW_VCF_MB_1000)
+    ratio = raw_mb / store_mb
     rows = [
-        ("Raw source VCF (.vcf.gz)", f"{RAW_VCF_MB_1000:,.1f} MB", "1.00×"),
+        ("Raw source VCF (.vcf.gz)", f"{raw_mb:,.1f} MB", "1.00×"),
         ("OpenGWASDB Dense store", f"**{store_mb:,.1f} MB**", f"**{ratio:.2f}× smaller**"),
     ]
     print(md_table(["Form", "Size", "vs raw"], rows))
@@ -148,69 +155,72 @@ if bench1k:
     ))
 ```
 
-Latency-sensitive point queries (`phewas`, `tophits`) stay in single-digit
-milliseconds even at 1000 analyses, because the zarr read per row is amortised
+Latency-sensitive point queries (`phewas`, `tophits`) stay in low-millisecond
+territory even at 1000 analyses, because the zarr read per row is amortised
 across more columns per chunk. The `bulk` pattern is `O(n_variants)` and reads all
-762 K rows for one analysis, so it dominates at several seconds; it is the pattern
-to design around rather than optimise blindly.
+762 K rows for one analysis, so it is the pattern to design around rather than
+optimise blindly.
 
 ---
 
-## Scaling: 100 → 1000 analyses
+## Scaling: 128 → 1000 analyses
 
-Same 762,080 variants, same chr1 source VCFs, 10× the analyses.
+Same 762,080 variants and the same chr1 source manifest; 1000 analyses is 7.8×
+the 128-analysis subset.
 
 ```{python}
 #| echo: false
 #| output: asis
-if bench1k and bench100:
-    s100 = bench100["storage"]["store_mb"]
+if bench1k and bench128:
+    s128 = bench128["storage"]["store_mb"]
     s1k = bench1k["storage"]["store_mb"]
-    bs100 = bench100["build"].get("build_seconds")
+    bs128 = bench128["build"].get("build_seconds")
     bs1k = bench1k["build"].get("build_seconds")
-
-    def ratio_str(a, b):
-        return f"{a/b:.1f}×" if a and b else "n/a"
+    raw128 = raw_vcf_mb(bench128)
+    raw1k = raw_vcf_mb(bench1k, RAW_VCF_MB_1000)
 
     rows = [
-        ("Analyses", "100", "1,000", "10×"),
+        ("Analyses", "128", "1,000", "7.8×"),
         ("Raw source VCF",
-         f"{RAW_VCF_MB_100:,.0f} MB", f"{RAW_VCF_MB_1000:,.0f} MB",
-         ratio_str(RAW_VCF_MB_1000, RAW_VCF_MB_100)),
+         f"{raw128:,.0f} MB" if raw128 else "n/a",
+         f"{raw1k:,.0f} MB" if raw1k else "n/a",
+         ratio_str(raw1k, raw128)),
         ("Store size",
-         f"{s100:,.0f} MB", f"{s1k:,.0f} MB",
-         ratio_str(s1k, s100)),
+         f"{s128:,.0f} MB", f"{s1k:,.0f} MB",
+         ratio_str(s1k, s128)),
         ("Build time",
-         f"{bs100/60:.1f} min" if bs100 else "n/a",
+         f"{bs128/60:.1f} min" if bs128 else "n/a",
          f"{bs1k/60:.1f} min" if bs1k else "n/a",
-         ratio_str(bs1k, bs100) if (bs100 and bs1k) else "n/a"),
+         ratio_str(bs1k, bs128) if (bs128 and bs1k) else "n/a"),
     ]
-    print(md_table(["", "100 analyses", "1000 analyses", "Ratio"], rows))
-elif bench100 is None:
-    print("_100-analysis benchmark JSON not found — cannot compute scaling table._")
+    print(md_table(["", "128 analyses", "1000 analyses", "Ratio"], rows))
+elif bench128 is None:
+    print("_128-analysis benchmark JSON not found — run "
+          "`uv run python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py "
+          "--analysis-count 128 --rebuild --reps 10`._")
 ```
 
 ```{python}
 #| echo: false
 #| output: asis
-if bench1k and bench100:
+if bench1k and bench128:
     rows = []
     for p in PATTERNS:
-        t100 = timing(bench100, p, "median_ms")
+        t128 = timing(bench128, p, "median_ms")
         t1k = timing(bench1k, p, "median_ms")
-        rc100 = timing(bench100, p, "result_count")
+        rc128 = timing(bench128, p, "result_count")
         rc1k = timing(bench1k, p, "result_count")
-        tr = f"{t1k/t100:.1f}×" if t100 and t1k else "n/a"
-        cr = f"{rc1k/rc100:.1f}×" if rc100 and rc1k else "n/a"
+        tr = f"{t1k/t128:.1f}×" if t128 and t1k else "n/a"
+        cr = f"{rc1k/rc128:.1f}×" if rc128 and rc1k else "n/a"
         rows.append((
-            p, fmt_ms(t100), fmt_ms(t1k), tr,
-            f"{rc100:,}" if rc100 else "n/a",
+            p, fmt_ms(t128), fmt_ms(t1k), tr,
+            f"{rc128:,}" if rc128 else "n/a",
             f"{rc1k:,}" if rc1k else "n/a",
             cr,
         ))
     print(md_table(
-        ["Pattern", "100 (ms)", "1000 (ms)", "Time ratio",
-         "Cells (100)", "Cells (1000)", "Cell ratio"],
+        ["Pattern", "128 (ms)", "1000 (ms)", "Time ratio",
+         "Cells (128)", "Cells (1000)", "Cell ratio"],
         rows,
     ))
 ```
@@ -238,14 +248,14 @@ if bench1k:
         f"({build_str}, {bench1k['dataset']['n_variants']:,} variants × "
         f"{bench1k['dataset']['n_analyses']:,} analyses)"
     )
-if bench100:
+if bench128:
     lines.append(
-        "- 100-analysis timings (scaling comparison): "
-        "`opengwasdb_vcf_ukb_chr1_benchmark.json`"
+        "- 128-analysis timings (scaling comparison): "
+        "`opengwasdb_vcf_ukb_chr1_128_benchmark.json`"
     )
 lines.append(
-    "- Raw VCF sizes: `du -sb` on source manifests "
-    "`besdq/data/vcf-ukb{,-1000}/*.vcf.gz` (see `benchmarks/README.md`)"
+    "- Raw VCF sizes: recorded by `benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py` "
+    "from the selected manifest rows"
 )
 lines.append(
     "- Benchmark script: `benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py`"
