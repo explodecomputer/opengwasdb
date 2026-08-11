@@ -1,5 +1,6 @@
-"""Tests for opengwasdb.readers (issue #19): capability resolution, the
-GWAS-VCF reader, the in-memory fake, and the conformance suite the two share.
+"""Tests for opengwasdb.readers (issue #19; extended by #20, #21): capability
+resolution, the GWAS-VCF reader, the in-memory fake, and the conformance
+suite the two share.
 """
 
 from __future__ import annotations
@@ -7,16 +8,21 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from opengwasdb.model.enums import StoredEffectScale
+from opengwasdb.build.phenotype_sd import estimate_phenotype_sd
+from opengwasdb.model.enums import OriginalSdMethod, StoredEffectScale
 from opengwasdb.readers import (
     GWAS_VCF_CAPABILITY,
     FakeReader,
     GwasVcfReader,
     ReaderAssociation,
     SiteMetrics,
+    af_only,
+    is_palindromic,
     resolve_reader,
+    site_metrics_arrays,
 )
 
 
@@ -190,6 +196,18 @@ def test_reader_conformance_extract_at_sites_ignores_unrequested_alids(reader):
     assert set(sites) == {"1:100:A:G"}
 
 
+def test_reader_conformance_stream_variants_covers_stream_associations(reader):
+    """stream_variants (issue #20) is a superset of stream_associations'
+    positions -- every association's variant must appear in the variant
+    stream, independent of any per-reader extra filtering."""
+    assoc_positions = {
+        (a.chromosome, a.position, a.ref, a.alt) for a in reader.stream_associations()
+    }
+    variant_positions = set(reader.stream_variants())
+
+    assert assoc_positions <= variant_positions
+
+
 # --- GWAS-VCF manifest authority (issue #17) ---
 
 
@@ -212,6 +230,152 @@ def test_gwas_vcf_reader_extract_at_sites_with_no_sites_returns_empty(tmp_path):
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE:AF\t1.0:0.5:0.30\n")
 
     assert GwasVcfReader(vcf, StoredEffectScale.SD).extract_at_sites([]) == {}
+
+
+def test_gwas_vcf_reader_stream_variants_includes_rows_dropped_from_associations(tmp_path):
+    """A row with an invalid SE is skipped by stream_associations (issue #19)
+    but still belongs on a builder's union-variant axis (issue #20)."""
+    vcf = tmp_path / "study.vcf"
+    _write_vcf(
+        vcf,
+        "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n"
+        "1\t200\t.\tG\tA\t.\tPASS\t.\tES:SE\t1.0:0\n",  # SE=0 -> dropped by stream_associations
+    )
+    reader = GwasVcfReader(vcf, StoredEffectScale.SD)
+
+    assoc_positions = {(a.chromosome, a.position) for a in reader.stream_associations()}
+    variant_positions = {(chrom, pos) for chrom, pos, _ref, _alt in reader.stream_variants()}
+
+    assert assoc_positions == {("1", 100)}
+    assert variant_positions == {("1", 100), ("1", 200)}
+
+
+# --- Site extraction: orientation, palindromes, liftover (issue #21) ---
+
+
+def _af_se_vcf(tmp_path: Path, rows: list[str]) -> Path:
+    header = (
+        "##fileformat=VCFv4.2\n"
+        '##FORMAT=<ID=AF,Number=A,Type=Float,Description="Allele frequency">\n'
+        '##FORMAT=<ID=SE,Number=A,Type=Float,Description="Standard error">\n'
+        "##SAMPLE=<ID=S1,StudyType=Continuous>\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
+    )
+    path = tmp_path / "af_se_study.vcf"
+    path.write_text(header + "".join(rows), encoding="utf-8")
+    return path
+
+
+def test_is_palindromic():
+    assert is_palindromic("A", "T") and is_palindromic("C", "G")
+    assert not is_palindromic("A", "C") and not is_palindromic("A", "G")
+
+
+def test_extract_at_sites_orients_and_excludes_palindromic(tmp_path):
+    # Variant 1: REF=C ALT=A -> A1=A=ALT (not flipped) -> af stays 0.30.
+    # Variant 2: REF=A ALT=G -> A1=A=REF (ALT flipped) -> af = 1 - 0.30 = 0.70.
+    # Variant 3: REF=A ALT=T -> palindromic -> excluded.
+    vcf = _bgzip_index(
+        _af_se_vcf(
+            tmp_path,
+            [
+                "1\t1000\t.\tC\tA\t.\tPASS\t.\tAF:SE\t0.30:0.1\n",
+                "1\t1001\t.\tA\tG\t.\tPASS\t.\tAF:SE\t0.30:0.1\n",
+                "1\t1002\t.\tA\tT\t.\tPASS\t.\tAF:SE\t0.30:0.1\n",
+            ],
+        )
+    )
+    wanted = {"1:1000:A:C", "1:1001:A:G", "1:1002:A:T"}
+    sites = GwasVcfReader(vcf, StoredEffectScale.SD).extract_at_sites(wanted)
+    assert sites["1:1000:A:C"].af == pytest.approx(0.30)
+    assert sites["1:1001:A:G"].af == pytest.approx(0.70)
+    assert "1:1002:A:T" not in sites  # palindromic dropped
+
+
+class _FakeLiftover:
+    """Stand-in for pyliftover.LiftOver: shifts chr1 positions by +64620."""
+
+    def convert_coordinate(self, chrom, pos0):  # noqa: D401
+        if chrom != "chr1":
+            return []
+        return [("chr1", pos0 + 64620, "+", 0)]
+
+
+def test_extract_at_sites_applies_liftover(tmp_path):
+    # Study is on an older build; the reference ALIDs are on the lifted build.
+    vcf = _af_se_vcf(
+        tmp_path,
+        ["1\t1000\t.\tC\tA\t.\tPASS\t.\tAF:SE\t0.25:0.1\n"],  # pos 1000 -> 65620 after lift
+    )
+    wanted = {"1:65620:A:C"}  # canonical A1=A (ALT), lifted position
+    sites = GwasVcfReader(vcf, StoredEffectScale.SD, liftover=_FakeLiftover()).extract_at_sites(
+        wanted
+    )
+    assert set(sites) == {"1:65620:A:C"}
+    assert sites["1:65620:A:C"].af == pytest.approx(0.25)  # unflipped (A is canonical A1)
+
+
+def test_extract_at_sites_region_restricts_the_scan(tmp_path):
+    """``region`` (bcftools -r) is a cheap chromosome-level restriction, kept
+    from the pre-#21 API for callers like a genome-wide dev-batch script that
+    only need one chromosome (issue #21 regression safety). bcftools rejects
+    -r/-R together, so this is exercised the way real callers pair it: with
+    liftover, not with the default -R regions file."""
+    vcf = _bgzip_index(
+        _af_se_vcf(
+            tmp_path,
+            [
+                "1\t1000\t.\tC\tA\t.\tPASS\t.\tAF:SE\t0.30:0.1\n",  # -> hg38 1:65620
+                "2\t1000\t.\tC\tA\t.\tPASS\t.\tAF:SE\t0.40:0.1\n",  # chr2, excluded by region
+            ],
+        )
+    )
+    wanted = {"1:65620:A:C", "2:65620:A:C"}
+    sites = GwasVcfReader(
+        vcf, StoredEffectScale.SD, liftover=_FakeLiftover(), region="1"
+    ).extract_at_sites(wanted)
+    assert set(sites) == {"1:65620:A:C"}
+
+
+def test_af_only_projects_out_se():
+    sites = {"1:100:A:G": SiteMetrics(af=0.3, se=0.1), "1:200:A:G": SiteMetrics(af=0.7, se=0.2)}
+    assert af_only(sites) == {"1:100:A:G": 0.3, "1:200:A:G": 0.7}
+
+
+# --- site_metrics_arrays + phenotype-SD estimator, end-to-end (issue #21 AC4) ---
+
+
+def test_phenotype_sd_estimator_driven_end_to_end_from_a_real_analysis(tmp_path):
+    """Ancestry assignment and SD estimation share one extraction call: this
+    drives `estimate_phenotype_sd` entirely from `GwasVcfReader.extract_at_sites`
+    output for a real (fixture) GWAS-VCF, not synthetic se/af arrays built by
+    hand as `tests/test_phenotype_sd.py` does."""
+    rng = np.random.default_rng(7)
+    n = 300
+    sample_size = 20_000.0
+    sd_true = 2.5
+    afs = rng.uniform(0.05, 0.5, n)
+    # se implied by the asymptotic SE model the ADR-0029 estimator inverts:
+    # se = sd / sqrt(2*af*(1-af)*N).
+    ses = sd_true / np.sqrt(2.0 * afs * (1.0 - afs) * sample_size)
+
+    rows = [
+        f"1\t{1000 + i}\t.\tC\tA\t.\tPASS\t.\tAF:SE\t{af:.6g}:{se:.6g}\n"
+        for i, (af, se) in enumerate(zip(afs, ses, strict=True))
+    ]
+    vcf = _bgzip_index(_af_se_vcf(tmp_path, rows))
+    wanted = {f"1:{1000 + i}:A:C" for i in range(n)}
+
+    sites = GwasVcfReader(vcf, StoredEffectScale.SD).extract_at_sites(wanted)
+    assert len(sites) == n
+
+    se_arr, af_arr = site_metrics_arrays(sites)
+    result = estimate_phenotype_sd(
+        OriginalSdMethod.ESTIMATED_FROM_SOURCE_MAF, sample_size, se=se_arr, af=af_arr
+    )
+
+    assert result.method is OriginalSdMethod.ESTIMATED_FROM_SOURCE_MAF
+    assert result.sd == pytest.approx(sd_true, rel=1e-2)
 
 
 # --- FakeReader: usable with no bcftools/fixture VCF dependency ---

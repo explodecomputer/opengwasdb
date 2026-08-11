@@ -16,8 +16,9 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import nnls  # type: ignore[import-untyped]
 
-from opengwasdb.ancestry.extract import extract_af_at_sites
 from opengwasdb.ancestry.reference import AncestryReference
+from opengwasdb.readers.gwas_vcf import GwasVcfReader
+from opengwasdb.readers.interface import af_only
 
 
 @dataclass(frozen=True)
@@ -133,17 +134,29 @@ def assign_from_vcf(
 ) -> AncestryAssignment:
     """Extract AF at reference sites from a GWAS-VCF, then assign ancestry.
 
-    ``liftover`` (a pyliftover ``LiftOver``) orients a study on a different
-    assembly than the reference (e.g. GRCh37 GWAS-VCF → GRCh38 reference);
-    ``region`` restricts the bcftools read to one chromosome.
+    Goes through the ``SourceReader`` interface's ``extract_at_sites``
+    (issue #21) rather than a bcftools call of its own -- ancestry assignment
+    has no bcftools-specific code of its own left. ``liftover`` (a pyliftover
+    ``LiftOver``) orients a study on a different assembly than the reference
+    (e.g. GRCh37 GWAS-VCF → GRCh38 reference); see ``GwasVcfReader`` for why
+    it disables the ``regions_file`` optimisation when set. ``region``
+    (bcftools ``-r``) restricts the read to one chromosome, in either mode.
+
+    Two behaviours narrow slightly versus the pre-#21 AF-only extraction this
+    replaces, both accepted as consequences of no longer maintaining two
+    extraction implementations: called with no ``regions_file``/``region``/
+    ``liftover`` (the bare default), this now always builds a ``-R`` regions
+    file internally -- the VCF must be bgzip+tabix-indexed, where the old
+    default was an unindexed full scan. And a site with a usable AF but an
+    unparseable/missing SE is now dropped from the overlap entirely, where AF
+    alone used to be enough -- the overlap gate is the intended safeguard
+    against a shrunken site set, not a silent behaviour change to correctness.
     """
-    study_af = extract_af_at_sites(
-        vcf_path,
-        reference.index.keys(),
-        regions_file=regions_file,
-        region=region,
-        liftover=liftover,
+    reader = GwasVcfReader(
+        vcf_path, liftover=liftover, regions_file=regions_file, region=region
     )
+    sites = reader.extract_at_sites(reference.index.keys())
+    study_af = af_only(sites)
     return assign_ancestry(study_af, reference, gates)
 
 

@@ -6,6 +6,10 @@ non-negative sum-to-one mixture (NNLS) of a fine **Ancestry Reference Panel**
 super-populations, and admitting a single **Assigned Ancestry** only when it
 clears a multi-gate rule (proportion, margin, overlap, residual). The output is
 written into the **Analysis Catalogue** (ADR 0027).
+
+Site-level AF extraction lives in `opengwasdb.readers.gwas_vcf` (issue #21),
+not here -- this package consumes it through the `SourceReader` interface
+rather than owning any bcftools-specific code of its own.
 """
 
 from __future__ import annotations
@@ -16,11 +20,6 @@ from opengwasdb.ancestry.catalogue import (
     catalogue_fieldnames,
     read_catalogue,
     write_catalogue,
-)
-from opengwasdb.ancestry.extract import (
-    extract_af_at_sites,
-    is_palindromic,
-    load_liftover,
 )
 from opengwasdb.ancestry.mixture import (
     AncestryAssignment,
@@ -46,9 +45,6 @@ __all__ = [
     "assign_ancestry",
     "assign_from_vcf",
     "catalogue_fieldnames",
-    "extract_af_at_sites",
-    "is_palindromic",
-    "load_liftover",
     "load_reference",
     "read_catalogue",
     "read_source_manifest",

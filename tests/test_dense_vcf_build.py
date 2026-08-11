@@ -650,3 +650,47 @@ def test_ez_preferred_over_es_se(tmp_path):
     assert len(result["z"]) == 1
     # EZ=7.5, ALT>REF → flip → stored z = -7.5
     assert result["z"][0] == pytest.approx(-7.5, rel=5e-3)
+
+
+def test_build_honours_source_reader_capability_column(tmp_path, monkeypatch):
+    """A non-GWAS-VCF, non-bcftools reader can drive a build end-to-end when a
+    manifest row declares a different source_reader_capability (issue #20) --
+    the builder never assumes GWAS-VCF, it resolves whatever the manifest names."""
+    from opengwasdb.readers import registry as readers_registry
+    from opengwasdb.readers.fake import FakeReader
+    from opengwasdb.readers.interface import ReaderAssociation
+
+    fake_capability = "opengwasdb.test-fake"
+
+    def _fake_factory(path, stored_effect_scale):
+        return FakeReader(
+            associations=[
+                ReaderAssociation(
+                    chromosome="1",
+                    position=HG19_POS_1,
+                    ref="A",
+                    alt="G",
+                    z=-2.0,
+                    se=0.5,
+                    stored_effect_scale=stored_effect_scale,
+                )
+            ]
+        )
+
+    monkeypatch.setitem(readers_registry._READERS, fake_capability, _fake_factory)
+
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_reader_capability\n"
+        f"fake_trait\tunused-placeholder-path\tFake Trait\t1000\tsd"
+        f"\tdeclared_standardised\t\t{fake_capability}\n",
+        encoding="utf-8",
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
+
+    query = query_store(store_path)
+    result = query.analysis("fake_trait")
+    assert len(result["z"]) == 1
+    assert result["z"][0] == pytest.approx(-2.0, rel=5e-3)

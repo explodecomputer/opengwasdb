@@ -3,9 +3,10 @@
 
 Study VCFs are GRCh37, so this assigns against the **hg19** reference
 (``ref_freqs.hg19.tsv.gz``, built with ``--no-liftover``) — study and reference
-share coordinates, so no per-variant liftover is needed. Extraction streams each
-study once and filters to reference sites by O(1) membership (no bcftools ``-R``
-region reload per study). Studies are processed across a fork pool (the ~1 GB
+share coordinates, so no per-variant liftover is needed. Extraction goes through
+``GwasVcfReader.extract_at_sites`` (issue #21), one bcftools ``-R`` per study
+against a regions file built from the reference sites -- requires each study VCF
+to be tabix-indexed. Studies are processed across a fork pool (the ~1 GB
 reference is loaded once in the parent and fork-inherited); results are gathered
 in manifest order so the Catalogue is worker-count independent.
 
@@ -30,9 +31,10 @@ from pathlib import Path
 
 from opengwasdb.ancestry import Gates, load_reference
 from opengwasdb.ancestry.catalogue import CatalogueRow, write_catalogue
-from opengwasdb.ancestry.extract import extract_af_at_sites
 from opengwasdb.ancestry.mixture import assign_ancestry
 from opengwasdb.ancestry.pipeline import read_source_manifest
+from opengwasdb.readers.gwas_vcf import GwasVcfReader
+from opengwasdb.readers.interface import af_only
 
 log = logging.getLogger("ancestry_ieu_batch")
 
@@ -42,8 +44,8 @@ _GATES: Gates | None = None
 
 def _annotate(file_path: str):
     assert _REF is not None and _GATES is not None
-    study_af = extract_af_at_sites(file_path, _REF.index)  # stream; no -R, no liftover
-    return assign_ancestry(study_af, _REF, _GATES)
+    sites = GwasVcfReader(file_path).extract_at_sites(_REF.index)
+    return assign_ancestry(af_only(sites), _REF, _GATES)
 
 
 def main() -> None:

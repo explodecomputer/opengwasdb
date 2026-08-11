@@ -63,14 +63,17 @@ def _study_vcf(tmp_path: Path, name: str, freqs: np.ndarray, weights: dict[str, 
         b += w * freqs[:, GROUPS.index(group)]
     b /= sum(weights.values())
 
+    # AF and SE FORMAT fields: extract_at_sites (issue #21) is a combined AF+SE
+    # lookup and drops a site missing either, so every row must carry both.
     header = (
         "##fileformat=VCFv4.2\n"
         '##FORMAT=<ID=AF,Number=A,Type=Float,Description="Allele frequency">\n'
+        '##FORMAT=<ID=SE,Number=A,Type=Float,Description="Standard error">\n'
         "##SAMPLE=<ID=S1,StudyType=Continuous>\n"
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
     )
     rows = "".join(
-        f"1\t{1000 + i}\t.\tC\tA\t.\tPASS\t.\tAF\t{b[i]:.6g}\n" for i in range(N_VARIANTS)
+        f"1\t{1000 + i}\t.\tC\tA\t.\tPASS\t.\tAF:SE\t{b[i]:.6g}:0.1\n" for i in range(N_VARIANTS)
     )
     plain = tmp_path / f"{name}.vcf"
     plain.write_text(header + rows, encoding="utf-8")

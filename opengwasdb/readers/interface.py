@@ -1,11 +1,13 @@
-"""The Source Reader interface (issue #19).
+"""The Source Reader interface (issue #19; extended by issues #20 and #21).
 
 `opengwasdb-stores` declares one `source_reader_capability` string per Source
 Collection (ADR-0009, e.g. `"opengwasdb.gwas-vcf"`). This module defines the
-interface that string resolves to (see `opengwasdb.readers.registry`): the two
-things the pipeline needs from source data, streaming associations for the
-build and extracting allele frequency and standard error at a requested set
-of sites for annotation (ancestry assignment, phenotype-SD estimation).
+interface that string resolves to (see `opengwasdb.readers.registry`): the
+things the pipeline needs from source data -- streaming every variant
+(issue #20, a builder's union-variant pass), streaming associations for the
+build, and extracting allele frequency and standard error at a requested set
+of sites for annotation (ancestry assignment, phenotype-SD estimation --
+issue #21).
 
 The interface is structural (`typing.Protocol`), not an ABC -- this package
 has no abstract-base-class precedent elsewhere, and Protocol lets
@@ -13,10 +15,9 @@ has no abstract-base-class precedent elsewhere, and Protocol lets
 consistent with the codebase's existing preference for dataclasses and duck
 typing over inheritance.
 
-Wiring existing builders to resolve a reader through this interface instead
-of importing a source module directly (`opengwasdb.build.vcf_source`,
-`opengwasdb.build.source`) is out of scope here -- this ticket only
-introduces the seam; no existing call site changes.
+The dense and hybrid builders (issue #20) and ancestry assignment / phenotype-SD
+estimation (issue #21) now resolve a reader through this interface instead of
+importing a source module directly.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
+
+import numpy as np
 
 from opengwasdb.model.enums import StoredEffectScale
 
@@ -78,6 +81,18 @@ class SourceReader(Protocol):
         """Yield every association in the source, oriented per ReaderAssociation."""
         ...
 
+    def stream_variants(self) -> Iterator[tuple[str, int, str, str]]:
+        """Yield ``(chromosome, position, ref, alt)`` for every biallelic variant
+        in the source, independent of whether it carries a usable association.
+
+        A superset of what :meth:`stream_associations` yields positions for --
+        a record dropped there for an invalid/missing effect size or SE may
+        still belong on a builder's union-variant axis (issue #20), so callers
+        needing full variant coverage use this rather than filtering
+        :meth:`stream_associations` themselves.
+        """
+        ...
+
     def extract_at_sites(self, alids: Iterable[str]) -> dict[str, SiteMetrics]:
         """Return `{canonical_alid: SiteMetrics}` for the requested sites found
         in the source. A requested alid absent from the result was not found
@@ -85,3 +100,25 @@ class SourceReader(Protocol):
         not assume every requested alid comes back.
         """
         ...
+
+
+def site_metrics_arrays(sites: dict[str, SiteMetrics]) -> tuple[np.ndarray, np.ndarray]:
+    """``(se, af)`` arrays from an :meth:`SourceReader.extract_at_sites` result.
+
+    The shape :func:`opengwasdb.build.phenotype_sd.estimate_phenotype_sd` needs
+    (issue #21) -- the one adapter between the reader interface and the
+    estimator, so ancestry assignment (`{alid: af}`) and SD estimation
+    (`se`/`af` arrays) share the same underlying extraction call rather than
+    each reshaping it independently.
+    """
+    se = np.fromiter((m.se for m in sites.values()), dtype=np.float64, count=len(sites))
+    af = np.fromiter((m.af for m in sites.values()), dtype=np.float64, count=len(sites))
+    return se, af
+
+
+def af_only(sites: dict[str, SiteMetrics]) -> dict[str, float]:
+    """``{alid: af}`` from an :meth:`SourceReader.extract_at_sites` result --
+    the shape :func:`opengwasdb.ancestry.mixture.assign_ancestry` needs.
+    Ancestry assignment has no use for `se`, but the extraction it drives is
+    the same combined AF+SE call SD estimation uses (issue #21)."""
+    return {alid: metrics.af for alid, metrics in sites.items()}
