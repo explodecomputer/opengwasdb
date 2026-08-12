@@ -437,13 +437,14 @@ def _render_table_section(
     )
 
 
-# A k x k submatrix embeds as k**2 JSON numbers plus a k*cell_px canvas --
-# 60 keeps both the page weight and the canvas legible at ukb-b scale (2,514
-# Analyses); the reference `pleiodb` report uses 200 traits as a *rendered
-# PNG*, which has no equivalent page-weight cost, so its cap doesn't carry
-# over to this self-contained, all-inline design (ADR 0025 "no external
-# assets, no network requests" -- overview.py module docstring).
-_RHO_HEATMAP_TRAITS = 60
+# A k x k submatrix embeds as k**2 JSON numbers plus a k*cell_px canvas.
+# 300 (matching/exceeding the reference `pleiodb` report's 200) costs ~1MB of
+# embedded JSON at ukb-b scale (2,514 Analyses) -- real page weight, but this
+# is a store artifact opened deliberately, not a page loaded incidentally, so
+# that trade favours coverage. Still fully self-contained/offline (ADR 0025
+# "no external assets, no network requests" -- overview.py module docstring):
+# the cost is bytes, not a new dependency or a network round-trip.
+_RHO_HEATMAP_TRAITS = 300
 _RHO_TOP_PAIRS = 30
 
 
@@ -476,32 +477,63 @@ def _finite_pair_values(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
     return rows[finite], cols[finite], vals[finite]
 
 
+_HIST_TICKS = (-1.0, -0.5, 0.0, 0.5, 1.0)
+
+
 def _rho_histogram_svg(rho_mat: np.ndarray, *, bins: int = 20) -> str:
     _, _, finite = _finite_pair_values(rho_mat)
     counts, edges = np.histogram(finite, bins=bins, range=(-1.0, 1.0))
-    width, height, pad = 640, 150, 24
+    width, height = 640, 190
+    left, right, top, bottom = 48, 16, 12, 34  # plot-area margins for axis labels
+    plot_w, plot_h = width - left - right, height - top - bottom
     max_count = max(int(counts.max()), 1) if len(counts) else 1
-    bar_w = (width - 2 * pad) / max(len(counts), 1)
+    bar_w = plot_w / max(len(counts), 1)
+
+    def x_of(rho: float) -> float:
+        return left + (rho - float(edges[0])) / (float(edges[-1] - edges[0]) or 1.0) * plot_w
+
     bars = []
     for i, count in enumerate(counts):
-        bar_h = (int(count) / max_count) * (height - 2 * pad)
-        x = pad + i * bar_w
-        y = height - pad - bar_h
+        bar_h = (int(count) / max_count) * plot_h
         title = f"{edges[i]:.2f} to {edges[i + 1]:.2f}: {int(count):,} pairs"
         bars.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w * 0.85:.1f}" height="{bar_h:.1f}" '
-            f'fill="var(--accent)"><title>{html.escape(title)}</title></rect>'
+            f'<rect x="{x_of(edges[i]):.1f}" y="{top + plot_h - bar_h:.1f}" '
+            f'width="{bar_w * 0.85:.1f}" height="{bar_h:.1f}" fill="var(--accent)">'
+            f"<title>{html.escape(title)}</title></rect>"
         )
-    span = float(edges[-1] - edges[0]) or 1.0
-    zero_x = pad + (0.0 - float(edges[0])) / span * (width - 2 * pad)
-    axis = (
-        f'<line x1="{zero_x:.1f}" y1="{pad}" x2="{zero_x:.1f}" y2="{height - pad}" '
+
+    axes = (
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" '
+        'stroke="var(--hairline-strong)"/>'
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" '
+        'stroke="var(--hairline-strong)"/>'
+        f'<line x1="{x_of(0.0):.1f}" y1="{top}" x2="{x_of(0.0):.1f}" y2="{top + plot_h}" '
         'stroke="var(--hairline-strong)" stroke-dasharray="3,3"/>'
+    )
+    x_ticks = "".join(
+        f'<text x="{x_of(t):.1f}" y="{top + plot_h + 16}" font-size="10" fill="var(--muted)" '
+        f'text-anchor="middle" font-family="var(--mono)">{t:g}</text>'
+        for t in _HIST_TICKS
+    )
+    y_ticks = (
+        f'<text x="{left - 6}" y="{top + plot_h + 4}" font-size="10" fill="var(--muted)" '
+        f'text-anchor="end" font-family="var(--mono)">0</text>'
+        f'<text x="{left - 6}" y="{top + 8}" font-size="10" fill="var(--muted)" '
+        f'text-anchor="end" font-family="var(--mono)">{max_count:,}</text>'
+    )
+    x_label = (
+        f'<text x="{left + plot_w / 2:.1f}" y="{height - 4}" font-size="11" '
+        'fill="var(--ink-soft)" text-anchor="middle">rho</text>'
+    )
+    y_mid = top + plot_h / 2
+    y_label = (
+        f'<text x="12" y="{y_mid:.1f}" font-size="11" fill="var(--ink-soft)" '
+        f'text-anchor="middle" transform="rotate(-90 12 {y_mid:.1f})">Analysis pairs</text>'
     )
     return (
         f'<svg width="{width}" height="{height}" role="img" '
         f'aria-label="Distribution of {len(finite):,} finite rho values">'
-        f"{axis}{''.join(bars)}</svg>"
+        f"{axes}{''.join(bars)}{x_ticks}{y_ticks}{x_label}{y_label}</svg>"
     )
 
 

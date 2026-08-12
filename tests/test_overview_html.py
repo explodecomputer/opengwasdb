@@ -314,6 +314,23 @@ def test_rho_tab_histogram_is_inline_svg_no_external_assets(tmp_path):
     assert "http://" not in content and "https://" not in content
 
 
+def test_rho_tab_histogram_has_labelled_axes(tmp_path):
+    store = _build_rho_store(tmp_path)
+    table = read_analyses(store / "analyses.tsv")
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+    svg = section.split("<svg")[1].split("</svg>")[0]
+
+    # Axis titles.
+    assert ">rho</text>" in svg
+    assert ">Analysis pairs</text>" in svg
+    # X-axis ticks span the full [-1, 1] domain, not just the observed range.
+    for tick in ("-1", "-0.5", "0", "0.5", "1"):
+        assert f">{tick}</text>" in svg
+    # Y-axis ticks: 0 and the tallest bar's count.
+    assert ">0</text>" in svg
+
+
 def test_rho_tab_top_pairs_tables_reuse_existing_search_sort_and_find_the_correlated_pair(
     tmp_path,
 ):
@@ -357,7 +374,7 @@ def test_rho_tab_heatmap_embeds_json_payload_with_nan_as_null(tmp_path):
 
     assert 'class="rho-heatmap-data"' in section
     payload = json.loads(section.split('class="rho-heatmap-data">')[1].split("</script>")[0])
-    assert payload["k"] == 6  # min(60, n_analyses)
+    assert payload["k"] == 6  # min(300, n_analyses)
     assert len(payload["labels"]) == 6
     assert len(payload["rho"]) == 36  # k * k, row-major
     assert any(v is None for v in payload["rho"])  # NaN pairs -> JSON null
@@ -371,3 +388,20 @@ def test_rho_tab_degrades_gracefully_with_two_analyses(tmp_path):
     content = write_overview_html(store, table).read_text(encoding="utf-8")
 
     assert "Rho Matrix" in content  # still renders, just a single pair
+
+
+def test_rho_tab_heatmap_caps_at_300_traits(tmp_path):
+    # A store with more than 300 Analyses -- the heatmap must cap, not embed
+    # a 300+ x 300+ submatrix. Few variants per analysis (fast to build);
+    # min_nulls=1 so the pairs aren't all NaN.
+    store = _build_rho_store(tmp_path, n_analyses=310, n_variants=30, min_nulls=1)
+    table = read_analyses(store / "analyses.tsv")
+
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+    payload = json.loads(section.split('class="rho-heatmap-data">')[1].split("</script>")[0])
+
+    assert payload["k"] == 300
+    assert len(payload["labels"]) == 300
+    assert len(payload["rho"]) == 300 * 300
+    assert "300 Analyses by |rho|" in section
