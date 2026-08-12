@@ -5,6 +5,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+# Pixi-managed environments/cache: reproduced from pyproject.toml's
+# [tool.pixi.*] tables + pixi.lock, never committed.
+.pixi/
 dist/
 /build/
 .DS_Store

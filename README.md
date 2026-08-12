@@ -25,8 +25,21 @@ This repository is newly scaffolded. The design baseline lives in:
 
 ## Development
 
+All Python dependencies and native tooling (bcftools) are managed by
+[Pixi](https://pixi.sh) from `pyproject.toml`'s `[tool.pixi.*]` tables. A
+fresh checkout needs only Pixi installed:
+
 ```bash
-pip install -e ".[dev]"
-pytest
+pixi run -e dev test        # pytest
+pixi run -e dev lint        # ruff check .
+pixi run -e dev typecheck   # mypy opengwasdb
 ```
+
+For a one-off script or REPL, use `pixi run -e dev python <script>.py`
+rather than invoking a bare interpreter.
+
+The package is still a normal `pip install`-able library for downstream
+consumers (`pyproject.toml` + hatchling): `pip install -e ".[dev]"` continues
+to work if you'd rather manage the environment yourself, but it won't provide
+`bcftools` — install that separately in that case.
 
