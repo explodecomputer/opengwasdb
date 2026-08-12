@@ -221,6 +221,56 @@ class VariantAxis:
             return None
         return self.by_index(int(row["variant_index"]))
 
+    def indices_by_identifiers(self, identifiers: Sequence[str]) -> np.ndarray:
+        """Resolve many identifiers to Store-local Variant Indices in one
+        batched pass, without materialising a `VariantRecord` (and its
+        per-call `variants.tsv.gz` BGZF open/seek, see `by_index`) for each
+        one -- the fast path dense `lookup()` needs (issue #3).
+
+        Canonical ALIDs are resolved with a single vectorised `searchsorted`
+        over the mmap'd ALID index. Aliases/rsids have no vectorised index and
+        fall back to `by_identifier()`'s per-identifier SQLite lookup, same as
+        stores that predate the mmap ALID index (`self._alid_bytes is None`).
+        Identifiers that don't resolve are dropped, matching `by_identifier()`'s
+        None-on-miss semantics. The returned order is not guaranteed to match
+        the input order.
+        """
+        parsed_pairs: list[tuple[str, ParsedAlid]] = []
+        alias_identifiers: list[str] = []
+        for identifier in identifiers:
+            parsed = parse_canonical_alid(identifier)
+            if parsed is None:
+                alias_identifiers.append(identifier)
+            else:
+                query = (
+                    f"{parsed.chromosome}:{parsed.position}:"
+                    f"{parsed.effect_allele}:{parsed.other_allele}"
+                )
+                parsed_pairs.append((query, parsed))
+
+        indices: list[int] = []
+        if parsed_pairs:
+            alid_bytes, alid_rows = self._alid_bytes, self._alid_rows
+            if alid_bytes is not None and alid_rows is not None:
+                queries = np.array([q for q, _ in parsed_pairs], dtype=_ALID_DTYPE)
+                positions = np.searchsorted(alid_bytes, queries)
+                in_bounds = positions < len(alid_bytes)
+                hit = np.zeros(len(queries), dtype=bool)
+                hit[in_bounds] = alid_bytes[positions[in_bounds]] == queries[in_bounds]
+                indices.extend(int(row) for row in alid_rows[positions[hit]])
+            else:
+                for _, parsed in parsed_pairs:
+                    record = self.by_alid(parsed)
+                    if record is not None:
+                        indices.append(record.variant_index)
+
+        for identifier in alias_identifiers:
+            record = self.by_identifier(identifier)
+            if record is not None:
+                indices.append(record.variant_index)
+
+        return np.array(indices, dtype="int32")
+
     def by_alid(self, parsed: ParsedAlid) -> VariantRecord | None:
         if self._alid_bytes is not None:
             query = np.array(

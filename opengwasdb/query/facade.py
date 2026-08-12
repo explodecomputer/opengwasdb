@@ -204,19 +204,16 @@ class StoreQuery:
         observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """Return finite associations for a specific variant × analysis set."""
-        variants = [
-            v
-            for id_ in identifiers
-            if (v := self._variant_axis.by_identifier(id_)) is not None
-        ]
+        # Row-index resolution only -- no VariantRecord materialisation, no
+        # per-identifier variants.tsv.gz open (issue #3).
+        row_indices = self._variant_axis.indices_by_identifiers(identifiers).tolist()
         analyses = [
             a
             for aid in analysis_ids
             if (a := self._analyses.by_id(aid)) is not None
         ]
-        if not variants or not analyses:
+        if not row_indices or not analyses:
             return _empty_result()
-        row_indices = [v.variant_index for v in variants]
         col_indices = [int(a["analysis_index"]) for a in analyses]
         # Surgical orthogonal read: fetch only the chunks intersecting the
         # requested rows × cols, not the full analysis width per row. Under a
