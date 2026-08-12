@@ -154,6 +154,8 @@ def _validate_dense_store(
                 )
             if not errors:
                 _validate_top_hits(root, errors)
+            if not errors:
+                _validate_rho(root, n_analyses, errors)
     except Exception as exc:  # noqa: BLE001 - validators should report actionable failures
         errors.append(f"validation failed: {exc}")
     return ValidationResult(errors=errors)
@@ -1024,6 +1026,71 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
             )
         elif g["n"] != g["pass_count"]:
             errors.append(f"top-hit index {key} does not match stored z values")
+
+
+_RHO_REQUIRED_ATTRS = (
+    "z_thresh", "min_nulls", "grid_n", "window_bp",
+    "n_variants_used", "observed_only", "method", "n_analyses",
+)
+
+
+def _validate_rho(root: Any, n_analyses: int, errors: list[str]) -> None:
+    """Validate the optional ``data.zarr/rho`` group when present (PRD
+    "Validation", issue 049). A store without it stays valid unchanged --
+    Rho is opt-in, add-in-place metadata (ADR 0025), not association data.
+    Structural/consistency only: this does not re-run the estimator.
+    """
+    if "rho" not in root:
+        return
+    group = root["rho"]
+
+    missing_attrs = [a for a in _RHO_REQUIRED_ATTRS if a not in group.attrs]
+    if missing_attrs:
+        errors.append(f"rho group is missing provenance attrs: {', '.join(missing_attrs)}")
+        return
+    for name in ("rho", "n_null", "variant_index"):
+        if name not in group:
+            errors.append(f"rho group is missing data.zarr/rho/{name}")
+    if errors:
+        return
+
+    attr_n_analyses = int(group.attrs["n_analyses"])
+    if attr_n_analyses != n_analyses:
+        errors.append(
+            f"rho group n_analyses attr {attr_n_analyses} does not match "
+            f"analyses.tsv's {n_analyses}"
+        )
+        return
+
+    expected_len = n_analyses * (n_analyses - 1) // 2
+    rho_vals = np.asarray(group["rho"][:], dtype=np.float32)
+    n_null_vals = np.asarray(group["n_null"][:], dtype=np.int64)
+    if len(rho_vals) != expected_len:
+        errors.append(f"rho array has {len(rho_vals)} entries but expected {expected_len}")
+    if len(n_null_vals) != expected_len:
+        errors.append(f"n_null array has {len(n_null_vals)} entries but expected {expected_len}")
+    if errors:
+        return
+
+    min_nulls = int(group.attrs["min_nulls"])
+    finite = np.isfinite(rho_vals)
+    should_be_finite = n_null_vals >= min_nulls
+    if not np.array_equal(finite, should_be_finite):
+        errors.append(
+            f"rho finiteness is inconsistent with n_null support (min_nulls={min_nulls})"
+        )
+    if finite.any():
+        vals = rho_vals[finite]
+        if np.any(vals < -1.0) or np.any(vals > 1.0):
+            errors.append("rho contains values outside [-1, 1]")
+
+    n_variants_used = int(group.attrs["n_variants_used"])
+    variant_index = group["variant_index"]
+    if len(variant_index) != n_variants_used:
+        errors.append(
+            f"rho variant_index has {len(variant_index)} entries but "
+            f"n_variants_used attr says {n_variants_used}"
+        )
 
 
 # ── Source-fidelity check ────────────────────────────────────────────────────

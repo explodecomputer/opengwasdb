@@ -5,6 +5,7 @@ import sqlite3
 import numpy as np
 import zarr
 
+from opengwasdb.layouts.dense.rho import build_dense_rho
 from opengwasdb.model.analyses import read_analyses, write_analyses
 from opengwasdb.validation import validate_store
 
@@ -197,3 +198,83 @@ def test_validator_accepts_analyses_tsv_covering_every_analysis_index(dense_stor
     result = validate_store(dense_store_path)
 
     assert result.ok, result.errors
+
+
+# ── Rho Matrix (issue 049) ────────────────────────────────────────────────────
+# window_bp=1 keeps every variant (100/200/300bp spacing); z_thresh=10.0 makes
+# every finite z "null" -- the fixture then has exactly one shared-null variant
+# (rs1, the only row both a1 and a2 have data for) for the single a1/a2 pair.
+
+
+def _build_fixture_rho(dense_store_path, min_nulls: int = 1) -> None:
+    build_dense_rho(dense_store_path, window_bp=1, z_thresh=10.0, min_nulls=min_nulls, n_workers=1)
+
+
+def test_validator_accepts_store_without_rho_group(dense_store_path):
+    result = validate_store(dense_store_path)
+
+    assert result.ok, result.errors
+
+
+def test_validator_accepts_well_formed_rho_matrix(dense_store_path):
+    _build_fixture_rho(dense_store_path)
+
+    result = validate_store(dense_store_path)
+
+    assert result.ok, result.errors
+
+
+def test_validator_rejects_rho_wrong_packed_length(dense_store_path):
+    _build_fixture_rho(dense_store_path)
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    del root["rho"]["rho"]
+    root["rho"].create_dataset("rho", data=np.array([0.1, 0.2], dtype="float16"))
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("rho array has" in error for error in result.errors)
+
+
+def test_validator_rejects_rho_finite_with_insufficient_support(dense_store_path):
+    _build_fixture_rho(dense_store_path)
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root["rho"]["n_null"][:] = 0  # below min_nulls=1, but rho stays finite
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("rho finiteness is inconsistent" in error for error in result.errors)
+
+
+def test_validator_rejects_rho_out_of_range(dense_store_path):
+    _build_fixture_rho(dense_store_path)
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root["rho"]["rho"][:] = np.array([1.5], dtype="float16")
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("rho contains values outside" in error for error in result.errors)
+
+
+def test_validator_rejects_rho_missing_provenance_attr(dense_store_path):
+    _build_fixture_rho(dense_store_path)
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    del root["rho"].attrs["window_bp"]
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("missing provenance attrs" in error for error in result.errors)
+
+
+def test_validator_rejects_rho_variant_index_length_mismatch(dense_store_path):
+    _build_fixture_rho(dense_store_path)
+    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root["rho"].attrs["n_variants_used"] = 999
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("rho variant_index has" in error for error in result.errors)

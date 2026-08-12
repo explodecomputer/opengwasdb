@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 
 from opengwasdb.index import AnalysesIndex, connect
+from opengwasdb.layouts.dense.rho import DenseRhoReader
 from opengwasdb.layouts.dense.top_hits import DenseTopHitReader, threshold_key
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
@@ -35,6 +36,31 @@ def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray) -> np.ndarray:
     return out
 
 
+def _empty_rho_result() -> dict[str, np.ndarray]:
+    return {
+        "analysis_id_a": np.empty(0, dtype=object),
+        "analysis_id_b": np.empty(0, dtype=object),
+        "rho": np.empty(0, dtype="float32"),
+        "n_null": np.empty(0, dtype="int64"),
+    }
+
+
+def _empty_rho_row_result() -> dict[str, np.ndarray]:
+    return {
+        "analysis_id": np.empty(0, dtype=object),
+        "rho": np.empty(0, dtype="float32"),
+        "n_null": np.empty(0, dtype="int64"),
+    }
+
+
+def _empty_rho_matrix_result() -> dict[str, np.ndarray]:
+    return {
+        "analysis_id": np.empty(0, dtype=object),
+        "rho": np.empty((0, 0), dtype="float32"),
+        "n_null": np.empty((0, 0), dtype="int64"),
+    }
+
+
 class StoreQuery:
     """Public query object that hides the physical store layout — Dense stores."""
 
@@ -49,6 +75,11 @@ class StoreQuery:
         )
         self._imputed: zarr.Array | None = (
             self._root["imputed"] if self._is_completed and "imputed" in self._root else None
+        )
+        self._rho_reader: DenseRhoReader | None = (
+            DenseRhoReader(self._root["rho"], int(self._root["z"].shape[1]))
+            if "rho" in self._root
+            else None
         )
 
     def _imputed_pairs(self, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
@@ -295,6 +326,81 @@ class StoreQuery:
             "z": z_values,
             "se": se_values,
             "association_status": _status_array(imp, z_values),
+        }
+
+    def rho(self, *ids: str) -> dict[str, np.ndarray]:
+        """Long-format pairwise Rho for a set of Analysis IDs (positional, or a
+        single iterable of IDs); self-pairs excluded. Empty when the store has
+        no Rho Matrix (opt-in, ADR 0025) or no ID resolves."""
+        if len(ids) == 1 and not isinstance(ids[0], str):
+            ids = tuple(ids[0])
+        if self._rho_reader is None:
+            return _empty_rho_result()
+        resolved = [
+            (aid, int(a["analysis_index"]))
+            for aid in ids
+            if (a := self._analyses.by_id(aid)) is not None
+        ]
+        out_a: list[str] = []
+        out_b: list[str] = []
+        out_rho: list[float] = []
+        out_n: list[int] = []
+        for x in range(len(resolved)):
+            aid_a, idx_a = resolved[x]
+            for y in range(x + 1, len(resolved)):
+                aid_b, idx_b = resolved[y]
+                if idx_a == idx_b:
+                    continue
+                r, n = self._rho_reader.pair(idx_a, idx_b)
+                out_a.append(aid_a)
+                out_b.append(aid_b)
+                out_rho.append(r)
+                out_n.append(n)
+        return {
+            "analysis_id_a": np.array(out_a, dtype=object),
+            "analysis_id_b": np.array(out_b, dtype=object),
+            "rho": np.array(out_rho, dtype="float32"),
+            "n_null": np.array(out_n, dtype="int64"),
+        }
+
+    def rho_row(self, analysis_id: str) -> dict[str, np.ndarray]:
+        """One Analysis's Rho and support against every other Analysis."""
+        analysis = self._analyses.by_id(analysis_id)
+        if self._rho_reader is None or analysis is None:
+            return _empty_rho_row_result()
+        idx = int(analysis["analysis_index"])
+        rho_vals, n_vals = self._rho_reader.row(idx)
+        id_by_index = self._analyses.all()
+        others = [i for i in range(self._rho_reader.n_analyses) if i != idx]
+        return {
+            "analysis_id": np.array([id_by_index[i]["analysis_id"] for i in others], dtype=object),
+            "rho": rho_vals[others].astype("float32"),
+            "n_null": n_vals[others].astype("int64"),
+        }
+
+    def rho_matrix(self, ids: list[str] | None = None) -> dict[str, np.ndarray]:
+        """Wide-format Rho: the full symmetric matrix (diagonal 1.0), or the
+        dense submatrix for a given vector of Analysis IDs, in that order."""
+        if self._rho_reader is None:
+            return _empty_rho_matrix_result()
+        if ids is None:
+            id_by_index = self._analyses.all()
+            ordered_ids = [
+                id_by_index[i]["analysis_id"] for i in range(self._rho_reader.n_analyses)
+            ]
+            rho_mat, n_mat = self._rho_reader.matrix(None)
+        else:
+            resolved = [
+                (aid, int(a["analysis_index"]))
+                for aid in ids
+                if (a := self._analyses.by_id(aid)) is not None
+            ]
+            ordered_ids = [aid for aid, _ in resolved]
+            rho_mat, n_mat = self._rho_reader.matrix([idx for _, idx in resolved])
+        return {
+            "analysis_id": np.array(ordered_ids, dtype=object),
+            "rho": rho_mat.astype("float32"),
+            "n_null": n_mat.astype("int64"),
         }
 
 

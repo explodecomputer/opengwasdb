@@ -18,6 +18,12 @@ from opengwasdb.layouts.dense.complete import (
 )
 from opengwasdb.layouts.dense.constants import DEFAULT_CHUNK_SHAPE
 from opengwasdb.layouts.dense.overview import write_overview_html
+from opengwasdb.layouts.dense.rho import (
+    DEFAULT_RHO_MIN_NULLS,
+    DEFAULT_RHO_WINDOW_BP,
+    DEFAULT_RHO_Z_THRESH,
+    build_dense_rho,
+)
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
@@ -668,6 +674,31 @@ def build_ragged_top_hits_command(store_path: Path) -> None:
 def build_dense_top_hits_command(store_path: Path) -> None:
     """Build (or rebuild) the top-hit index for a Dense store."""
     build_top_hit_indexes(store_path)
+    typer.echo("done")
+
+
+@app.command("build-dense-rho")
+def build_dense_rho_command(
+    store_path: Path,
+    window_bp: int = typer.Option(
+        DEFAULT_RHO_WINDOW_BP, help="Distance-thinning window (bp) over the store's own axis"
+    ),
+    z_thresh: float = typer.Option(
+        DEFAULT_RHO_Z_THRESH, help="|z| cutoff for a variant to count as null"
+    ),
+    min_nulls: int = typer.Option(
+        DEFAULT_RHO_MIN_NULLS, help="Minimum shared null-variant support; NaN below this"
+    ),
+    n_workers: int = typer.Option(1, help="Process pool size for the per-pair MLE"),
+) -> None:
+    """Build (or rebuild) the pairwise Rho Matrix for a Dense store."""
+    build_dense_rho(
+        store_path,
+        window_bp=window_bp,
+        z_thresh=z_thresh,
+        min_nulls=min_nulls,
+        n_workers=n_workers,
+    )
     typer.echo("done")
 
 
