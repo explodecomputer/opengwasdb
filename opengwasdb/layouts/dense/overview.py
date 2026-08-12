@@ -480,7 +480,7 @@ def _finite_pair_values(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
 _HIST_TICKS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 
 
-def _rho_histogram_svg(rho_mat: np.ndarray, *, bins: int = 20) -> str:
+def _rho_histogram_svg(rho_mat: np.ndarray, *, bins: int = 201) -> str:
     _, _, finite = _finite_pair_values(rho_mat)
     counts, edges = np.histogram(finite, bins=bins, range=(-1.0, 1.0))
     width, height = 640, 190
