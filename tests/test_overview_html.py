@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
+import numpy as np
+
+from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.layouts.dense.overview import write_overview_html
-from opengwasdb.model.analyses import AnalysesTable
+from opengwasdb.layouts.dense.rho import build_dense_rho
+from opengwasdb.model.analyses import AnalysesTable, read_analyses
 
 
 def _table() -> AnalysesTable:
@@ -201,3 +206,168 @@ def test_guide_tab_differs_between_dense_and_hybrid_directory_contents(tmp_path)
     hybrid_out = write_overview_html(hybrid_dir, _table())
     hybrid_guide = _guide_section(hybrid_out.read_text(encoding="utf-8"))
     assert 'class="fname">dense<span class="badge internal">internal</span>' in hybrid_guide
+
+
+# ── Rho Matrix tab (issue #41, ADR 0025) ─────────────────────────────────────
+
+_RHO_SOURCE_HEADER = "\t".join(
+    [
+        "analysis_id", "phenotype_id", "phenotype_label", "analysis_label",
+        "chromosome", "position", "effect_allele", "other_allele",
+        "z", "se", "rsid", "stored_effect_scale",
+    ]
+)
+
+
+def _build_rho_store(
+    tmp_path: Path, *, n_analyses: int = 6, n_variants: int = 80, min_nulls: int = 5
+) -> Path:
+    """A small real Dense store with a computed Rho Matrix -- analysis 1 is
+    correlated with analysis 0 (rho ~0.6), the rest are independent, so the
+    Rho tab has non-trivial content to render (histogram spread, a
+    top-positive pair, a clustered heatmap)."""
+    rng = np.random.default_rng(0)
+    base = rng.standard_normal(n_variants)
+    rows = []
+    for a in range(n_analyses):
+        z = (
+            0.6 * base + math.sqrt(1 - 0.6**2) * rng.standard_normal(n_variants)
+            if a == 1
+            else rng.standard_normal(n_variants)
+        )
+        for v in range(n_variants):
+            pos = (v + 1) * 100
+            rows.append(
+                f"a{a}\tp{a}\tTrait {a}\tTrait {a} primary\t1\t{pos}\tA\tG\t"
+                f"{z[v]:.5f}\t1.0\trs{v}\tsd"
+            )
+    source = tmp_path / "rho_source.tsv"
+    source.write_text(_RHO_SOURCE_HEADER + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+
+    store = tmp_path / "rho-store.opengwasdb"
+    build_dense_observed_from_sources(
+        [source], store, store_id="rho-fixture", release_id="v1", reference_assembly="GRCh37"
+    )
+    build_dense_rho(store, window_bp=50, z_thresh=1.0, min_nulls=min_nulls, n_workers=1)
+    return store
+
+
+def _rho_section(content: str) -> str:
+    return content.split('id="tab-rho"')[1].split('id="tab-guide"')[0]
+
+
+def test_overview_html_omits_rho_tab_without_rho_group(tmp_path):
+    _write_manifest(tmp_path)
+    out = write_overview_html(tmp_path, _table())
+    content = out.read_text(encoding="utf-8")
+
+    assert "Rho Matrix" not in content
+    assert 'id="tab-rho"' not in content
+
+
+def test_overview_html_omits_rho_tab_when_data_zarr_has_no_rho_group(tmp_path):
+    # A store with a data.zarr but no rho subgroup (the common case -- Rho is
+    # opt-in) must not crash and must not show the tab.
+    _write_manifest(tmp_path)
+    (tmp_path / "data.zarr").mkdir()
+    out = write_overview_html(tmp_path, _table())
+    content = out.read_text(encoding="utf-8")
+
+    assert "Rho Matrix" not in content
+
+
+def test_overview_html_includes_rho_tab_when_rho_group_present(tmp_path):
+    store = _build_rho_store(tmp_path)
+    table = read_analyses(store / "analyses.tsv")
+
+    out = write_overview_html(store, table)
+    content = out.read_text(encoding="utf-8")
+
+    assert '<button data-tab="rho">Rho Matrix</button>' in content
+    assert 'id="tab-rho" class="tab-panel hidden"' in content
+    # The Rho tab sits between Ancestry and Guide.
+    assert content.index('data-tab="ancestry"') < content.index('data-tab="rho"')
+    assert content.index('data-tab="rho"') < content.index('data-tab="guide"')
+
+
+def test_rho_tab_summary_reports_provenance(tmp_path):
+    store = _build_rho_store(tmp_path, min_nulls=7)
+    table = read_analyses(store / "analyses.tsv")
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+
+    assert "pleiodb-cml" in section
+    assert "<td>6</td>" in section  # Analyses
+    assert "<td>15</td>" in section  # C(6,2) analysis pairs
+    assert "<td>7</td>" in section  # min_nulls as configured
+
+
+def test_rho_tab_histogram_is_inline_svg_no_external_assets(tmp_path):
+    store = _build_rho_store(tmp_path)
+    table = read_analyses(store / "analyses.tsv")
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+
+    assert "<svg" in section
+    assert "<rect" in section
+    # Self-contained store artifact (module docstring): no network, no CDN.
+    assert "http://" not in content and "https://" not in content
+
+
+def test_rho_tab_top_pairs_tables_reuse_existing_search_sort_and_find_the_correlated_pair(
+    tmp_path,
+):
+    store = _build_rho_store(tmp_path)
+    table = read_analyses(store / "analyses.tsv")
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+
+    assert 'id="search-rho-top-pos"' in section
+    assert 'id="search-rho-top-neg"' in section
+    assert "Support (n_null)" in section
+    # a0/a1 are the constructed rho~0.6 pair -- must surface in "top positive".
+    top_pos = section.split('id="rho-top-pos"')[1].split("</table>")[0]
+    assert "a0" in top_pos and "a1" in top_pos
+
+
+def test_rho_tab_trait_level_summary_names_each_analysis_strongest_partner(tmp_path):
+    store = _build_rho_store(tmp_path)
+    table = read_analyses(store / "analyses.tsv")
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+
+    assert "Trait-level rho summary" in section
+    assert 'id="search-rho-trait-summary"' in section
+    trait_table = section.split('id="rho-trait-summary"')[1].split("</table>")[0]
+    assert "Mean |rho|" in section and "Max |rho|" in section and "Strongest partner" in section
+    # Every Analysis gets its own row, each naming some strongest partner.
+    for aid in ("a0", "a1", "a2", "a3", "a4", "a5"):
+        row = [r for r in trait_table.split("<tr>") if f">{aid}<" in r][0]
+        assert "(Trait " in row  # "Strongest partner" cell is populated
+
+
+def test_rho_tab_heatmap_embeds_json_payload_with_nan_as_null(tmp_path):
+    # A high min_nulls with only 80 variants per analysis guarantees some
+    # pairs are NaN (below support floor) -- JSON must encode that as `null`,
+    # not a bare `NaN` token (invalid JSON).
+    store = _build_rho_store(tmp_path, min_nulls=1000)
+    table = read_analyses(store / "analyses.tsv")
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+    section = _rho_section(content)
+
+    assert 'class="rho-heatmap-data"' in section
+    payload = json.loads(section.split('class="rho-heatmap-data">')[1].split("</script>")[0])
+    assert payload["k"] == 6  # min(60, n_analyses)
+    assert len(payload["labels"]) == 6
+    assert len(payload["rho"]) == 36  # k * k, row-major
+    assert any(v is None for v in payload["rho"])  # NaN pairs -> JSON null
+    assert "NaN" not in json.dumps(payload)
+
+
+def test_rho_tab_degrades_gracefully_with_two_analyses(tmp_path):
+    store = _build_rho_store(tmp_path, n_analyses=2, min_nulls=5)
+    table = read_analyses(store / "analyses.tsv")
+
+    content = write_overview_html(store, table).read_text(encoding="utf-8")
+
+    assert "Rho Matrix" in content  # still renders, just a single pair

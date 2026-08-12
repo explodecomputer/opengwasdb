@@ -20,7 +20,14 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+from typing import Any
 
+import numpy as np
+import zarr
+from scipy.cluster.hierarchy import leaves_list, linkage  # type: ignore[import-untyped]
+from scipy.spatial.distance import squareform  # type: ignore[import-untyped]
+
+from opengwasdb.layouts.dense.rho import DenseRhoReader
 from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX, AnalysesTable
 
 _STYLE = """
@@ -35,6 +42,7 @@ _STYLE = """
   --accent: #1f5fd1;
   --accent-soft: #dce6fa;
   --accent-wash: #eef3fc;
+  --accent-neg: #c2410c;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
@@ -117,6 +125,18 @@ table.guide td.fdesc { color: var(--ink-soft); }
 }
 .badge.human { background: var(--accent-wash); color: var(--accent); }
 .badge.internal { background: var(--hairline); color: var(--ink-soft); }
+.rho-summary { border-collapse: collapse; width: 100%; max-width: 520px; font-size: 13px; margin-bottom: 20px; }
+.rho-summary td { padding: 6px 4px; border-bottom: 1px solid var(--hairline); }
+.rho-summary td:first-child { color: var(--ink-soft); padding-right: 24px; white-space: nowrap; }
+.rho-section-heading { font-size: 14px; font-weight: 650; margin: 28px 0 8px; }
+.rho-heatmap-wrap { position: relative; display: inline-block; }
+.rho-heatmap { border: 1px solid var(--hairline); border-radius: 4px; cursor: crosshair; }
+.rho-heatmap-tooltip {
+  position: absolute; pointer-events: none; font-size: 12px; font-family: var(--mono);
+  background: var(--ink); color: var(--surface); padding: 6px 9px; border-radius: 6px;
+  white-space: nowrap; transform: translate(-50%, -110%); z-index: 5;
+}
+.rho-heatmap-tooltip.hidden { display: none; }
 """
 
 _SCRIPT = """
@@ -161,6 +181,52 @@ document.querySelectorAll(".tabs button").forEach((btn) => {
     document.getElementById("tab-" + btn.dataset.tab).classList.remove("hidden");
   });
 });
+
+function rhoColor(v) {
+  if (v === null) return "#dcdcd6";
+  const t = Math.max(-1, Math.min(1, v));
+  const mix = (a, b, f) => Math.round(a + (b - a) * f);
+  // Canvas can't read CSS custom properties -- keep these RGB triples in
+  // sync with --surface / --accent / --accent-neg in _STYLE by hand.
+  const white = [251, 251, 249];
+  const end = t >= 0 ? [31, 95, 209] : [194, 65, 12];
+  const f = Math.abs(t);
+  const [r, g, b] = [mix(white[0], end[0], f), mix(white[1], end[1], f), mix(white[2], end[2], f)];
+  return `rgb(${r},${g},${b})`;
+}
+
+function initRhoHeatmap(wrap) {
+  const canvas = wrap.querySelector("canvas.rho-heatmap");
+  const tooltip = wrap.querySelector(".rho-heatmap-tooltip");
+  const data = JSON.parse(wrap.querySelector(".rho-heatmap-data").textContent);
+  const n = data.k;
+  const cell = canvas.width / n;
+  const ctx = canvas.getContext("2d");
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      ctx.fillStyle = rhoColor(data.rho[i * n + j]);
+      ctx.fillRect(j * cell, i * cell, cell, cell);
+    }
+  }
+  canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const i = Math.floor((event.clientY - rect.top) / cell);
+    const j = Math.floor((event.clientX - rect.left) / cell);
+    if (i < 0 || i >= n || j < 0 || j >= n) {
+      tooltip.classList.add("hidden");
+      return;
+    }
+    const rho = data.rho[i * n + j];
+    const rhoText = rho === null ? "NaN" : rho.toFixed(4);
+    const nn = data.n_null[i * n + j];
+    tooltip.textContent = `${data.labels[i]} x ${data.labels[j]}: rho=${rhoText}, n_null=${nn}`;
+    tooltip.style.left = `${event.clientX - rect.left}px`;
+    tooltip.style.top = `${event.clientY - rect.top}px`;
+    tooltip.classList.remove("hidden");
+  });
+  canvas.addEventListener("mouseleave", () => tooltip.classList.add("hidden"));
+}
+document.querySelectorAll(".rho-heatmap-wrap").forEach(initRhoHeatmap);
 """
 
 _TEMPLATE = """<!doctype html>
@@ -177,20 +243,10 @@ _TEMPLATE = """<!doctype html>
   <div class="meta">{meta}</div>
 </header>
 <nav class="tabs">
-  <button data-tab="analyses" class="active">Analyses</button>
-  <button data-tab="ancestry">Ancestry</button>
-  <button data-tab="guide">Guide</button>
+{tab_buttons}
 </nav>
 <main>
-<section id="tab-analyses" class="tab-panel">
-{analyses_section}
-</section>
-<section id="tab-ancestry" class="tab-panel hidden">
-{ancestry_section}
-</section>
-<section id="tab-guide" class="tab-panel hidden">
-{guide_section}
-</section>
+{tab_sections}
 </main>
 <script>{script}</script>
 </body>
@@ -381,6 +437,259 @@ def _render_table_section(
     )
 
 
+# A k x k submatrix embeds as k**2 JSON numbers plus a k*cell_px canvas --
+# 60 keeps both the page weight and the canvas legible at ukb-b scale (2,514
+# Analyses); the reference `pleiodb` report uses 200 traits as a *rendered
+# PNG*, which has no equivalent page-weight cost, so its cap doesn't carry
+# over to this self-contained, all-inline design (ADR 0025 "no external
+# assets, no network requests" -- overview.py module docstring).
+_RHO_HEATMAP_TRAITS = 60
+_RHO_TOP_PAIRS = 30
+
+
+def _analysis_label(row: dict[str, str]) -> str:
+    """Best-available human label, matching the query facade's `analyses_table()`."""
+    return row.get("phenotype_label") or row.get("analysis_label") or row.get("analysis_id", "")
+
+
+def _load_rho_group(output_path: Path) -> Any | None:
+    """The optional `data.zarr/rho` group (ADR 0025), or None if absent/unreadable.
+
+    Rho is an opt-in, add-in-place artifact (`build-dense-rho`) -- most stores
+    won't have one, and `overview.html` must degrade gracefully rather than
+    fail to render (issue #23 AC3 applies here too).
+    """
+    try:
+        root = zarr.open_group(str(output_path / "data.zarr"), mode="r")
+    except Exception:  # noqa: BLE001
+        return None
+    return root["rho"] if "rho" in root else None
+
+
+def _finite_pair_values(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(row_index, col_index, value)` for every finite strict-lower-triangle
+    cell -- the one unique pair per Analysis pair, matching `rho.py`'s own
+    packed-triangle convention (`np.tril_indices(n, k=-1)`)."""
+    rows, cols = np.tril_indices(mat.shape[0], k=-1)
+    vals = mat[rows, cols]
+    finite = np.isfinite(vals)
+    return rows[finite], cols[finite], vals[finite]
+
+
+def _rho_histogram_svg(rho_mat: np.ndarray, *, bins: int = 20) -> str:
+    _, _, finite = _finite_pair_values(rho_mat)
+    counts, edges = np.histogram(finite, bins=bins, range=(-1.0, 1.0))
+    width, height, pad = 640, 150, 24
+    max_count = max(int(counts.max()), 1) if len(counts) else 1
+    bar_w = (width - 2 * pad) / max(len(counts), 1)
+    bars = []
+    for i, count in enumerate(counts):
+        bar_h = (int(count) / max_count) * (height - 2 * pad)
+        x = pad + i * bar_w
+        y = height - pad - bar_h
+        title = f"{edges[i]:.2f} to {edges[i + 1]:.2f}: {int(count):,} pairs"
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w * 0.85:.1f}" height="{bar_h:.1f}" '
+            f'fill="var(--accent)"><title>{html.escape(title)}</title></rect>'
+        )
+    span = float(edges[-1] - edges[0]) or 1.0
+    zero_x = pad + (0.0 - float(edges[0])) / span * (width - 2 * pad)
+    axis = (
+        f'<line x1="{zero_x:.1f}" y1="{pad}" x2="{zero_x:.1f}" y2="{height - pad}" '
+        'stroke="var(--hairline-strong)" stroke-dasharray="3,3"/>'
+    )
+    return (
+        f'<svg width="{width}" height="{height}" role="img" '
+        f'aria-label="Distribution of {len(finite):,} finite rho values">'
+        f"{axis}{''.join(bars)}</svg>"
+    )
+
+
+def _rho_pairs_table(
+    rho_mat: np.ndarray,
+    n_null_mat: np.ndarray,
+    ids: list[str],
+    labels: list[str],
+    *,
+    table_id: str,
+    ascending: bool,
+    limit: int = _RHO_TOP_PAIRS,
+) -> str:
+    rows_idx, cols_idx, vals = _finite_pair_values(rho_mat)
+    order = np.argsort(vals if ascending else -vals)[:limit]
+    fieldnames = ("Analysis A", "Label A", "Analysis B", "Label B", "Rho", "Support (n_null)")
+    rows = tuple(
+        {
+            "Analysis A": ids[i],
+            "Label A": labels[i],
+            "Analysis B": ids[j],
+            "Label B": labels[j],
+            "Rho": f"{vals[k]:.4f}",
+            "Support (n_null)": f"{int(n_null_mat[i, j]):,}",
+        }
+        for k in order
+        for i, j in ((int(rows_idx[k]), int(cols_idx[k])),)
+    )
+    return _render_table_section(
+        table_id=table_id,
+        search_id=f"search-{table_id}",
+        search_placeholder="Filter pairs...",
+        fieldnames=fieldnames,
+        rows=rows,
+    )
+
+
+def _rho_clustered_heatmap(
+    rho_mat: np.ndarray,
+    n_null_mat: np.ndarray,
+    labels: list[str],
+    *,
+    k: int = _RHO_HEATMAP_TRAITS,
+) -> str:
+    n = rho_mat.shape[0]
+    k = min(k, n)
+    if k < 2:
+        return "<p>Not enough Analyses to render a heatmap.</p>"
+
+    abs_mat = np.abs(np.nan_to_num(rho_mat, nan=0.0))
+    np.fill_diagonal(abs_mat, 0.0)
+    top = np.argsort(-abs_mat.max(axis=1))[:k]
+
+    sub_rho = rho_mat[np.ix_(top, top)]
+    dist = 1.0 - np.nan_to_num(sub_rho, nan=0.0)
+    dist = (dist + dist.T) / 2.0  # exact symmetry against float round-off
+    np.fill_diagonal(dist, 0.0)
+    order = top[leaves_list(linkage(squareform(dist, checks=False), method="average"))]
+
+    ordered_rho = rho_mat[np.ix_(order, order)]
+    ordered_n = n_null_mat[np.ix_(order, order)]
+    payload = {
+        "k": k,
+        "labels": [labels[i] for i in order],
+        "rho": [None if not np.isfinite(v) else round(float(v), 4) for v in ordered_rho.flat],
+        "n_null": [int(v) for v in ordered_n.flat],
+    }
+    cell_px = max(4, min(12, 640 // k))
+    return (
+        f'<p class="guide-intro">Hierarchically clustered submatrix of the {k} Analyses with the '
+        "strongest pairwise |rho| relationship elsewhere in the store. Hover a cell for its pair "
+        "and support.</p>\n"
+        '<div class="rho-heatmap-wrap">\n'
+        f'<canvas class="rho-heatmap" width="{k * cell_px}" height="{k * cell_px}"></canvas>\n'
+        '<div class="rho-heatmap-tooltip hidden"></div>\n'
+        f'<script type="application/json" class="rho-heatmap-data">{json.dumps(payload)}</script>\n'
+        "</div>"
+    )
+
+
+def _rho_trait_summary_table(
+    rho_mat: np.ndarray, n_null_mat: np.ndarray, ids: list[str], labels: list[str]
+) -> str:
+    """One row per Analysis: its mean |rho| and its single strongest
+    relationship (partner + rho + support) -- "which traits are most
+    entangled", complementing the pair-level tables above."""
+    n = rho_mat.shape[0]
+    off_diagonal = ~np.eye(n, dtype=bool)
+    finite = np.isfinite(rho_mat) & off_diagonal
+    abs_rho = np.abs(rho_mat)
+
+    fieldnames = ("Analysis", "Label", "Mean |rho|", "Max |rho|", "Strongest partner", "Support")
+    rows = []
+    for i in range(n):
+        row_mask = finite[i]
+        if not row_mask.any():
+            rows.append(
+                {
+                    "Analysis": ids[i], "Label": labels[i],
+                    "Mean |rho|": "", "Max |rho|": "", "Strongest partner": "", "Support": "",
+                }
+            )
+            continue
+        ranked = np.where(row_mask, abs_rho[i], -1.0)
+        j = int(np.argmax(ranked))
+        rows.append(
+            {
+                "Analysis": ids[i],
+                "Label": labels[i],
+                "Mean |rho|": f"{abs_rho[i][row_mask].mean():.4f}",
+                "Max |rho|": f"{abs_rho[i][j]:.4f}",
+                "Strongest partner": f"{ids[j]} ({labels[j]})" if labels[j] else ids[j],
+                "Support": f"{int(n_null_mat[i, j]):,}",
+            }
+        )
+    return _render_table_section(
+        table_id="rho-trait-summary",
+        search_id="search-rho-trait-summary",
+        search_placeholder="Filter Analyses...",
+        fieldnames=fieldnames,
+        rows=tuple(rows),
+        sticky_column="Analysis",
+    )
+
+
+def _render_rho_section(output_path: Path, table: AnalysesTable) -> str | None:
+    """The Rho Matrix tab (ADR 0025): summary, distribution, top pairs, and a
+    clustered heatmap -- absent entirely unless `build-dense-rho` has run."""
+    group = _load_rho_group(output_path)
+    if group is None:
+        return None
+    n_analyses = int(group.attrs.get("n_analyses", 0))
+    if n_analyses <= 0:
+        return None
+
+    reader = DenseRhoReader(group, n_analyses)
+    rho_mat, n_null_mat = reader.matrix(None)
+    by_index = {int(row["analysis_index"]): row for row in table.rows if row.get("analysis_index")}
+    ids = [by_index.get(i, {}).get("analysis_id", str(i)) for i in range(n_analyses)]
+    labels = [_analysis_label(by_index.get(i, {})) for i in range(n_analyses)]
+
+    n_pairs = n_analyses * (n_analyses - 1) // 2
+    rows_idx, cols_idx = np.tril_indices(n_analyses, k=-1)
+    n_nan = int(np.isnan(rho_mat[rows_idx, cols_idx]).sum())
+
+    summary_rows = [
+        ("Method", str(group.attrs.get("method", ""))),
+        ("Analyses", f"{n_analyses:,}"),
+        ("Analysis pairs", f"{n_pairs:,}"),
+        ("Pairs below min_nulls (NaN)", f"{n_nan:,}"),
+        ("z_thresh", str(group.attrs.get("z_thresh", ""))),
+        ("min_nulls", str(group.attrs.get("min_nulls", ""))),
+        ("window_bp", str(group.attrs.get("window_bp", ""))),
+        ("Variants used (thinned)", f"{int(group.attrs.get('n_variants_used', 0)):,}"),
+        ("Observed only", str(group.attrs.get("observed_only", ""))),
+    ]
+    summary_body = "\n".join(
+        f"<tr><td>{html.escape(k)}</td><td>{html.escape(v)}</td></tr>" for k, v in summary_rows
+    )
+    top_pos = _rho_pairs_table(
+        rho_mat, n_null_mat, ids, labels, table_id="rho-top-pos", ascending=False
+    )
+    top_neg = _rho_pairs_table(
+        rho_mat, n_null_mat, ids, labels, table_id="rho-top-neg", ascending=True
+    )
+    heatmap = _rho_clustered_heatmap(rho_mat, n_null_mat, labels)
+    trait_summary = _rho_trait_summary_table(rho_mat, n_null_mat, ids, labels)
+
+    return (
+        '<p class="guide-intro">Rho (ADR 0025) is the correlation between two Analyses\' '
+        "statistics under the null -- sample overlap x phenotypic correlation -- estimated by "
+        "the pleiodb conditional-MLE method on shared non-significant Z-scores.</p>\n"
+        '<div class="rho-section-heading">Run summary</div>\n'
+        f'<table class="rho-summary"><tbody>{summary_body}</tbody></table>\n'
+        '<div class="rho-section-heading">Distribution of rho values</div>\n'
+        f"{_rho_histogram_svg(rho_mat)}\n"
+        '<div class="rho-section-heading">Top 30 positive rho pairs</div>\n'
+        f"{top_pos}\n"
+        '<div class="rho-section-heading">Top 30 negative rho pairs</div>\n'
+        f"{top_neg}\n"
+        '<div class="rho-section-heading">Clustered heatmap (top '
+        f'{min(_RHO_HEATMAP_TRAITS, n_analyses)} Analyses by |rho|)</div>\n'
+        f"{heatmap}\n"
+        '<div class="rho-section-heading">Trait-level rho summary</div>\n'
+        f"{trait_summary}"
+    )
+
+
 def write_overview_html(
     output_path: str | Path, table: AnalysesTable, *, title: str = "OpenGWASDB Analyses"
 ) -> Path:
@@ -414,15 +723,37 @@ def write_overview_html(
     )
     guide_section = _render_guide_section(output_path)
 
+    # (key, label, section_html) in display order. The Rho tab is present only
+    # when `build-dense-rho` has actually been run against this store -- Rho
+    # is opt-in metadata, not something every store carries (ADR 0025).
+    tabs: list[tuple[str, str, str]] = [
+        ("analyses", "Analyses", analyses_section),
+        ("ancestry", "Ancestry", ancestry_section),
+    ]
+    rho_section = _render_rho_section(output_path, table)
+    if rho_section is not None:
+        tabs.append(("rho", "Rho Matrix", rho_section))
+    tabs.append(("guide", "Guide", guide_section))
+
+    tab_buttons = "\n".join(
+        f'<button data-tab="{key}"{active}>{html.escape(label)}</button>'
+        for i, (key, label, _section) in enumerate(tabs)
+        for active in (' class="active"' if i == 0 else "",)
+    )
+    tab_sections = "\n".join(
+        f'<section id="tab-{key}" class="tab-panel{hidden}">\n{section}\n</section>'
+        for i, (key, _label, section) in enumerate(tabs)
+        for hidden in ("" if i == 0 else " hidden",)
+    )
+
     out_path = output_path / "overview.html"
     out_path.write_text(
         _TEMPLATE.format(
             title=html.escape(title),
             style=_STYLE,
             meta=html.escape(" · ".join(meta_parts)),
-            analyses_section=analyses_section,
-            ancestry_section=ancestry_section,
-            guide_section=guide_section,
+            tab_buttons=tab_buttons,
+            tab_sections=tab_sections,
             script=_SCRIPT,
         ),
         encoding="utf-8",
