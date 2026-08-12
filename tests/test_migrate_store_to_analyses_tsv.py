@@ -136,6 +136,32 @@ def test_migrate_preserves_analyses_and_ancestry(dense_store_path):
     assert manifest["provenance"]["ancestry"]["n_analyses"] == 2
 
 
+def test_migrate_translates_legacy_sd_units_to_current_vocabulary(dense_store_path):
+    # Pre-issue-#16 stores (and every real UKB-B production store) were built
+    # when StoredEffectScale's SD member was still spelled "sd_units"; issue
+    # #16 renamed it to "sd" without a migration path. A store carrying the
+    # old spelling must not fail validation after migration -- the value is a
+    # known historical rename, not something migrate_store has to guess.
+    _revert_to_old_layout(dense_store_path)
+    connection = sqlite3.connect(dense_store_path / "index.sqlite")
+    try:
+        connection.execute(
+            "UPDATE analyses SET stored_effect_scale = 'sd_units' WHERE analysis_id = 'a1'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrate_module.migrate_store(dense_store_path)
+
+    rows = {r["analysis_id"]: r for r in read_analyses(dense_store_path / "analyses.tsv").rows}
+    assert rows["a1"]["stored_effect_scale"] == "sd"
+    assert rows["a2"]["stored_effect_scale"] == "log_or"  # untouched -- already current vocabulary
+
+    result = validate_store(dense_store_path)
+    assert result.ok, result.errors
+
+
 def test_migrate_writes_unavailable_sd_provenance_not_a_guess(dense_store_path):
     _revert_to_old_layout(dense_store_path)
     migrate_module.migrate_store(dense_store_path)

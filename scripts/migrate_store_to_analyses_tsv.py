@@ -52,6 +52,14 @@ from opengwasdb.model.enums import OriginalSdMethod
 _ANCESTRY_SIDECAR = "ancestry.tsv"
 _ANCESTRY_PROVENANCE = "ancestry_provenance.json"
 
+# Issue #16 renamed StoredEffectScale.SD_UNITS ("sd_units") to
+# StoredEffectScale.SD ("sd") without a migration path -- every store built
+# before that rename (including every real UKB-B production store) still
+# carries the old spelling in its SQLite `analyses` table. This is a known
+# historical rename, not a guess: translate it so a migrated store's
+# stored_effect_scale passes the current controlled vocabulary.
+_LEGACY_STORED_EFFECT_SCALE = {"sd_units": "sd"}
+
 
 def read_old_layout_analysis_ids(store_path: str | Path) -> list[str]:
     """`analysis_id`s from the old SQLite `analyses` table, in `analysis_index`
@@ -123,13 +131,14 @@ def migrate_store(store_path: str | Path) -> list[str]:
         analysis_id = str(row["analysis_id"])
         ancestry_row = ancestry_by_id.get(analysis_id, {})
         assigned_ancestry = ancestry_row.get("assigned_ancestry", "")
+        old_scale = str(row["stored_effect_scale"])
         analyses.append(
             AnalysisMetadata(
                 analysis_id=analysis_id,
                 phenotype_id=row.get("phenotype_id") or None,  # type: ignore[arg-type]
                 phenotype_label=row.get("phenotype_label") or None,  # type: ignore[arg-type]
                 analysis_label=row.get("analysis_label") or None,  # type: ignore[arg-type]
-                stored_effect_scale=str(row["stored_effect_scale"]),
+                stored_effect_scale=_LEGACY_STORED_EFFECT_SCALE.get(old_scale, old_scale),
                 assigned_ancestry=assigned_ancestry,
                 ancestry_assignment_method="af_assigned" if assigned_ancestry else "",
                 completed_against=ancestry_row.get("completed_against", ""),
