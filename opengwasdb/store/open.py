@@ -49,8 +49,51 @@ def _release_paths(path: Path) -> dict[str, Path]:
     }
 
 
+class _ReleasePaths:
+    """Artifact-path properties shared by an opened release and a staged one.
+
+    Both ``OpenGWASDBStore`` and ``StagedRelease`` set ``_paths`` (via
+    ``_release_paths()``) in ``__post_init__`` and inherit these instead of
+    each re-deriving the same suffixes off ``self.path``.
+    """
+
+    _paths: dict[str, Path]
+
+    @property
+    def manifest_path(self) -> Path:
+        return self._paths["manifest"]
+
+    @property
+    def data_path(self) -> Path:
+        return self._paths["data"]
+
+    @property
+    def index_path(self) -> Path:
+        return self._paths["index"]
+
+    @property
+    def analyses_path(self) -> Path:
+        return self._paths["analyses"]
+
+    @property
+    def variant_table_path(self) -> Path:
+        return self._paths["variant_table"]
+
+    @property
+    def variant_tabix_path(self) -> Path:
+        return self._paths["variant_tabix"]
+
+    @property
+    def variant_offsets_path(self) -> Path:
+        return self._paths["variant_offsets"]
+
+    @property
+    def traits_table_path(self) -> Path:
+        return self._paths["traits_table"]
+
+
 @dataclass(frozen=True)
-class OpenGWASDBStore:
+class OpenGWASDBStore(_ReleasePaths):
     """A local Store Release opened from an explicit path.
 
     Frozen: the manifest a caller holds never changes under them. In-place
@@ -60,42 +103,17 @@ class OpenGWASDBStore:
 
     path: Path
     manifest: StoreManifest
+    _paths: dict[str, Path] = field(init=False, repr=False)
 
-    # ---- paths -----------------------------------------------------------
-
-    @property
-    def manifest_path(self) -> Path:
-        return self.path / "manifest.json"
-
-    @property
-    def index_path(self) -> Path:
-        return self.path / "index.sqlite"
-
-    @property
-    def data_path(self) -> Path:
-        return self.path / "data.zarr"
-
-    @property
-    def analyses_path(self) -> Path:
-        return self.path / "analyses.tsv"
-
-    @property
-    def variant_table_path(self) -> Path:
-        return self.path / "variants.tsv.gz"
-
-    @property
-    def variant_tabix_path(self) -> Path:
-        return self.path / "variants.tsv.gz.tbi"
-
-    @property
-    def variant_offsets_path(self) -> Path:
-        return self.path / "variant_offsets.npy"
-
-    @property
-    def traits_table_path(self) -> Path:
-        return self.path / "traits.tsv.gz"
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_paths", _release_paths(self.path))
 
     # ---- opening -----------------------------------------------------------
+
+    @classmethod
+    def open(cls, path: str | Path) -> OpenGWASDBStore:
+        """Alias for the module-level :func:`open_store`."""
+        return open_store(path)
 
     def dense_component(self) -> OpenGWASDBStore:
         """Open a Hybrid release's nested Dense Component release.
@@ -157,12 +175,18 @@ class OpenGWASDBStore:
     def staging(dest_path: str | Path, *, overwrite: bool = False) -> Iterator[StagedRelease]:
         """Construct a release atomically at ``dest_path``.
 
-        Writes happen in a ``.{name}.tmp`` sibling directory; on successful
-        exit from the ``with`` block the directory is renamed into place
-        (replacing an existing release if ``overwrite=True``). On an
-        exception, the staging directory is discarded and ``dest_path`` is
-        left as it was found -- a crashed build never leaves a half-written
-        release at its real path.
+        Writes happen in a ``.{name}.tmp`` sibling directory. On successful
+        exit from the ``with`` block, replacing an existing release
+        (``overwrite=True``) is two renames -- the old release out to a
+        ``.{name}.old`` sibling, the new one in -- rather than deleting the
+        old release first: a directory can only be renamed onto an *empty*
+        destination on POSIX, so a full ``rmtree`` before the swap would
+        leave no release at ``dest_path`` for however long the deletion of a
+        large store takes. Renames are single filesystem operations, so that
+        window shrinks to two syscalls, and if a crash lands between them the
+        old release is still intact at its ``.old`` path rather than gone.
+        On any exception, the staging directory is discarded and
+        ``dest_path`` is left as it was found.
         """
         dst = Path(dest_path)
         if dst.exists() and not overwrite:
@@ -177,15 +201,21 @@ class OpenGWASDBStore:
         try:
             yield staged
             if dst.exists():
-                shutil.rmtree(dst)
-            work.rename(dst)
+                old = dst.with_name(f".{dst.name}.old")
+                if old.exists():
+                    shutil.rmtree(old)
+                dst.rename(old)
+                work.rename(dst)
+                shutil.rmtree(old, ignore_errors=True)
+            else:
+                work.rename(dst)
         except Exception:
             shutil.rmtree(work, ignore_errors=True)
             raise
 
 
 @dataclass(frozen=True)
-class StagedRelease:
+class StagedRelease(_ReleasePaths):
     """A release under construction in a ``.tmp`` staging directory.
 
     Offers the same path/array/table surface as an opened
@@ -199,38 +229,6 @@ class StagedRelease:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_paths", _release_paths(self.path))
-
-    @property
-    def manifest_path(self) -> Path:
-        return self._paths["manifest"]
-
-    @property
-    def data_path(self) -> Path:
-        return self._paths["data"]
-
-    @property
-    def index_path(self) -> Path:
-        return self._paths["index"]
-
-    @property
-    def analyses_path(self) -> Path:
-        return self._paths["analyses"]
-
-    @property
-    def variant_table_path(self) -> Path:
-        return self._paths["variant_table"]
-
-    @property
-    def variant_tabix_path(self) -> Path:
-        return self._paths["variant_tabix"]
-
-    @property
-    def variant_offsets_path(self) -> Path:
-        return self._paths["variant_offsets"]
-
-    @property
-    def traits_table_path(self) -> Path:
-        return self._paths["traits_table"]
 
     def arrays(self, mode: str = "w") -> zarr.Group:
         return zarr.open_group(str(self.data_path), mode=mode)

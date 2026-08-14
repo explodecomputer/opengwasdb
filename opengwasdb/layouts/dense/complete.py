@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import zarr
 from numcodecs import Blosc
 from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
@@ -217,7 +216,7 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
 
     src_axis = VariantAxis(task.source_path)
     try:
-        src_root = zarr.open_group(str(Path(task.source_path) / "data.zarr"), mode="r")
+        src_root = open_store(task.source_path).arrays(mode="r")
         n_analyses = int(src_root["z"].shape[1])
 
         src_rows: list[int | None] = []
