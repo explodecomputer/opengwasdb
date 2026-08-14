@@ -5,7 +5,6 @@ import shutil
 
 import numpy as np
 import pytest
-import zarr
 from typer.testing import CliRunner
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
@@ -16,6 +15,7 @@ from opengwasdb.layouts.dense.rho import (
     select_thinned_variants,
 )
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
 RHO_SOURCE_HEADER = "\t".join(
@@ -149,7 +149,7 @@ def test_build_dense_rho_round_trips_against_direct_estimation(rho_store_path):
     result = validate_store(rho_store_path)
     assert result.ok, result.errors
 
-    root = zarr.open_group(str(rho_store_path / "data.zarr"), mode="r")
+    root = open_store(rho_store_path).arrays(mode="r")
     rho_group = root["rho"]
     assert rho_group.attrs["z_thresh"] == 1.0
     assert rho_group.attrs["min_nulls"] == 20
@@ -184,7 +184,7 @@ def test_build_dense_rho_round_trips_against_direct_estimation(rho_store_path):
 def test_rho_is_nan_exactly_below_min_nulls(rho_store_path):
     build_dense_rho(rho_store_path, window_bp=50, z_thresh=1.0, min_nulls=20, n_workers=1)
 
-    root = zarr.open_group(str(rho_store_path / "data.zarr"), mode="r")
+    root = open_store(rho_store_path).arrays(mode="r")
     rho_vals = np.asarray(root["rho"]["rho"][:], dtype=np.float32)
     n_vals = np.asarray(root["rho"]["n_null"][:], dtype=np.int64)
 
@@ -192,7 +192,7 @@ def test_rho_is_nan_exactly_below_min_nulls(rho_store_path):
 
 
 def test_imputed_cells_are_excluded_from_null_support(rho_store_path):
-    root = zarr.open_group(str(rho_store_path / "data.zarr"), mode="a")
+    root = open_store(rho_store_path).arrays(mode="a")
     n_variants, n_analyses = root["z"].shape
     imputed = np.zeros((n_variants, n_analyses), dtype="uint8")
     imputed[::2, 0] = 1
@@ -201,7 +201,7 @@ def test_imputed_cells_are_excluded_from_null_support(rho_store_path):
 
     build_dense_rho(rho_store_path, window_bp=50, z_thresh=1.0, min_nulls=1, n_workers=1)
 
-    rho_group = zarr.open_group(str(rho_store_path / "data.zarr"), mode="r")["rho"]
+    rho_group = open_store(rho_store_path).arrays(mode="r")["rho"]
     thinned = np.asarray(rho_group["variant_index"][:])
     z0 = np.asarray(root["z"][:, 0], dtype=np.float64)[thinned]
     z1 = np.asarray(root["z"][:, 1], dtype=np.float64)[thinned]
@@ -286,8 +286,8 @@ def test_parallel_build_matches_serial_build(rho_store_path, tmp_path):
     build_dense_rho(rho_store_path, window_bp=50, z_thresh=1.0, min_nulls=5, n_workers=1)
     build_dense_rho(parallel_path, window_bp=50, z_thresh=1.0, min_nulls=5, n_workers=3)
 
-    serial_group = zarr.open_group(str(rho_store_path / "data.zarr"), mode="r")["rho"]
-    parallel_group = zarr.open_group(str(parallel_path / "data.zarr"), mode="r")["rho"]
+    serial_group = open_store(rho_store_path).arrays(mode="r")["rho"]
+    parallel_group = open_store(parallel_path).arrays(mode="r")["rho"]
 
     serial_rho = np.asarray(serial_group["rho"][:])
     parallel_rho = np.asarray(parallel_group["rho"][:])
@@ -332,7 +332,7 @@ def test_cli_build_dense_rho_defaults(rho_store_path):
     result = runner.invoke(app, ["build-dense-rho", str(rho_store_path)])
     assert result.exit_code == 0, result.output
 
-    root = zarr.open_group(str(rho_store_path / "data.zarr"), mode="r")
+    root = open_store(rho_store_path).arrays(mode="r")
     rho_group = root["rho"]
     assert rho_group.attrs["z_thresh"] == 1.0
     assert rho_group.attrs["min_nulls"] == 500

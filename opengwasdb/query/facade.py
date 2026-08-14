@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from opengwasdb.index import AnalysesIndex, connect
+from opengwasdb.index import AnalysesIndex
 from opengwasdb.layouts.dense.rho import DenseRhoReader
 from opengwasdb.layouts.dense.top_hits import DenseTopHitReader, threshold_key
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
@@ -66,9 +66,9 @@ class StoreQuery:
 
     def __init__(self, store: OpenGWASDBStore):
         self.store = store
-        self._connection = connect(store.index_path)
+        self._connection = store.index_connection()
         self._analyses = AnalysesIndex(store.path)
-        self._root = zarr.open_group(str(store.data_path), mode="r")
+        self._root = store.arrays(mode="r")
         self._variant_axis = VariantAxis(store.path, self._connection)
         self._is_completed = (
             store.manifest.completion_state is CompletionState.REFERENCE_COMPLETED
@@ -412,15 +412,12 @@ class RaggedStoreQuery:
         self._csr = RaggedCSRReader(store.path)
         self._variant_axis = VariantAxis(store.path)
         self._traits_reader = TraitsAxisReader(store.path)
-        self._db: sqlite3.Connection = sqlite3.connect(
-            str(store.path / "index.sqlite")
-        )
-        self._db.row_factory = sqlite3.Row
+        self._db: sqlite3.Connection = store.index_connection()
         self._is_completed = (
             store.manifest.completion_state is CompletionState.REFERENCE_COMPLETED
         )
         # Load imputed mask when present (reference-completed stores).
-        ragged_path = store.path / "data.zarr" / "ragged"
+        ragged_path = store.data_path / "ragged"
         self._imputed: zarr.Array | None = None
         if self._is_completed:
             try:
@@ -633,7 +630,7 @@ class RaggedStoreQuery:
         observed_only=True forces a full scan to exclude imputed associations.
         """
         key = threshold_key(threshold)
-        root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
+        root = self.store.arrays(mode="r")
         path = f"top_hits/{key}"
         if path in root:
             group = root[path]
@@ -800,7 +797,7 @@ class HybridStoreQuery:
         self._dense = StoreQuery(self._dense_store)
         self._dense_to_shared = np.load(dense_to_shared_path(store.path)).astype("int32")
         self._csr = RaggedCSRReader(store.path)  # overflow at store/data.zarr/ragged
-        self._connection = connect(store.index_path)
+        self._connection = store.index_connection()
         self._analyses = AnalysesIndex(store.path)  # shared analyses.tsv
         self._variant_axis = VariantAxis(store.path, self._connection)  # shared union table
 
@@ -950,7 +947,7 @@ class HybridStoreQuery:
         self, threshold: float, analysis_index: int | None = None
     ) -> dict[str, np.ndarray]:
         key = threshold_key(threshold)
-        root = zarr.open_group(str(self.store.path / "data.zarr"), mode="r")
+        root = self.store.arrays(mode="r")
         path = f"top_hits/{key}"
         if path not in root:
             return _empty_result()

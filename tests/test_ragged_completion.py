@@ -9,11 +9,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import zarr
 
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation.validate import validate_store
 
 
@@ -153,20 +153,20 @@ class TestCompletionFiles:
         assert "completion" in m["provenance"]
 
     def test_imputed_array_present(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr" / "ragged"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")["ragged"]
         assert "imputed" in root
 
     def test_imputed_array_aligned_with_z(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr" / "ragged"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")["ragged"]
         assert len(root["imputed"]) == len(root["z"])
 
     def test_imputed_values_are_0_or_1(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr" / "ragged"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")["ragged"]
         imp = root["imputed"][:]
         assert np.all((imp == 0) | (imp == 1))
 
     def test_imputed_1_rows_have_finite_z(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr" / "ragged"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")["ragged"]
         z = root["z"][:].astype("float32")
         imp = root["imputed"][:]
         assert np.all(np.isfinite(z[imp == 1]))
@@ -201,7 +201,7 @@ class TestValidation:
         assert result.ok, result.errors
 
     def test_corrupt_imputed_array_fails(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr" / "ragged"), mode="r+")
+        root = open_store(completed_store).arrays(mode="r+")["ragged"]
         imp = root["imputed"][:]
         # Set imputed=1 where z is NaN
         z = root["z"][:].astype("float32")

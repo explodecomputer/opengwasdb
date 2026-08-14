@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import sqlite3
-
 import numpy as np
-import zarr
 
 from opengwasdb.layouts.dense.rho import build_dense_rho
 from opengwasdb.model.analyses import read_analyses, write_analyses
+from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
 
 def test_validator_rejects_missing_required_array(dense_store_path):
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     del root["se"]
 
     result = validate_store(dense_store_path)
@@ -21,7 +19,7 @@ def test_validator_rejects_missing_required_array(dense_store_path):
 
 
 def test_validator_rejects_negative_se(dense_store_path):
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     root["se"][0, 0] = -0.1
 
     result = validate_store(dense_store_path)
@@ -31,7 +29,7 @@ def test_validator_rejects_negative_se(dense_store_path):
 
 
 def test_validator_rejects_inconsistent_missingness(dense_store_path):
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     root["se"][0, 0] = float("nan")
 
     result = validate_store(dense_store_path)
@@ -55,7 +53,7 @@ def test_validator_rejects_invalid_stored_effect_scale(dense_store_path):
 
 
 def test_validator_rejects_inconsistent_top_hit_index(dense_store_path):
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     root["top_hits"]["p_5e_08"]["z"][0] = 0.0
 
     result = validate_store(dense_store_path)
@@ -65,7 +63,7 @@ def test_validator_rejects_inconsistent_top_hit_index(dense_store_path):
 
 
 def test_validator_rejects_invalid_top_hit_offsets(dense_store_path):
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r+")
+    root = open_store(dense_store_path).arrays(mode="r+")
     offsets = root["top_hits/p_5e_08/analysis_offsets"][:]
     offsets[-1] -= 1
     root["top_hits/p_5e_08/analysis_offsets"][:] = offsets
@@ -102,7 +100,7 @@ def test_validator_rejects_leftover_sqlite_analyses_table(dense_store_path):
     # Analytical Metadata; a store carrying a leftover SQLite `analyses`
     # table (store-format spec §20) is invalid even though nothing else
     # about it is malformed.
-    connection = sqlite3.connect(dense_store_path / "index.sqlite")
+    connection = open_store(dense_store_path).index_connection()
     try:
         connection.execute("CREATE TABLE analyses (analysis_index INTEGER PRIMARY KEY)")
         connection.commit()
@@ -226,7 +224,7 @@ def test_validator_accepts_well_formed_rho_matrix(dense_store_path):
 
 def test_validator_rejects_rho_wrong_packed_length(dense_store_path):
     _build_fixture_rho(dense_store_path)
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     del root["rho"]["rho"]
     root["rho"].create_dataset("rho", data=np.array([0.1, 0.2], dtype="float16"))
 
@@ -238,7 +236,7 @@ def test_validator_rejects_rho_wrong_packed_length(dense_store_path):
 
 def test_validator_rejects_rho_finite_with_insufficient_support(dense_store_path):
     _build_fixture_rho(dense_store_path)
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     root["rho"]["n_null"][:] = 0  # below min_nulls=1, but rho stays finite
 
     result = validate_store(dense_store_path)
@@ -249,7 +247,7 @@ def test_validator_rejects_rho_finite_with_insufficient_support(dense_store_path
 
 def test_validator_rejects_rho_out_of_range(dense_store_path):
     _build_fixture_rho(dense_store_path)
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     root["rho"]["rho"][:] = np.array([1.5], dtype="float16")
 
     result = validate_store(dense_store_path)
@@ -260,7 +258,7 @@ def test_validator_rejects_rho_out_of_range(dense_store_path):
 
 def test_validator_rejects_rho_missing_provenance_attr(dense_store_path):
     _build_fixture_rho(dense_store_path)
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     del root["rho"].attrs["window_bp"]
 
     result = validate_store(dense_store_path)
@@ -271,7 +269,7 @@ def test_validator_rejects_rho_missing_provenance_attr(dense_store_path):
 
 def test_validator_rejects_rho_variant_index_length_mismatch(dense_store_path):
     _build_fixture_rho(dense_store_path)
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="a")
+    root = open_store(dense_store_path).arrays(mode="a")
     root["rho"].attrs["n_variants_used"] = 999
 
     result = validate_store(dense_store_path)

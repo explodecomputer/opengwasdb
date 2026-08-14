@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import csv
 import gzip
-import json
-import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,6 +29,7 @@ from opengwasdb.model.enums import (
     StoredEffectScale,
 )
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
 from opengwasdb.traits.axis import TraitRecord, write_traits_axis
 from opengwasdb.variants.axis import (
     VARIANT_AXIS_FORMAT,
@@ -45,7 +44,6 @@ from opengwasdb.variants.normalise import (
     orient_to_canonical,
 )
 
-_FORMAT_VERSION = "0.1"
 _REFERENCE_ASSEMBLY = "GRCh38"
 _MISSING = {"", ".", "NA", "NaN", "nan", "None"}
 
@@ -162,98 +160,92 @@ def build_ragged_from_ssf(
         ) from exc
 
     out = Path(output_path)
-    if out.exists() and not overwrite:
-        raise FileExistsError(f"Store already exists: {out}. Use overwrite=True.")
-    if out.exists() and overwrite:
-        import shutil
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    with OpenGWASDBStore.staging(out, overwrite=overwrite) as staged:
+        analytes = _read_manifest(manifest_path, filtered_dir)
+        print(f"Manifest: {len(analytes)} analyses")
 
-    analytes = _read_manifest(manifest_path, filtered_dir)
-    print(f"Manifest: {len(analytes)} analyses")
+        # ── Pass 1: read every filtered file; collect per-analysis (alid,z,se) and
+        #            the global set of canonical variants ─────────────────────────
+        per_analysis: list[list[tuple[str, float, float]]] = []
+        alid_variant: dict[str, CanonicalVariant] = {}
+        rsid_by_alid: dict[str, str] = {}
+        for a in analytes:
+            recs: list[tuple[str, float, float]] = []
+            for variant, z, se, rsid in _read_filtered(a.filtered_path):
+                alid = variant.alid
+                recs.append((alid, z, se))
+                if alid not in alid_variant:
+                    alid_variant[alid] = variant
+                    if rsid and rsid.startswith("rs"):
+                        rsid_by_alid[alid] = rsid
+            per_analysis.append(recs)
+            print(f"  {a.gene_name or a.analysis_id}: {len(recs):,} associations")
 
-    # ── Pass 1: read every filtered file; collect per-analysis (alid,z,se) and
-    #            the global set of canonical variants ─────────────────────────
-    per_analysis: list[list[tuple[str, float, float]]] = []
-    alid_variant: dict[str, CanonicalVariant] = {}
-    rsid_by_alid: dict[str, str] = {}
-    for a in analytes:
-        recs: list[tuple[str, float, float]] = []
-        for variant, z, se, rsid in _read_filtered(a.filtered_path):
-            alid = variant.alid
-            recs.append((alid, z, se))
-            if alid not in alid_variant:
-                alid_variant[alid] = variant
-                if rsid and rsid.startswith("rs"):
-                    rsid_by_alid[alid] = rsid
-        per_analysis.append(recs)
-        print(f"  {a.gene_name or a.analysis_id}: {len(recs):,} associations")
-
-    # ── Variant axis: sort unique variants by (chr,pos), assign variant_index ─
-    variants = sorted(
-        alid_variant.values(),
-        key=lambda v: (chromosome_sort_key(v.chromosome), v.position),
-    )
-    alid_to_idx = {v.alid: i for i, v in enumerate(variants)}
-    print(f"Canonical variants: {len(variants):,}")
-    write_variant_axis(out, variants, rsid_by_alid)
-
-    # ── Traits axis + SQLite index (builder schema) ──────────────────────────
-    trait_records = [
-        TraitRecord(
-            analysis_index=a.analysis_index, analysis_id=a.analysis_id, trait_id=a.trait_id,
-            n=a.n, trait_chr=a.trait_chr, trait_bp=a.trait_bp,
-            gene_id=a.gene_id, gene_name=a.gene_name, tissue=a.tissue, context=a.context,
+        # ── Variant axis: sort unique variants by (chr,pos), assign variant_index ─
+        variants = sorted(
+            alid_variant.values(),
+            key=lambda v: (chromosome_sort_key(v.chromosome), v.position),
         )
-        for a in analytes
-    ]
-    write_traits_axis(out, trait_records)
-    _write_index_sqlite(out, trait_records)
+        alid_to_idx = {v.alid: i for i, v in enumerate(variants)}
+        print(f"Canonical variants: {len(variants):,}")
+        write_variant_axis(staged.path, variants, rsid_by_alid)
 
-    # ── Stream per-analysis associations into the CSR store ──────────────────
-    csr = RaggedCSRWriter()
-    for recs in per_analysis:
-        if not recs:
-            csr.add_analysis(
-                np.empty(0, np.int32), np.empty(0, np.float16), np.empty(0, np.float16)
+        # ── Traits axis + SQLite index (builder schema) ──────────────────────────
+        trait_records = [
+            TraitRecord(
+                analysis_index=a.analysis_index, analysis_id=a.analysis_id, trait_id=a.trait_id,
+                n=a.n, trait_chr=a.trait_chr, trait_bp=a.trait_bp,
+                gene_id=a.gene_id, gene_name=a.gene_name, tissue=a.tissue, context=a.context,
             )
-            continue
-        vi = np.fromiter(
-            (alid_to_idx[alid] for alid, _, _ in recs), dtype=np.int32, count=len(recs)
+            for a in analytes
+        ]
+        write_traits_axis(staged.path, trait_records)
+        _write_index_sqlite(staged, trait_records)
+
+        # ── Stream per-analysis associations into the CSR store ──────────────────
+        csr = RaggedCSRWriter()
+        for recs in per_analysis:
+            if not recs:
+                csr.add_analysis(
+                    np.empty(0, np.int32), np.empty(0, np.float16), np.empty(0, np.float16)
+                )
+                continue
+            vi = np.fromiter(
+                (alid_to_idx[alid] for alid, _, _ in recs), dtype=np.int32, count=len(recs)
+            )
+            z_arr = np.fromiter((zz for _, zz, _ in recs), dtype=np.float16, count=len(recs))
+            se_arr = np.fromiter((ss for _, _, ss in recs), dtype=np.float16, count=len(recs))
+            order = np.argsort(vi, kind="stable")
+            csr.add_analysis(vi[order], z_arr[order], se_arr[order])
+        csr.flush(staged.path)
+
+        build_ragged_top_hit_indexes(staged.path)
+
+        _write_manifest(
+            staged, store_id, release_id,
+            n_variants=len(variants), n_analyses=len(analytes),
+            n_associations=csr.n_associations, manifest_path=str(manifest_path),
+            stored_effect_scale=stored_effect_scale,
+            mhc_analyses=[a.analysis_id for a in analytes if a.mhc],
         )
-        z_arr = np.fromiter((zz for _, zz, _ in recs), dtype=np.float16, count=len(recs))
-        se_arr = np.fromiter((ss for _, _, ss in recs), dtype=np.float16, count=len(recs))
-        order = np.argsort(vi, kind="stable")
-        csr.add_analysis(vi[order], z_arr[order], se_arr[order])
-    csr.flush(out)
 
-    build_ragged_top_hit_indexes(out)
-
-    _write_manifest(
-        out, store_id, release_id,
-        n_variants=len(variants), n_analyses=len(analytes),
-        n_associations=csr.n_associations, manifest_path=str(manifest_path),
-        stored_effect_scale=stored_effect_scale,
-        mhc_analyses=[a.analysis_id for a in analytes if a.mhc],
-    )
-
-    result = RaggedBuildResult(out, len(variants), len(analytes), csr.n_associations)
-    print(
-        f"Build complete: {result.n_variants:,} variants, "
-        f"{result.n_analyses:,} analyses, {result.n_associations:,} associations"
-    )
+        result = RaggedBuildResult(out, len(variants), len(analytes), csr.n_associations)
+        print(
+            f"Build complete: {result.n_variants:,} variants, "
+            f"{result.n_analyses:,} analyses, {result.n_associations:,} associations"
+        )
     return result
 
 
 def _write_manifest(
-    out: Path, store_id: str, release_id: str, *,
+    staged: StagedRelease, store_id: str, release_id: str, *,
     n_variants: int, n_analyses: int, n_associations: int,
     manifest_path: str, stored_effect_scale: str, mhc_analyses: list[str],
 ) -> None:
     manifest = StoreManifest(
         store_id=store_id,
         release_id=release_id,
-        format_version=_FORMAT_VERSION,
+        format_version=CURRENT_FORMAT_VERSION,
         primary_layout=PrimaryStorageLayout.RAGGED,
         association_coverage=AssociationCoverage.CIS_AND_SIGNALS,
         completion_state=CompletionState.OBSERVED_ONLY,
@@ -279,15 +271,13 @@ def _write_manifest(
             },
         },
     )
-    (out / "manifest.json").write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    staged.write_manifest(manifest)
 
 
-def _write_index_sqlite(out: Path, trait_records: list[TraitRecord]) -> None:
+def _write_index_sqlite(staged: StagedRelease, trait_records: list[TraitRecord]) -> None:
     # Same schema as build_besd._write_index_sqlite (kept compatible with the
     # completion pipeline and query paths).
-    conn = sqlite3.connect(str(out / "index.sqlite"))
+    conn = staged.index_connection()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE analyses (

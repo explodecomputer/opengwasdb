@@ -10,10 +10,10 @@ import gzip
 from pathlib import Path
 
 import pytest
-import zarr
 
 from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+from opengwasdb.store.open import open_store
 from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants.axis import VariantAxis
 
@@ -201,7 +201,7 @@ def test_top_hit_index_built_inline(tmp_path):
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_ssf(manifest, filtered_dir, out, store_id="test", release_id="v1")
 
-    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+    root = open_store(out).arrays(mode="r")
     assert "top_hits" in root
     assert len(list(root["top_hits"].keys())) > 0
 

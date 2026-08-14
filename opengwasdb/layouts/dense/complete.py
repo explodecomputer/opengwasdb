@@ -46,7 +46,7 @@ from opengwasdb.completion.ld_panel import (
 from opengwasdb.completion.ld_panel import (
     snp_position as _snp_position,
 )
-from opengwasdb.index import connect, initialise_schema, set_metadata
+from opengwasdb.index import initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import (
     add_hit_counts,
     analysis_metadata_from_row,
@@ -61,6 +61,7 @@ from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.store.open import OpenGWASDBStore, StagedRelease, open_store
 from opengwasdb.variants import (
     CanonicalVariant,
     VariantAxis,
@@ -433,13 +434,9 @@ def _run_completion(
 ) -> CompletionResult:
     src = Path(source_path)
     dst = Path(dest_path)
-    work = _work_dir_for(dst)
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-
-    try:
-        manifest = StoreManifest.load(src)
+    with OpenGWASDBStore.staging(dst, overwrite=True) as staged:
+        source = open_store(src)
+        manifest = source.manifest
         if manifest.primary_layout is not PrimaryStorageLayout.DENSE:
             raise ValueError(
                 f"source store is not Dense (primary_layout={manifest.primary_layout})"
@@ -532,18 +529,18 @@ def _run_completion(
 
         rsid_by_alid = {v.alid: v.rsid for v in src_variants if v.rsid}
         print("Writing variants.tsv.gz...")
-        write_variant_axis(work, merged_variants, rsid_by_alid)
+        write_variant_axis(staged.path, merged_variants, rsid_by_alid)
 
         # Inverse map output_row -> source variant_index (-1 for panel-only rows).
         # z/se are seeded from the source band-by-band during the write (issue 044),
         # so the full source matrix is never loaded.
-        src_root = zarr.open_group(str(src / "data.zarr"), mode="r")
+        src_root = source.arrays(mode="r")
         out_to_src = np.full(n_variants, -1, dtype=np.int64)
         for v in src_variants:
             out_to_src[new_alid_to_idx[v.alid]] = v.variant_index
 
         print("Writing index.sqlite...")
-        with connect(work / "index.sqlite") as dst_db:
+        with staged.index_connection() as dst_db:
             initialise_schema(dst_db)
             dst_db.execute(
                 """
@@ -620,18 +617,18 @@ def _run_completion(
         union_rows_s = union_rows[o]
 
         effective_chunks = _create_completed_zarr(
-            work, n_variants, n_analyses, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE
+            staged, n_variants, n_analyses, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE
         )
         band_rows = _completion_band_rows(effective_chunks)
         fill_shard_dir, quality_count = _shard_checkpoint_fills_by_band(
-            blocks_dir, work, union_alids_s, union_rows_s, n_variants, band_rows
+            blocks_dir, staged, union_alids_s, union_rows_s, n_variants, band_rows
         )
         print(f"Wrote {quality_count:,} completion quality rows")
         del union_alids, union_rows, union_alids_s, union_rows_s, o
 
         print("Writing data.zarr (band-streamed)...")
         n_missing_off_panel, n_missing_imputation_failed, total_imputed = _write_completed_bands(
-            work, src_root, out_to_src, on_panel,
+            staged, src_root, out_to_src, on_panel,
             fill_shard_dir,
             effective_chunks, n_variants, n_analyses,
             impute_mask=impute_mask,
@@ -675,13 +672,10 @@ def _run_completion(
                 },
             },
         )
-        (work / "manifest.json").write_text(
-            json.dumps(completed_manifest.to_dict(), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        staged.write_manifest(completed_manifest)
 
         print("Writing analyses.tsv...")
-        with connect(work / "index.sqlite") as dst_db:
+        with staged.index_connection() as dst_db:
             quality_rollup = _completion_quality_rollup(dst_db, n_analyses)
         dst_analyses = [
             replace(
@@ -703,12 +697,8 @@ def _run_completion(
         ]
 
         print("Building top-hit indexes...")
-        build_top_hit_indexes(work)
-        write_analyses_tsv(work, add_hit_counts(work, dst_analyses))
-
-        if dst.exists():
-            shutil.rmtree(dst)
-        work.rename(dst)
+        build_top_hit_indexes(staged.path)
+        write_analyses_tsv(staged.path, add_hit_counts(staged.path, dst_analyses))
 
         result = CompletionResult(
             output_path=dst,
@@ -724,10 +714,7 @@ def _run_completion(
             f"{result.n_missing_off_panel:,} off-panel missing, "
             f"{result.n_missing_imputation_failed:,} imputation-failed)"
         )
-        return result
-    except Exception:
-        shutil.rmtree(work, ignore_errors=True)
-        raise
+    return result
 
 
 # Row-band height for streaming the completed matrix — the seed/fill/write pass
@@ -777,7 +764,7 @@ def _insert_completion_quality_batch(
 
 def _shard_checkpoint_fills_by_band(
     blocks_dir: Path,
-    work: Path,
+    staged: StagedRelease,
     union_alids_s: np.ndarray,
     union_rows_s: np.ndarray,
     n_variants: int,
@@ -790,7 +777,7 @@ def _shard_checkpoint_fills_by_band(
     ``(row, analysis, z, se)`` records to per-band files, and streams
     completion_quality directly into SQLite.
     """
-    fill_shard_dir = work / "fill_shards"
+    fill_shard_dir = staged.path / "fill_shards"
     if fill_shard_dir.exists():
         shutil.rmtree(fill_shard_dir)
     fill_shard_dir.mkdir()
@@ -799,7 +786,7 @@ def _shard_checkpoint_fills_by_band(
     quality_batch: list[tuple[int, str, float | None, int, int]] = []
     quality_batch_size = 100_000
 
-    with connect(work / "index.sqlite") as dst_db:
+    with staged.index_connection() as dst_db:
         for ckpt in sorted(blocks_dir.glob("*.npz")):
             with np.load(ckpt, allow_pickle=False) as d:
                 bid = str(d["block_id"][0])
@@ -860,7 +847,7 @@ def _shard_checkpoint_fills_by_band(
 
 
 def _create_completed_zarr(
-    output_path: Path,
+    staged: StagedRelease,
     n_variants: int,
     n_analyses: int,
     on_panel: np.ndarray,
@@ -871,7 +858,7 @@ def _create_completed_zarr(
     matrices are filled by ``_write_completed_bands``; on_panel is small enough to
     write in one shot."""
     effective_chunks = (min(chunk_shape[0], n_variants), min(chunk_shape[1], n_analyses))
-    root = zarr.open_group(str(output_path / "data.zarr"), mode="w")
+    root = staged.arrays(mode="w")
     for name in ("z", "se"):
         root.create_dataset(
             name, shape=(n_variants, n_analyses), chunks=effective_chunks,
@@ -893,7 +880,7 @@ def _create_completed_zarr(
 
 
 def _write_completed_bands(
-    output_path: Path,
+    staged: StagedRelease,
     src_root: Any,
     out_to_src: np.ndarray,
     on_panel: np.ndarray,
@@ -918,7 +905,7 @@ def _write_completed_bands(
     so its cells stay observed-only (NaN, ``imputed=0``) — never imputed against a
     non-matching-ancestry panel.
     """
-    root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
+    root = staged.arrays(mode="a")
     z_arr, se_arr, imp_arr = root["z"], root["se"], root["imputed"]
     src_z, src_se = src_root["z"], src_root["se"]
     band_rows = _completion_band_rows(effective_chunks)

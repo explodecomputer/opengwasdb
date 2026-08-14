@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import zarr
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
 from opengwasdb.completion.ld_panel import (
@@ -23,6 +22,7 @@ from opengwasdb.layouts.dense.complete import (
     resume_dense_completion,
 )
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation.validate import validate_store
 
 
@@ -33,8 +33,8 @@ def _assert_stores_identical(dst_a: Path, dst_b: Path) -> None:
     the imputed z/se *values* (and the imputed/on_panel masks) must match too.
     z/se are stored float16, so exact equality (NaN-aware) is the right check.
     """
-    root_a = zarr.open_group(str(dst_a / "data.zarr"), mode="r")
-    root_b = zarr.open_group(str(dst_b / "data.zarr"), mode="r")
+    root_a = open_store(dst_a).arrays(mode="r")
+    root_b = open_store(dst_b).arrays(mode="r")
     for name in ("z", "se"):
         arr_a = root_a[name][:]
         arr_b = root_b[name][:]
@@ -201,14 +201,14 @@ class TestCompletionFiles:
         comp_ax.close()
 
     def test_imputed_and_on_panel_arrays_present(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")
         assert "imputed" in root
         assert "on_panel" in root
         assert root["imputed"].shape == root["z"].shape
         assert root["on_panel"].shape[0] == root["z"].shape[0]
 
     def test_off_panel_variant_never_imputed(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")
         on_panel = root["on_panel"][:]
         imputed = root["imputed"][:]
         assert not np.any(imputed[on_panel == 0, :] == 1)
@@ -304,7 +304,7 @@ class TestValidation:
         assert result.ok, result.errors
 
     def test_corrupt_off_panel_imputed_fails(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        root = open_store(completed_store).arrays(mode="r+")
         on_panel = root["on_panel"][:]
         off_panel_rows = np.where(on_panel == 0)[0]
         assert len(off_panel_rows) > 0
@@ -319,7 +319,7 @@ class TestValidation:
         # finite-check band pass (issue 045), not just a full-matrix load. Mark
         # an on-panel cell imputed with a NaN z (on-panel so it isolates the
         # finite check from the off-panel-never-imputed check).
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        root = open_store(completed_store).arrays(mode="r+")
         on_panel = root["on_panel"][:]
         on_panel_rows = np.where(on_panel == 1)[0]
         assert len(on_panel_rows) > 0
@@ -337,7 +337,7 @@ class TestValidation:
     def test_corrupt_top_hit_imputed_index_fails(self, completed_store):
         from opengwasdb.layouts.dense.top_hits import threshold_key
 
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        root = open_store(completed_store).arrays(mode="r+")
         group = root[f"top_hits/{threshold_key(5e-4)}"]
         assert "imputed" in group
         values = group["imputed"][:]
@@ -369,7 +369,7 @@ class TestSourceFidelity:
         assert len(res["z"]) == 1
         row, col = int(res["variant_index"][0]), int(res["analysis_index"][0])
 
-        root = zarr.open_group(str(observed_store / "data.zarr"), mode="r+")
+        root = open_store(observed_store).arrays(mode="r+")
         z = root["z"][:]
         z[row, col] = -z[row, col]
         root["z"][:] = z
@@ -435,7 +435,7 @@ class TestQuery:
     def test_top_hit_index_stores_imputed_flags(self, completed_store):
         from opengwasdb.layouts.dense.top_hits import threshold_key
 
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r")
+        root = open_store(completed_store).arrays(mode="r")
         group = root[f"top_hits/{threshold_key(5e-4)}"]
         assert "imputed" in group
 
@@ -457,7 +457,7 @@ class TestQuery:
         q.close()
 
     def test_range_phewas_reads_imputed_status_as_block(self, completed_store):
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        root = open_store(completed_store).arrays(mode="r+")
         imputed = root["imputed"][:]
         imputed[0, 0] = 1
         root["imputed"][:] = imputed
@@ -480,7 +480,7 @@ class TestQuery:
         indexed = q.top_hits(threshold=5e-4)
         q.close()
 
-        root = zarr.open_group(str(completed_store / "data.zarr"), mode="r+")
+        root = open_store(completed_store).arrays(mode="r+")
         del root[f"top_hits/{threshold_key(5e-4)}"]["imputed"]
 
         q = query_store(completed_store)
@@ -806,5 +806,5 @@ class TestEigendecompositionOnlyPanelImputesRealCells:
             ancestry="EUR", min_cor=0.0, release_id="comp-signal-v1",
         )
 
-        root = zarr.open_group(str(dst / "data.zarr"), mode="r")
+        root = open_store(dst).arrays(mode="r")
         assert root["imputed"][:].sum() > 0

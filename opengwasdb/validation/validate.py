@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 import zarr
 
-from opengwasdb.index import connect
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
@@ -25,6 +24,7 @@ from opengwasdb.model.enums import (
 )
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
+from opengwasdb.store.open import OpenGWASDBStore, UnsupportedFormatVersion, open_store
 from opengwasdb.traits.axis import traits_table_path
 from opengwasdb.variants import (
     VariantAxis,
@@ -132,8 +132,9 @@ def _validate_dense_store(
     if errors:
         return ValidationResult(errors=errors)
 
+    store = OpenGWASDBStore(path=store_path, manifest=manifest)
     try:
-        with connect(index_path) as connection:
+        with store.index_connection() as connection:
             variant_axis = VariantAxis(store_path, connection)
             try:
                 n_variants = _validate_variant_axis(variant_axis, errors)
@@ -141,7 +142,7 @@ def _validate_dense_store(
             finally:
                 variant_axis.close()
             n_analyses = _validate_analyses_tsv(analyses_path, errors)
-            root = zarr.open_group(str(data_path), mode="r")
+            root = store.arrays(mode="r")
             imputed_arr = None
             on_panel_arr = None
             if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
@@ -270,6 +271,7 @@ def _validate_ragged_store(
     if errors:
         return ValidationResult(errors=errors)
 
+    store = OpenGWASDBStore(path=store_path, manifest=manifest)
     try:
         root = zarr.open_group(str(ragged_path), mode="r")
         for name in ("offsets", "variant_index", "z", "se"):
@@ -290,7 +292,7 @@ def _validate_ragged_store(
         if np.any(np.isfinite(se_vals) & (se_vals < 0)):
             errors.append("se contains negative finite values")
 
-        with sqlite3.connect(str(index_path)) as conn:
+        with store.index_connection() as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
@@ -305,7 +307,7 @@ def _validate_ragged_store(
                         f"zarr CSR offsets imply {n_analyses_csr} analyses"
                     )
 
-        data_root = zarr.open_group(str(data_path), mode="r")
+        data_root = store.arrays(mode="r")
 
         # Reference-completed stores: validate imputed array and quality table.
         if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
@@ -534,8 +536,9 @@ def _validate_hybrid_store(
         return ValidationResult(errors=errors)
 
     # 2. Shared union table structural checks.
+    store = OpenGWASDBStore(path=store_path, manifest=manifest)
     try:
-        with connect(store_path / "index.sqlite") as connection:
+        with store.index_connection() as connection:
             variant_axis = VariantAxis(store_path, connection)
             try:
                 n_shared = _validate_variant_axis(variant_axis, errors)
@@ -558,7 +561,7 @@ def _validate_hybrid_store(
         return ValidationResult(errors=errors)
 
     # 5. Overflow top-hit addressing and CSR consistency.
-    data_root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+    data_root = store.arrays(mode="r")
     if "top_hits" in data_root:
         _validate_ragged_top_hits(store_path, data_root, errors)
     return ValidationResult(errors=errors)
@@ -652,7 +655,9 @@ def _validate_hybrid_invariants(
 
 def _load_manifest(store_path: Path, errors: list[str]) -> StoreManifest | None:
     try:
-        return StoreManifest.load(store_path)
+        return open_store(store_path).manifest
+    except UnsupportedFormatVersion as exc:
+        errors.append(str(exc))
     except KeyError as exc:
         errors.append(f"manifest missing required field: {exc.args[0]}")
     except ValueError as exc:
@@ -1319,7 +1324,7 @@ def _validate_source_fidelity(
         return
 
     # Gather store z/se for the matched cells and compare (bounded block).
-    root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+    root = OpenGWASDBStore(path=store_path, manifest=manifest).arrays(mode="r")
     urows = sorted({pr[0] for pr in pairs})
     ucols = sorted({pr[1] for pr in pairs})
     ri = {r: i for i, r in enumerate(urows)}

@@ -15,9 +15,7 @@ the overflow indices are unchanged.
 
 from __future__ import annotations
 
-import json
 import logging
-import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +46,7 @@ from opengwasdb.model.enums import (
     PrimaryStorageLayout,
 )
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.store.open import OpenGWASDBStore, StagedRelease, open_store
 from opengwasdb.variants import VariantAxis
 
 log = logging.getLogger(__name__)
@@ -82,7 +81,8 @@ def complete_hybrid_store(
     src = Path(source_path)
     dst = Path(dest_path)
 
-    src_manifest = StoreManifest.load(src)
+    source = open_store(src)
+    src_manifest = source.manifest
     if src_manifest.primary_layout is not PrimaryStorageLayout.HYBRID:
         raise ValueError(
             f"source store is not Hybrid (primary_layout={src_manifest.primary_layout})"
@@ -92,12 +92,6 @@ def complete_hybrid_store(
             "source hybrid store is not Observed-Only "
             f"(completion_state={src_manifest.completion_state})"
         )
-
-    if dst.exists():
-        if not overwrite:
-            raise FileExistsError(f"Destination already exists: {dst}. Use overwrite=True.")
-        shutil.rmtree(dst)
-    dst.mkdir(parents=True)
 
     # Per-Analysis ancestry-match filter (ADR 0028): if the store's analyses.tsv
     # carries Assigned Ancestry, only impute Analyses whose value matches the
@@ -113,12 +107,12 @@ def complete_hybrid_store(
             len(matched), len(src_analyses), ancestry,
         )
 
-    try:
+    with OpenGWASDBStore.staging(dst, overwrite=overwrite) as staged:
         # ── 1. Complete the Dense Component (dense pipeline, unchanged) ────────
         log.info("Completing Dense Component via the dense reference-completion pipeline")
         dense_result = complete_dense_store(
             dense_component_path(src),
-            dense_component_path(dst),
+            dense_component_path(staged.path),
             ld_dir,
             ancestry=ancestry,
             min_cor=min_cor,
@@ -130,7 +124,7 @@ def complete_hybrid_store(
         )
 
         # ── 2. Rebuild the shared union table from the completed dense axis ────
-        dense_axis = VariantAxis(dense_component_path(dst))
+        dense_axis = VariantAxis(dense_component_path(staged.path))
         dense_records = dense_axis.all()
         dense_axis.close()
         dense_alids = [r.alid for r in dense_records]  # dense row order
@@ -163,14 +157,14 @@ def complete_hybrid_store(
         # completed_against (written by complete_dense_store, issue #22) --
         # re-reading it here and writing it back at the shared root is the one
         # place Analysis metadata is written, not a second provenance carry.
-        analyses = _read_analyses(dense_component_path(dst))
-        _write_index(dst, union, analyses, _chunk_shape(src_manifest), DEFAULT_DTYPE)
+        analyses = _read_analyses(dense_component_path(staged.path))
+        _write_index(staged, union, analyses, _chunk_shape(src_manifest), DEFAULT_DTYPE)
         source_by_alid = {a: source_alid_by_alid.get(a) for a in union}
-        _write_variant_table(dst, union, source_by_alid)
+        _write_variant_table(staged.path, union, source_by_alid)
 
         # ── 4. dense_to_shared map for the completed axis ─────────────────────
         dense_to_shared = np.array([new_shared_index[a] for a in dense_alids], dtype=np.int32)
-        np.save(dense_to_shared_path(dst), dense_to_shared)
+        np.save(dense_to_shared_path(staged.path), dense_to_shared)
 
         # ── 5. Rebuild the overflow CSR with remapped shared indices ──────────
         csr = RaggedCSRWriter()
@@ -191,37 +185,35 @@ def complete_hybrid_store(
             se = src_se[s:e].astype(np.float16)
             order = np.argsort(new_vi, kind="stable")
             csr.add_analysis(new_vi[order], z[order], se[order])
-        csr.flush(dst)
+        csr.flush(staged.path)
 
         # ── 6. Hybrid manifest (reference-completed) ──────────────────────────
         # Written before analyses.tsv/overview.html below: overview.html
         # reads manifest.json fresh from output_path for its header (ADR 0032).
         new_release = release_id or f"{src_manifest.release_id}-completed"
         _write_completed_manifest(
-            dst, src_manifest, new_release, n_shared, n_analyses, n_panel, n_off_panel,
+            staged, src_manifest, new_release, n_shared, n_analyses, n_panel, n_off_panel,
             csr.n_associations, dense_result.n_imputed,
         )
 
-        build_ragged_top_hit_indexes(dst)
+        build_ragged_top_hit_indexes(staged.path)
         # Dense Component counts already live on `analyses` (read back from
         # complete_dense_store's already-completed output); add the Ragged
         # Overflow Component's counts on top -- the two partition an
         # Analysis's associations disjointly (ADR 0032).
-        write_analyses_tsv(dst, add_hit_counts(dst, analyses))
+        write_analyses_tsv(staged.path, add_hit_counts(staged.path, analyses))
 
         log.info(
             "Hybrid completion complete: %d shared variants (%d panel + %d off-panel), "
             "%d imputed dense cells, %d overflow associations (observed-only)",
             n_shared, n_panel, n_off_panel, dense_result.n_imputed, csr.n_associations,
         )
-        return HybridCompletionResult(
-            output_path=dst, n_variants=n_shared, n_analyses=n_analyses,
-            n_panel=n_panel, n_off_panel=n_off_panel, n_overflow=csr.n_associations,
-            n_imputed=dense_result.n_imputed,
-        )
-    except Exception:
-        shutil.rmtree(dst, ignore_errors=True)
-        raise
+
+    return HybridCompletionResult(
+        output_path=dst, n_variants=n_shared, n_analyses=n_analyses,
+        n_panel=n_panel, n_off_panel=n_off_panel, n_overflow=csr.n_associations,
+        n_imputed=dense_result.n_imputed,
+    )
 
 
 def _chunk_shape(manifest: StoreManifest) -> tuple[int, int]:
@@ -241,7 +233,7 @@ def _read_analyses(dense_dir: Path) -> list[AnalysisMetadata]:
 
 
 def _write_completed_manifest(
-    dst: Path,
+    staged: StagedRelease,
     src_manifest: StoreManifest,
     release_id: str,
     n_variants: int,
@@ -280,6 +272,4 @@ def _write_completed_manifest(
             },
         },
     )
-    (dst / "manifest.json").write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    staged.write_manifest(manifest)

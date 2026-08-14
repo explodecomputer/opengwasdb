@@ -19,6 +19,7 @@ import pytest
 
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
 # hg19 positions used in fixtures and their expected hg38 positions
@@ -142,9 +143,7 @@ def test_manifest_json_has_grch38_assembly(two_trait_store):
 
 
 def test_store_has_correct_dimensions(two_trait_store):
-    import zarr
-
-    root = zarr.open_group(str(two_trait_store / "data.zarr"), mode="r")
+    root = open_store(two_trait_store).arrays(mode="r")
     assert root["z"].shape == (3, 2)
     assert root["se"].shape == (3, 2)
 
@@ -401,10 +400,8 @@ class TestParallel:
 
         assert validate_store(parallel_path).ok
 
-        import zarr
-
-        serial_root = zarr.open_group(str(serial_path / "data.zarr"), mode="r")
-        parallel_root = zarr.open_group(str(parallel_path / "data.zarr"), mode="r")
+        serial_root = open_store(serial_path).arrays(mode="r")
+        parallel_root = open_store(parallel_path).arrays(mode="r")
         serial_z = serial_root["z"][:]
         parallel_z = parallel_root["z"][:]
         serial_se = serial_root["se"][:]
@@ -431,8 +428,6 @@ class TestParallel:
 class TestTopHitHarvest:
     def test_harvest_matches_full_scan(self, tmp_path):
         """Top hits harvested during Pass 2 must equal a full-matrix rescan."""
-        import zarr
-
         from opengwasdb.layouts.dense.top_hits import (
             build_top_hit_indexes,
             threshold_key,
@@ -459,7 +454,7 @@ class TestTopHitHarvest:
         store = tmp_path / "store.opengwasdb"
         build_dense_from_vcf_manifest(manifest, store, store_id="s", release_id="r", n_workers=2)
 
-        root = zarr.open_group(str(store / "data.zarr"), mode="r")
+        root = open_store(store).arrays(mode="r")
         harvested = {
             t: root[f"top_hits/{threshold_key(t)}"]["z"][:]
             for t in (5e-4, 5e-6, 5e-8)
@@ -479,8 +474,6 @@ class TestTopHitHarvest:
         """Issue 046: the top-hit index z must equal the stored (float16) matrix
         value exactly, so the index agrees with what a query reads from `z`, and
         the store validates cleanly."""
-        import zarr
-
         from opengwasdb.layouts.dense.top_hits import threshold_key
 
         vcf = _make_vcf(
@@ -498,7 +491,7 @@ class TestTopHitHarvest:
 
         assert validate_store(store).ok
 
-        root = zarr.open_group(str(store / "data.zarr"), mode="r")
+        root = open_store(store).arrays(mode="r")
         z_matrix = root["z"][:]
         for t in (5e-4, 5e-6, 5e-8):
             g = root[f"top_hits/{threshold_key(t)}"]
@@ -526,8 +519,6 @@ class TestBandStreaming:
     def test_short_final_band_matches_single_band(self, tmp_path):
         """A 2-wide analysis chunk over 3 analyses (bands [0:2],[2:3]) must equal
         a single-band build byte-for-byte — exercises the short final band."""
-        import zarr
-
         manifest = self._three_trait_manifest(tmp_path)
 
         single = tmp_path / "single.opengwasdb"
@@ -542,8 +533,8 @@ class TestBandStreaming:
         )
 
         assert validate_store(banded).ok
-        rs = zarr.open_group(str(single / "data.zarr"), mode="r")
-        rb = zarr.open_group(str(banded / "data.zarr"), mode="r")
+        rs = open_store(single).arrays(mode="r")
+        rb = open_store(banded).arrays(mode="r")
         for name in ("z", "se"):
             a, b = rs[name][:], rb[name][:]
             np.testing.assert_array_equal(np.isnan(a), np.isnan(b))

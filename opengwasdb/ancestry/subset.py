@@ -24,10 +24,11 @@ filter, which reference version) has nowhere else to live, so
 from __future__ import annotations
 
 import csv
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+
+from opengwasdb.store.open import open_store
 
 log = logging.getLogger(__name__)
 
@@ -112,17 +113,14 @@ def record_catalogue_provenance(store_path: str | Path, subset: SubsetResult) ->
     rows carry ``assigned_ancestry`` verbatim), so only the Catalogue-level
     facts (which version, which filter) have nowhere else to live.
     """
-    manifest_path = Path(store_path) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["provenance"]["ancestry"] = {
-        "catalogue_version": subset.catalogue_version,
-        "subset_filter": subset.subset_filter,
-        "ancestry_reference_version": subset.ancestry_reference_version,
-        "n_analyses": subset.n_kept,
-    }
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    open_store(store_path).amend_provenance({
+        "ancestry": {
+            "catalogue_version": subset.catalogue_version,
+            "subset_filter": subset.subset_filter,
+            "ancestry_reference_version": subset.ancestry_reference_version,
+            "n_analyses": subset.n_kept,
+        }
+    })
 
 
 def build_hybrid_from_catalogue(
