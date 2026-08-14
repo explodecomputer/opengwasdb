@@ -5,13 +5,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import zarr
 
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+from opengwasdb.store.open import open_store
 from opengwasdb.traits.axis import TraitsAxisReader
-from opengwasdb.variants.axis import VariantAxis
 
 
 # ── Synthetic BESD fixture ────────────────────────────────────────────────────
@@ -195,7 +194,7 @@ def test_top_hit_index_built_inline(tmp_path):
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
 
-    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+    root = open_store(out).arrays(mode="r")
     assert "top_hits" in root
     # At least one threshold group must exist
     assert len(list(root["top_hits"].keys())) > 0
@@ -208,7 +207,7 @@ def test_top_hit_index_schema(tmp_path):
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
     build_ragged_top_hit_indexes(out)  # idempotent rebuild
 
-    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+    root = open_store(out).arrays(mode="r")
     for key in root["top_hits"]:
         group = root["top_hits"][key]
         for name in ("variant_index", "analysis_index", "abs_z", "z", "se", "p_value"):
@@ -226,7 +225,7 @@ def test_top_hit_z_values_match_csr(tmp_path):
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
 
     csr = RaggedCSRReader(out)
-    root = zarr.open_group(str(out / "data.zarr"), mode="r")
+    root = open_store(out).arrays(mode="r")
 
     # Use the loosest threshold to get all 5 hits
     loosest_key = sorted(root["top_hits"].keys())[-1]
@@ -282,7 +281,7 @@ def test_validation_rejects_ragged_top_hit_offsets(tmp_path):
     prefix = _make_besd_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
-    root = zarr.open_group(str(out / "data.zarr"), mode="r+")
+    root = open_store(out).arrays(mode="r+")
     offsets = root["top_hits/p_5e_04/analysis_offsets"][:]
     offsets[-1] -= 1
     root["top_hits/p_5e_04/analysis_offsets"][:] = offsets

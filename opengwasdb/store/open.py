@@ -1,57 +1,271 @@
-"""Open local Store Releases."""
+"""The Store Release envelope: paths, manifest, and atomic construction.
+
+``OpenGWASDBStore`` owns the physical shape of a Store Release on disk --
+where its artifacts live, how its manifest is read and amended, and how a
+release is staged and committed atomically. It does not own the contents of
+those artifacts: callers still work with ``zarr.Group`` and
+``sqlite3.Connection`` objects for array/table access.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import shutil
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterator
 
+import zarr
+
+from opengwasdb.model.enums import PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 
 if TYPE_CHECKING:
     from opengwasdb.query.facade import StoreQuery
 
+#: format_version values this build of opengwasdb can interpret.
+SUPPORTED_FORMAT_VERSIONS = frozenset({"0.1"})
 
-@dataclass(frozen=True)
-class OpenGWASDBStore:
-    """A local Store Release opened from an explicit path."""
+#: format_version stamped on releases written by this build.
+CURRENT_FORMAT_VERSION = "0.1"
 
-    path: Path
-    manifest: StoreManifest
+
+class UnsupportedFormatVersion(Exception):
+    """A release declares a format_version this build cannot interpret."""
+
+
+def _release_paths(path: Path) -> dict[str, Path]:
+    return {
+        "manifest": path / "manifest.json",
+        "data": path / "data.zarr",
+        "index": path / "index.sqlite",
+        "analyses": path / "analyses.tsv",
+        "variant_table": path / "variants.tsv.gz",
+        "variant_tabix": path / "variants.tsv.gz.tbi",
+        "variant_offsets": path / "variant_offsets.npy",
+        "traits_table": path / "traits.tsv.gz",
+    }
+
+
+class _ReleasePaths:
+    """Artifact-path properties shared by an opened release and a staged one.
+
+    Both ``OpenGWASDBStore`` and ``StagedRelease`` set ``_paths`` (via
+    ``_release_paths()``) in ``__post_init__`` and inherit these instead of
+    each re-deriving the same suffixes off ``self.path``.
+    """
+
+    _paths: dict[str, Path]
 
     @property
-    def index_path(self) -> Path:
-        return self.path / "index.sqlite"
+    def manifest_path(self) -> Path:
+        return self._paths["manifest"]
 
     @property
     def data_path(self) -> Path:
-        return self.path / "data.zarr"
+        return self._paths["data"]
+
+    @property
+    def index_path(self) -> Path:
+        return self._paths["index"]
+
+    @property
+    def analyses_path(self) -> Path:
+        return self._paths["analyses"]
 
     @property
     def variant_table_path(self) -> Path:
-        return self.path / "variants.tsv.gz"
+        return self._paths["variant_table"]
 
     @property
     def variant_tabix_path(self) -> Path:
-        return self.path / "variants.tsv.gz.tbi"
+        return self._paths["variant_tabix"]
 
     @property
     def variant_offsets_path(self) -> Path:
-        return self.path / "variant_offsets.npy"
+        return self._paths["variant_offsets"]
+
+    @property
+    def traits_table_path(self) -> Path:
+        return self._paths["traits_table"]
+
+
+@dataclass(frozen=True)
+class OpenGWASDBStore(_ReleasePaths):
+    """A local Store Release opened from an explicit path.
+
+    Frozen: the manifest a caller holds never changes under them. In-place
+    provenance amendment (``amend_provenance``) rebinds it to a fresh
+    instance rather than mutating this one.
+    """
+
+    path: Path
+    manifest: StoreManifest
+    _paths: dict[str, Path] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_paths", _release_paths(self.path))
+
+    # ---- opening -----------------------------------------------------------
+
+    @classmethod
+    def open(cls, path: str | Path) -> OpenGWASDBStore:
+        """Alias for the module-level :func:`open_store`."""
+        return open_store(path)
+
+    def dense_component(self) -> OpenGWASDBStore:
+        """Open a Hybrid release's nested Dense Component release.
+
+        The Dense Component (ADR 0026) is a self-contained Dense Store
+        Release at ``<store>/dense``, built and completed by the unchanged
+        dense machinery -- it is opened the same way any release is.
+        """
+        if self.manifest.primary_layout is not PrimaryStorageLayout.HYBRID:
+            raise ValueError(
+                "dense_component() is only valid for a Hybrid release "
+                f"(primary_layout={self.manifest.primary_layout})"
+            )
+        return open_store(self.path / "dense")
 
     def query(self) -> StoreQuery:
-        from opengwasdb.query.facade import StoreQuery
+        from opengwasdb.query.facade import query_store
 
-        return StoreQuery(self)
+        return query_store(self.path)
+
+    # ---- array / table access -----------------------------------------
+
+    def arrays(self, mode: str = "r") -> zarr.Group:
+        """Open this release's ``data.zarr`` group."""
+        return zarr.open_group(str(self.data_path), mode=mode)
+
+    def index_connection(self) -> sqlite3.Connection:
+        """Open a connection to this release's ``index.sqlite``."""
+        conn = sqlite3.connect(str(self.index_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    # ---- provenance amendment -------------------------------------------
+
+    def amend_provenance(self, patch: dict[str, Any]) -> OpenGWASDBStore:
+        """Fold additional facts into ``manifest.json``'s provenance dict, in place.
+
+        The one supported in-place write against a built release -- e.g.
+        folding release-level Catalogue facts into a store's manifest after
+        the fact (``ancestry/subset.py``), or a format migration updating its
+        own provenance (``scripts/migrate_store_to_analyses_tsv.py``).
+        Everything else that changes association data or metadata derives a
+        new release via ``staging()`` instead.
+
+        Returns a new ``OpenGWASDBStore`` bound to the amended manifest;
+        this instance is left untouched.
+        """
+        data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        data["provenance"] = {**data.get("provenance", {}), **patch}
+        self.manifest_path.write_text(
+            json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return OpenGWASDBStore(path=self.path, manifest=StoreManifest.from_dict(data))
+
+    # ---- staging / atomic construction ----------------------------------
+
+    @staticmethod
+    @contextmanager
+    def staging(dest_path: str | Path, *, overwrite: bool = False) -> Iterator[StagedRelease]:
+        """Construct a release atomically at ``dest_path``.
+
+        Writes happen in a ``.{name}.tmp`` sibling directory. On successful
+        exit from the ``with`` block, replacing an existing release
+        (``overwrite=True``) is two renames -- the old release out to a
+        ``.{name}.old`` sibling, the new one in -- rather than deleting the
+        old release first: a directory can only be renamed onto an *empty*
+        destination on POSIX, so a full ``rmtree`` before the swap would
+        leave no release at ``dest_path`` for however long the deletion of a
+        large store takes. Renames are single filesystem operations, so that
+        window shrinks to two syscalls, and if a crash lands between them the
+        old release is still intact at its ``.old`` path rather than gone.
+        On any exception -- including one raised by the commit-time renames
+        themselves -- ``dest_path`` is left as it was found: if the swap
+        fails after the old release has been moved aside but before the new
+        one has moved in, the old release is moved back rather than left
+        stranded at ``.{name}.old``.
+        """
+        dst = Path(dest_path)
+        if dst.exists() and not overwrite:
+            raise FileExistsError(f"output path already exists: {dst}")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        work = dst.with_name(f".{dst.name}.tmp")
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir(parents=True)
+
+        staged = StagedRelease(work)
+        try:
+            yield staged
+        except Exception:
+            shutil.rmtree(work, ignore_errors=True)
+            raise
+
+        if dst.exists():
+            old = dst.with_name(f".{dst.name}.old")
+            if old.exists():
+                shutil.rmtree(old)
+            dst.rename(old)
+            try:
+                work.rename(dst)
+            except Exception:
+                old.rename(dst)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            work.rename(dst)
+
+
+@dataclass(frozen=True)
+class StagedRelease(_ReleasePaths):
+    """A release under construction in a ``.tmp`` staging directory.
+
+    Offers the same path/array/table surface as an opened
+    ``OpenGWASDBStore``, plus ``write_manifest`` -- staging directories have
+    no manifest yet, so they are not themselves an ``OpenGWASDBStore`` until
+    committed.
+    """
+
+    path: Path
+    _paths: dict[str, Path] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_paths", _release_paths(self.path))
+
+    def arrays(self, mode: str = "w") -> zarr.Group:
+        return zarr.open_group(str(self.data_path), mode=mode)
+
+    def index_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.index_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def write_manifest(self, manifest: StoreManifest) -> None:
+        self.manifest_path.write_text(
+            json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
 
 def open_store(path: str | Path) -> OpenGWASDBStore:
     """Open a local Store Release directory.
 
-    The function intentionally opens exactly the path supplied by the caller.
-    Release discovery and default selection belong to a higher-level catalogue.
+    The function intentionally opens exactly the path supplied by the
+    caller. Release discovery and default selection belong to a higher-level
+    catalogue. Raises ``UnsupportedFormatVersion`` if the release declares a
+    format_version this build cannot interpret.
     """
 
     store_path = Path(path)
     manifest = StoreManifest.load(store_path)
+    if manifest.format_version not in SUPPORTED_FORMAT_VERSIONS:
+        raise UnsupportedFormatVersion(
+            f"release at {store_path} declares format_version={manifest.format_version!r}; "
+            f"supported: {sorted(SUPPORTED_FORMAT_VERSIONS)}"
+        )
     return OpenGWASDBStore(path=store_path, manifest=manifest)

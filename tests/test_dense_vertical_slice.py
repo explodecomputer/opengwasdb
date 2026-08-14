@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import zarr
 
 from opengwasdb.index import connect, get_metadata
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
 
@@ -23,7 +23,7 @@ def test_dense_build_writes_standard_envelope_and_metadata(dense_store_path):
     result = validate_store(dense_store_path)
     assert result.ok, result.errors
 
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r")
+    root = open_store(dense_store_path).arrays(mode="r")
     assert root["z"].shape == (3, 2)
     assert root["se"].shape == (3, 2)
     assert root["z"].chunks == (3, 2)  # clipped to array shape
@@ -175,7 +175,7 @@ def test_lookup_surgical_read_matches_direct_matrix(dense_store_path):
     # (and the same values) as a direct per-cell matrix read — no over- or
     # under-reporting when rows/cols are scattered and some cells are missing.
     query = query_store(dense_store_path)
-    root = zarr.open_group(str(dense_store_path / "data.zarr"), mode="r")
+    root = open_store(dense_store_path).arrays(mode="r")
     variants = query.variants_table()
     analyses = query.analyses_table()
     alids = [v["alid"] for v in variants.values()]

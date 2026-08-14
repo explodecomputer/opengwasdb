@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import zarr
 from numcodecs import Blosc
 
 from opengwasdb.build.source import NormalisedAssociation
-from opengwasdb.index import connect, create_lookup_indexes, initialise_schema, set_metadata
+from opengwasdb.index import create_lookup_indexes, initialise_schema, set_metadata
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
@@ -30,6 +27,7 @@ from opengwasdb.model.analyses import (
 )
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
 from opengwasdb.variants import (
     VARIANT_AXIS_FORMAT,
     VARIANT_OFFSETS_FILENAME,
@@ -236,16 +234,7 @@ def build_dense_observed_store(
         raise ValueError("cannot build a store with no association records")
 
     out = Path(output_path)
-    if out.exists():
-        if not overwrite:
-            raise FileExistsError(f"output path already exists: {out}")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    work = out.with_name(f".{out.name}.tmp")
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-
-    try:
+    with OpenGWASDBStore.staging(out, overwrite=overwrite) as staged:
         variants = _collect_variants(records)
         analyses = _collect_analyses(records)
         variant_index = {variant.alid: i for i, variant in enumerate(variants)}
@@ -269,19 +258,13 @@ def build_dense_observed_store(
             se[row, col] = record.se
 
         rsid_by_alid = _first_rsids_by_alid(records)
-        _write_manifest(work, store_id, release_id, reference_assembly, records, chunk_shape, dtype)
-        write_variant_axis(work, variants, rsid_by_alid)
-        _write_index(work, variants, analyses, records, chunk_shape, dtype)
-        _write_zarr(work, z, se, chunk_shape, dtype)
-        build_top_hit_indexes(work)
-        write_analyses_tsv(work, add_hit_counts(work, analyses))
-        if out.exists():
-            shutil.rmtree(out)
-        work.rename(out)
+        _write_manifest(staged, store_id, release_id, reference_assembly, records, chunk_shape, dtype)
+        write_variant_axis(staged.path, variants, rsid_by_alid)
+        _write_index(staged, variants, analyses, records, chunk_shape, dtype)
+        _write_zarr(staged, z, se, chunk_shape, dtype)
+        build_top_hit_indexes(staged.path)
+        write_analyses_tsv(staged.path, add_hit_counts(staged.path, analyses))
         return DenseBuildResult(output_path=out, n_variants=len(variants), n_analyses=len(analyses))
-    except Exception:
-        shutil.rmtree(work, ignore_errors=True)
-        raise
 
 
 def _collect_variants(records: list[NormalisedAssociation]) -> list[CanonicalVariant]:
@@ -317,7 +300,7 @@ def _collect_analyses(records: list[NormalisedAssociation]) -> list[AnalysisMeta
 
 
 def _write_manifest(
-    output_path: Path,
+    staged: StagedRelease,
     store_id: str,
     release_id: str,
     reference_assembly: str,
@@ -328,7 +311,7 @@ def _write_manifest(
     manifest = StoreManifest(
         store_id=store_id,
         release_id=release_id,
-        format_version="0.1",
+        format_version=CURRENT_FORMAT_VERSION,
         primary_layout=PrimaryStorageLayout.DENSE,
         association_coverage=AssociationCoverage.FULL,
         completion_state=CompletionState.OBSERVED_ONLY,
@@ -352,21 +335,18 @@ def _write_manifest(
             },
         },
     )
-    (output_path / "manifest.json").write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    staged.write_manifest(manifest)
 
 
 def _write_index(
-    output_path: Path,
+    staged: StagedRelease,
     variants: list[CanonicalVariant],
     analyses: list[AnalysisMetadata],
     records: list[NormalisedAssociation],
     chunk_shape: tuple[int, int],
     dtype: str,
 ) -> None:
-    with connect(output_path / "index.sqlite") as connection:
+    with staged.index_connection() as connection:
         initialise_schema(connection)
         set_metadata(connection, "schema_version", 2)
         set_metadata(connection, "n_variants", len(variants))
@@ -407,7 +387,7 @@ def _first_rsids_by_alid(records: list[NormalisedAssociation]) -> dict[str, str]
 
 
 def _write_zarr(
-    output_path: Path,
+    staged: StagedRelease,
     z: np.ndarray,
     se: np.ndarray,
     chunk_shape: tuple[int, int],
@@ -418,7 +398,7 @@ def _write_zarr(
     # is physically stored — oversized chunks cause zarr to allocate a large
     # decompression buffer even when the array is narrower than chunk_shape[1].
     effective_chunks = (min(chunk_shape[0], z.shape[0]), min(chunk_shape[1], z.shape[1]))
-    root = zarr.open_group(str(output_path / "data.zarr"), mode="w")
+    root = staged.arrays(mode="w")
     root.create_dataset("z", data=z, chunks=effective_chunks, compressor=compressor, dtype=dtype)
     root.create_dataset("se", data=se, chunks=effective_chunks, compressor=compressor, dtype=dtype)
     root.attrs["layout"] = "dense"

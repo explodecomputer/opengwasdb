@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 import zarr
 
-from opengwasdb.index import connect
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
@@ -23,8 +22,8 @@ from opengwasdb.model.enums import (
     PrimaryStorageLayout,
     StoredEffectScale,
 )
-from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.stats import p_value_from_z
+from opengwasdb.store.open import OpenGWASDBStore, UnsupportedFormatVersion, open_store
 from opengwasdb.traits.axis import traits_table_path
 from opengwasdb.variants import (
     VariantAxis,
@@ -72,38 +71,39 @@ def validate_store(
 
     store_path = Path(path)
     errors: list[str] = []
-    manifest = _load_manifest(store_path, errors)
-    if manifest is None:
+    store = _load_manifest(store_path, errors)
+    if store is None:
         return ValidationResult(errors=errors)
+    manifest = store.manifest
 
     if manifest.primary_layout is PrimaryStorageLayout.RAGGED:
-        _validate_ragged_store(store_path, manifest, errors)
+        _validate_ragged_store(store, errors)
         if source is not None:
             errors.append("source-fidelity check is only supported for dense stores")
         return ValidationResult(errors=errors)
 
     if manifest.primary_layout is PrimaryStorageLayout.HYBRID:
-        _validate_hybrid_store(store_path, manifest, errors)
+        _validate_hybrid_store(store, errors)
         if source is not None:
             errors.append("source-fidelity check is only supported for dense stores")
         return ValidationResult(errors=errors)
 
-    _validate_dense_store(store_path, manifest, errors)
+    _validate_dense_store(store, errors)
     if source is not None and not errors:
         _validate_source_fidelity(
-            store_path, manifest, source, errors,
+            store, source, errors,
             n_samples=fidelity_samples, seed=fidelity_seed,
             source_assembly=source_assembly, chain_file=chain_file,
         )
     return ValidationResult(errors=errors)
 
 
-def _validate_dense_store(
-    store_path: Path, manifest: StoreManifest, errors: list[str]
-) -> ValidationResult:
-    index_path = store_path / "index.sqlite"
-    data_path = store_path / "data.zarr"
-    analyses_path = store_path / "analyses.tsv"
+def _validate_dense_store(store: OpenGWASDBStore, errors: list[str]) -> ValidationResult:
+    store_path = store.path
+    manifest = store.manifest
+    index_path = store.index_path
+    data_path = store.data_path
+    analyses_path = store.analyses_path
     variants_path = variant_table_path(store_path)
     tabix_path = variant_tabix_path(store_path)
     offsets_path = variant_offsets_path(store_path)
@@ -133,7 +133,7 @@ def _validate_dense_store(
         return ValidationResult(errors=errors)
 
     try:
-        with connect(index_path) as connection:
+        with store.index_connection() as connection:
             variant_axis = VariantAxis(store_path, connection)
             try:
                 n_variants = _validate_variant_axis(variant_axis, errors)
@@ -141,7 +141,7 @@ def _validate_dense_store(
             finally:
                 variant_axis.close()
             n_analyses = _validate_analyses_tsv(analyses_path, errors)
-            root = zarr.open_group(str(data_path), mode="r")
+            root = store.arrays(mode="r")
             imputed_arr = None
             on_panel_arr = None
             if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
@@ -246,13 +246,11 @@ def _validate_completion_metadata(
     return imputed_arr, on_panel
 
 
-def _validate_ragged_store(
-    store_path: Path,
-    manifest: StoreManifest,
-    errors: list[str],
-) -> ValidationResult:
-    index_path = store_path / "index.sqlite"
-    data_path = store_path / "data.zarr"
+def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> ValidationResult:
+    store_path = store.path
+    manifest = store.manifest
+    index_path = store.index_path
+    data_path = store.data_path
     ragged_path = data_path / "ragged"
 
     for label, p in [
@@ -290,7 +288,7 @@ def _validate_ragged_store(
         if np.any(np.isfinite(se_vals) & (se_vals < 0)):
             errors.append("se contains negative finite values")
 
-        with sqlite3.connect(str(index_path)) as conn:
+        with store.index_connection() as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
@@ -305,11 +303,11 @@ def _validate_ragged_store(
                         f"zarr CSR offsets imply {n_analyses_csr} analyses"
                     )
 
-        data_root = zarr.open_group(str(data_path), mode="r")
+        data_root = store.arrays(mode="r")
 
         # Reference-completed stores: validate imputed array and quality table.
         if manifest.completion_state is CompletionState.REFERENCE_COMPLETED:
-            _validate_ragged_completion(ragged_path, index_path, n_assoc, errors)
+            _validate_ragged_completion(ragged_path, store, n_assoc, errors)
 
         if not errors and "top_hits" in data_root:
             _validate_ragged_top_hits(store_path, data_root, errors)
@@ -320,7 +318,7 @@ def _validate_ragged_store(
 
 def _validate_ragged_completion(
     ragged_path: Path,
-    index_path: Path,
+    store: OpenGWASDBStore,
     n_assoc: int,
     errors: list[str],
 ) -> None:
@@ -359,7 +357,7 @@ def _validate_ragged_completion(
         if np.any(imp[nan_z] == 1):
             errors.append("NaN z rows have imputed=1 (inconsistent)")
 
-    with sqlite3.connect(str(index_path)) as conn:
+    with store.index_connection() as conn:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
@@ -481,11 +479,7 @@ def _validate_ragged_top_hits(
                 break
 
 
-def _validate_hybrid_store(
-    store_path: Path,
-    manifest: StoreManifest,
-    errors: list[str],
-) -> ValidationResult:
+def _validate_hybrid_store(store: OpenGWASDBStore, errors: list[str]) -> ValidationResult:
     """Validate a Hybrid store (ADR 0026 / issue 059).
 
     Reuses the dense component validator on ``<store>/dense`` and adds only the
@@ -494,6 +488,8 @@ def _validate_hybrid_store(
     """
     from opengwasdb.model.enums import AssociationCoverage
 
+    store_path = store.path
+    manifest = store.manifest
     if manifest.association_coverage is not AssociationCoverage.FULL:
         errors.append(
             "hybrid store must have association_coverage=full "
@@ -519,23 +515,23 @@ def _validate_hybrid_store(
         return ValidationResult(errors=errors)
 
     # 1. Dense Component — reuse the dense validator unchanged.
-    dense_manifest = _load_manifest(dense_dir, errors)
-    if dense_manifest is None:
+    dense_store = _load_manifest(dense_dir, errors)
+    if dense_store is None:
         return ValidationResult(errors=errors)
-    if dense_manifest.primary_layout is not PrimaryStorageLayout.DENSE:
+    if dense_store.manifest.primary_layout is not PrimaryStorageLayout.DENSE:
         errors.append(
             f"Dense Component manifest must be primary_layout=dense "
-            f"(got {dense_manifest.primary_layout.value})"
+            f"(got {dense_store.manifest.primary_layout.value})"
         )
         return ValidationResult(errors=errors)
     before = len(errors)
-    _validate_dense_store(dense_dir, dense_manifest, errors)
+    _validate_dense_store(dense_store, errors)
     if len(errors) > before:
         return ValidationResult(errors=errors)
 
     # 2. Shared union table structural checks.
     try:
-        with connect(store_path / "index.sqlite") as connection:
+        with store.index_connection() as connection:
             variant_axis = VariantAxis(store_path, connection)
             try:
                 n_shared = _validate_variant_axis(variant_axis, errors)
@@ -558,7 +554,7 @@ def _validate_hybrid_store(
         return ValidationResult(errors=errors)
 
     # 5. Overflow top-hit addressing and CSR consistency.
-    data_root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+    data_root = store.arrays(mode="r")
     if "top_hits" in data_root:
         _validate_ragged_top_hits(store_path, data_root, errors)
     return ValidationResult(errors=errors)
@@ -650,9 +646,11 @@ def _validate_hybrid_invariants(
         shared_axis.close()
 
 
-def _load_manifest(store_path: Path, errors: list[str]) -> StoreManifest | None:
+def _load_manifest(store_path: Path, errors: list[str]) -> OpenGWASDBStore | None:
     try:
-        return StoreManifest.load(store_path)
+        return open_store(store_path)
+    except UnsupportedFormatVersion as exc:
+        errors.append(str(exc))
     except KeyError as exc:
         errors.append(f"manifest missing required field: {exc.args[0]}")
     except ValueError as exc:
@@ -1232,8 +1230,7 @@ def _resolve_via_origin(store_path: Path, wanted: set[str]) -> dict[str, int] | 
 
 
 def _validate_source_fidelity(
-    store_path: Path,
-    manifest: StoreManifest,
+    store: OpenGWASDBStore,
     source: str | Path | Sequence[str | Path],
     errors: list[str],
     *,
@@ -1242,6 +1239,8 @@ def _validate_source_fidelity(
     source_assembly: str | None,
     chain_file: str | Path | None,
 ) -> None:
+    store_path = store.path
+    manifest = store.manifest
     units = _source_units(source, errors)
     if errors or not units:
         return
@@ -1319,7 +1318,7 @@ def _validate_source_fidelity(
         return
 
     # Gather store z/se for the matched cells and compare (bounded block).
-    root = zarr.open_group(str(store_path / "data.zarr"), mode="r")
+    root = store.arrays(mode="r")
     urows = sorted({pr[0] for pr in pairs})
     ucols = sorted({pr[1] for pr in pairs})
     ri = {r: i for i, r in enumerate(urows)}

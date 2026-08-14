@@ -10,7 +10,6 @@ assumption is left in this module.
 from __future__ import annotations
 
 import csv
-import json
 import logging
 import multiprocessing
 import shutil
@@ -22,11 +21,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import zarr
 from numcodecs import Blosc
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.index import connect, initialise_schema, set_metadata
+from opengwasdb.index import initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import (
     AnalysisMetadata,
     DenseBuildResult,
@@ -52,6 +50,7 @@ from opengwasdb.model.enums import (
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY
 from opengwasdb.readers.registry import resolve_reader
+from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 from opengwasdb.variants.normalise import chromosome_sort_key
 
@@ -433,191 +432,188 @@ def build_dense_from_vcf_manifest(
         raise ValueError(f"manifest {manifest_path} contains no rows")
 
     out = Path(output_path)
-    if out.exists():
-        if not overwrite:
-            raise FileExistsError(f"output path already exists: {out}")
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-
-    # ------------------------------------------------------------------
-    # Pass 1: collect union variant set across all VCFs
-    # ------------------------------------------------------------------
-    # Pass 1 is intentionally serial. It streams each VCF's variants into one
-    # growing union set; parallelising it would force each worker to ship its
-    # whole variant set back over IPC, and since same-cohort VCFs share nearly
-    # identical variant lists the union converges almost immediately — so the
-    # parallel version pays a large IPC cost for no real speedup (and deadlocked
-    # at genome-wide scale). The expensive, parallelised work is Pass 2.
-    log.info(
-        "Pass 1: collecting union variant set from %d VCFs (serial)",
-        len(manifest_rows),
-    )
-    hg19_tuples: set[tuple[str, int, str, str]] = set()
-    pass1_start = time.monotonic()
-    n_rows = len(manifest_rows)
-    for i, row in enumerate(manifest_rows):
-        reader = resolve_reader(
-            row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+    with OpenGWASDBStore.staging(out, overwrite=overwrite) as staged:
+        # ------------------------------------------------------------------
+        # Pass 1: collect union variant set across all VCFs
+        # ------------------------------------------------------------------
+        # Pass 1 is intentionally serial. It streams each VCF's variants into one
+        # growing union set; parallelising it would force each worker to ship its
+        # whole variant set back over IPC, and since same-cohort VCFs share nearly
+        # identical variant lists the union converges almost immediately — so the
+        # parallel version pays a large IPC cost for no real speedup (and deadlocked
+        # at genome-wide scale). The expensive, parallelised work is Pass 2.
+        log.info(
+            "Pass 1: collecting union variant set from %d VCFs (serial)",
+            len(manifest_rows),
         )
-        hg19_tuples.update(reader.stream_variants())
-        _log_progress(
-            "Pass 1", i + 1, n_rows, pass1_start,
-            f"{len(hg19_tuples)} unique variants so far", every=250,
+        hg19_tuples: set[tuple[str, int, str, str]] = set()
+        pass1_start = time.monotonic()
+        n_rows = len(manifest_rows)
+        for i, row in enumerate(manifest_rows):
+            reader = resolve_reader(
+                row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+            )
+            hg19_tuples.update(reader.stream_variants())
+            _log_progress(
+                "Pass 1", i + 1, n_rows, pass1_start,
+                f"{len(hg19_tuples)} unique variants so far", every=250,
+            )
+        log.info("Pass 1 complete: %d unique hg19 variants", len(hg19_tuples))
+
+        # ------------------------------------------------------------------
+        # Liftover: hg19 → hg38 (single LiftOver object for entire batch)
+        # ------------------------------------------------------------------
+        log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
+        hg19_lookup = build_liftover_lookup(
+            hg19_tuples,
+            from_build="hg19",
+            to_build="hg38",
+            failure_threshold=liftover_failure_threshold,
+            chain_file=chain_file,
         )
-    log.info("Pass 1 complete: %d unique hg19 variants", len(hg19_tuples))
+        log.info("Liftover complete: %d variants mapped", len(hg19_lookup))
 
-    # ------------------------------------------------------------------
-    # Liftover: hg19 → hg38 (single LiftOver object for entire batch)
-    # ------------------------------------------------------------------
-    log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
-    hg19_lookup = build_liftover_lookup(
-        hg19_tuples,
-        from_build="hg19",
-        to_build="hg38",
-        failure_threshold=liftover_failure_threshold,
-        chain_file=chain_file,
-    )
-    log.info("Liftover complete: %d variants mapped", len(hg19_lookup))
+        # Sort hg38 ALIDs by (chromosome, position, a1, a2)
+        hg38_alids = sorted(set(hg19_lookup.values()), key=_alid_sort_key)
+        n_variants = len(hg38_alids)
+        n_analyses = len(manifest_rows)
+        variant_index: dict[str, int] = {alid: i for i, alid in enumerate(hg38_alids)}
+        analysis_index: dict[str, int] = {row.trait_id: i for i, row in enumerate(manifest_rows)}
 
-    # Sort hg38 ALIDs by (chromosome, position, a1, a2)
-    hg38_alids = sorted(set(hg19_lookup.values()), key=_alid_sort_key)
-    n_variants = len(hg38_alids)
-    n_analyses = len(manifest_rows)
-    variant_index: dict[str, int] = {alid: i for i, alid in enumerate(hg38_alids)}
-    analysis_index: dict[str, int] = {row.trait_id: i for i, row in enumerate(manifest_rows)}
+        # ------------------------------------------------------------------
+        # Analytical Metadata: stored_effect_scale comes from the manifest, not
+        # the VCF header (issue #17 -- the ieu-a-7 fix: the source header is not
+        # authoritative for effect scale).
+        # ------------------------------------------------------------------
+        analyses: list[AnalysisMetadata] = [
+            _manifest_row_to_analysis_metadata(row) for row in manifest_rows
+        ]
 
-    # ------------------------------------------------------------------
-    # Analytical Metadata: stored_effect_scale comes from the manifest, not
-    # the VCF header (issue #17 -- the ieu-a-7 fix: the source header is not
-    # authoritative for effect scale).
-    # ------------------------------------------------------------------
-    analyses: list[AnalysisMetadata] = [
-        _manifest_row_to_analysis_metadata(row) for row in manifest_rows
-    ]
+        # ------------------------------------------------------------------
+        # Write SQLite index + analyses.tsv + tabix variant axis
+        # ------------------------------------------------------------------
+        _write_index(staged, hg38_alids, analyses, chunk_shape, dtype)
+        canonical_variants = [
+            CanonicalVariant(
+                chromosome=chrom,
+                position=int(pos_str),
+                effect_allele=a1,
+                other_allele=a2,
+            )
+            for alid in hg38_alids
+            for chrom, pos_str, a1, a2 in [alid.split(":")]
+        ]
+        # Provenance: record the source (hg19) canonical ALID each row was lifted
+        # from. A single hg38 ALID can be the liftover target of several hg19
+        # variants (a collision); those rows are ambiguous, so leave them blank.
+        hg38_to_source: dict[str, str | None] = {}
+        for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
+            a1, a2 = sorted((ref, alt))
+            origin = f"{chrom}:{pos}:{a1}:{a2}"
+            if hg38_alid in hg38_to_source:
+                if hg38_to_source[hg38_alid] != origin:
+                    hg38_to_source[hg38_alid] = None  # collision → ambiguous
+            else:
+                hg38_to_source[hg38_alid] = origin
+        source_alids = [hg38_to_source.get(alid) for alid in hg38_alids]
+        write_variant_axis(staged.path, canonical_variants, {}, source_alids)
 
-    # ------------------------------------------------------------------
-    # Write SQLite index + analyses.tsv + tabix variant axis
-    # ------------------------------------------------------------------
-    _write_index(out, hg38_alids, analyses, chunk_shape, dtype)
-    canonical_variants = [
-        CanonicalVariant(
-            chromosome=chrom,
-            position=int(pos_str),
-            effect_allele=a1,
-            other_allele=a2,
+        # ------------------------------------------------------------------
+        # Fork-safe Pass 2 lookup: compose the two dicts into sorted numpy arrays so
+        # workers binary-search them instead of chaining Python dicts — no per-worker
+        # refcount-COW of ~n_variants dict pages (issue 043 item 2).
+        # ------------------------------------------------------------------
+        keys_sorted, rows_sorted = _build_variant_key_index(hg19_lookup, variant_index)
+        max_key_len = keys_sorted.dtype.itemsize if len(keys_sorted) else 0
+        log.info(
+            "Pass 2 lookup: %d variant keys, max key length %d bytes",
+            len(keys_sorted), max_key_len,
         )
-        for alid in hg38_alids
-        for chrom, pos_str, a1, a2 in [alid.split(":")]
-    ]
-    # Provenance: record the source (hg19) canonical ALID each row was lifted
-    # from. A single hg38 ALID can be the liftover target of several hg19
-    # variants (a collision); those rows are ambiguous, so leave them blank.
-    hg38_to_source: dict[str, str | None] = {}
-    for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
-        a1, a2 = sorted((ref, alt))
-        origin = f"{chrom}:{pos}:{a1}:{a2}"
-        if hg38_alid in hg38_to_source:
-            if hg38_to_source[hg38_alid] != origin:
-                hg38_to_source[hg38_alid] = None  # collision → ambiguous
-        else:
-            hg38_to_source[hg38_alid] = origin
-    source_alids = [hg38_to_source.get(alid) for alid in hg38_alids]
-    write_variant_axis(out, canonical_variants, {}, source_alids)
+        del hg19_lookup, variant_index  # free the parent-side dicts before Pass 2
 
-    # ------------------------------------------------------------------
-    # Fork-safe Pass 2 lookup: compose the two dicts into sorted numpy arrays so
-    # workers binary-search them instead of chaining Python dicts — no per-worker
-    # refcount-COW of ~n_variants dict pages (issue 043 item 2).
-    # ------------------------------------------------------------------
-    keys_sorted, rows_sorted = _build_variant_key_index(hg19_lookup, variant_index)
-    max_key_len = keys_sorted.dtype.itemsize if len(keys_sorted) else 0
-    log.info(
-        "Pass 2 lookup: %d variant keys, max key length %d bytes",
-        len(keys_sorted), max_key_len,
-    )
-    del hg19_lookup, variant_index  # free the parent-side dicts before Pass 2
+        # ------------------------------------------------------------------
+        # Create the empty z/se zarr datasets (NaN fill). Pass 2 streams each analysis
+        # column to disk; the band-write phase then fills chunk-column bands without
+        # ever holding the full (n_variants × n_analyses) matrix in memory (issue 043).
+        # ------------------------------------------------------------------
+        effective_chunks = _create_dense_zarr(staged, n_variants, n_analyses, chunk_shape, dtype)
 
-    # ------------------------------------------------------------------
-    # Create the empty z/se zarr datasets (NaN fill). Pass 2 streams each analysis
-    # column to disk; the band-write phase then fills chunk-column bands without
-    # ever holding the full (n_variants × n_analyses) matrix in memory (issue 043).
-    # ------------------------------------------------------------------
-    effective_chunks = _create_dense_zarr(out, n_variants, n_analyses, chunk_shape, dtype)
-
-    # ------------------------------------------------------------------
-    # Pass 2 fill: resolve each analysis column and spill it to disk. No matrix is
-    # resident here — the parent only waits for completion.
-    # ------------------------------------------------------------------
-    log.info(
-        "Pass 2: resolving %d analyses × %d variants (n_workers=%d)",
-        n_analyses, n_variants, n_workers,
-    )
-    pass2_start = time.monotonic()
-    spill_dir = Path(tempfile.mkdtemp(prefix=f".{out.name}.pass2spill.", dir=out.parent))
-    try:
-        if n_workers <= 1:
-            for i, row in enumerate(manifest_rows):
-                col_idx = analysis_index[row.trait_id]
-                rows, z, se = _resolve_column(
-                    row.file_path,
-                    keys_sorted,
-                    rows_sorted,
-                    row.se_divisor,
-                    capability=row.source_reader_capability,
-                    stored_effect_scale=row.stored_effect_scale,
-                )
-                _spill_column(spill_dir, col_idx, rows, z, se)
-                _log_progress(
-                    "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
-                )
-        else:
-            global _pass2_keys_sorted, _pass2_rows_sorted, _pass2_spill_dir
-            _pass2_keys_sorted = keys_sorted
-            _pass2_rows_sorted = rows_sorted
-            _pass2_spill_dir = spill_dir
-            id_by_col = {analysis_index[row.trait_id]: row.trait_id for row in manifest_rows}
-            try:
-                with _fork_pool(n_workers) as pool:
-                    tasks = [
-                        (
-                            analysis_index[row.trait_id],
-                            row.file_path,
-                            row.se_divisor,
-                            row.source_reader_capability,
-                            row.stored_effect_scale,
-                        )
-                        for row in manifest_rows
-                    ]
-                    futures = [pool.submit(_pass2_worker, t) for t in tasks]
-                    for i, fut in enumerate(as_completed(futures)):
-                        col_idx = fut.result()
-                        _log_progress(
-                            "Pass 2", i + 1, n_analyses, pass2_start,
-                            f"last: {id_by_col[col_idx]}", every=25,
-                        )
-            finally:
-                _pass2_keys_sorted = None
-                _pass2_rows_sorted = None
-                _pass2_spill_dir = None
-
-        # --------------------------------------------------------------
-        # Band-write phase: stream the retained column spills into the zarr in
-        # chunk-column bands, harvesting top-hit candidates as we go. Peak memory
-        # is one band (n_variants × chunk-analysis-width), not the full matrix.
-        # --------------------------------------------------------------
-        all_rows, all_cols, all_z, all_se = _write_dense_bands(
-            out, spill_dir, n_variants, n_analyses, effective_chunks, dtype, pass2_start
+        # ------------------------------------------------------------------
+        # Pass 2 fill: resolve each analysis column and spill it to disk. No matrix is
+        # resident here — the parent only waits for completion.
+        # ------------------------------------------------------------------
+        log.info(
+            "Pass 2: resolving %d analyses × %d variants (n_workers=%d)",
+            n_analyses, n_variants, n_workers,
         )
-    finally:
-        shutil.rmtree(spill_dir, ignore_errors=True)
+        pass2_start = time.monotonic()
+        spill_dir = Path(
+            tempfile.mkdtemp(prefix=f".{out.name}.pass2spill.", dir=staged.path.parent)
+        )
+        try:
+            if n_workers <= 1:
+                for i, row in enumerate(manifest_rows):
+                    col_idx = analysis_index[row.trait_id]
+                    rows, z, se = _resolve_column(
+                        row.file_path,
+                        keys_sorted,
+                        rows_sorted,
+                        row.se_divisor,
+                        capability=row.source_reader_capability,
+                        stored_effect_scale=row.stored_effect_scale,
+                    )
+                    _spill_column(spill_dir, col_idx, rows, z, se)
+                    _log_progress(
+                        "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
+                    )
+            else:
+                global _pass2_keys_sorted, _pass2_rows_sorted, _pass2_spill_dir
+                _pass2_keys_sorted = keys_sorted
+                _pass2_rows_sorted = rows_sorted
+                _pass2_spill_dir = spill_dir
+                id_by_col = {analysis_index[row.trait_id]: row.trait_id for row in manifest_rows}
+                try:
+                    with _fork_pool(n_workers) as pool:
+                        tasks = [
+                            (
+                                analysis_index[row.trait_id],
+                                row.file_path,
+                                row.se_divisor,
+                                row.source_reader_capability,
+                                row.stored_effect_scale,
+                            )
+                            for row in manifest_rows
+                        ]
+                        futures = [pool.submit(_pass2_worker, t) for t in tasks]
+                        for i, fut in enumerate(as_completed(futures)):
+                            col_idx = fut.result()
+                            _log_progress(
+                                "Pass 2", i + 1, n_analyses, pass2_start,
+                                f"last: {id_by_col[col_idx]}", every=25,
+                            )
+                finally:
+                    _pass2_keys_sorted = None
+                    _pass2_rows_sorted = None
+                    _pass2_spill_dir = None
 
-    _write_manifest(
-        out, store_id, release_id, n_variants, n_analyses, chain_file, chunk_shape, dtype
-    )
-    log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
-    write_top_hit_indexes(out, all_rows, all_cols, all_z, all_se)
-    write_analyses_tsv(out, add_hit_counts(out, analyses))
-    log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
+            # --------------------------------------------------------------
+            # Band-write phase: stream the retained column spills into the zarr in
+            # chunk-column bands, harvesting top-hit candidates as we go. Peak memory
+            # is one band (n_variants × chunk-analysis-width), not the full matrix.
+            # --------------------------------------------------------------
+            all_rows, all_cols, all_z, all_se = _write_dense_bands(
+                staged, spill_dir, n_variants, n_analyses, effective_chunks, dtype, pass2_start
+            )
+        finally:
+            shutil.rmtree(spill_dir, ignore_errors=True)
+
+        _write_manifest(
+            staged, store_id, release_id, n_variants, n_analyses, chain_file, chunk_shape, dtype
+        )
+        log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
+        write_top_hit_indexes(staged.path, all_rows, all_cols, all_z, all_se)
+        write_analyses_tsv(staged.path, add_hit_counts(staged.path, analyses))
+        log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
 
     return DenseBuildResult(output_path=out, n_variants=n_variants, n_analyses=n_analyses)
 
@@ -747,13 +743,13 @@ def _alid_sort_key(alid: str) -> tuple:
 
 
 def _write_index(
-    output_path: Path,
+    staged: StagedRelease,
     hg38_alids: list[str],
     analyses: list[AnalysisMetadata],
     chunk_shape: tuple[int, int],
     dtype: str,
 ) -> None:
-    with connect(output_path / "index.sqlite") as connection:
+    with staged.index_connection() as connection:
         initialise_schema(connection)
         set_metadata(connection, "schema_version", 1)
         set_metadata(connection, "n_variants", len(hg38_alids))
@@ -784,7 +780,7 @@ def _parse_alid(alid: str) -> tuple[str, int, str, str]:
 
 
 def _create_dense_zarr(
-    output_path: Path,
+    staged: StagedRelease,
     n_variants: int,
     n_analyses: int,
     chunk_shape: tuple[int, int],
@@ -798,7 +794,7 @@ def _create_dense_zarr(
     """
     compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
     effective_chunks = (min(chunk_shape[0], n_variants), min(chunk_shape[1], n_analyses))
-    root = zarr.open_group(str(output_path / "data.zarr"), mode="w")
+    root = staged.arrays(mode="w")
     for name in ("z", "se"):
         root.create_dataset(
             name,
@@ -816,7 +812,7 @@ def _create_dense_zarr(
 
 
 def _write_dense_bands(
-    output_path: Path,
+    staged: StagedRelease,
     spill_dir: Path,
     n_variants: int,
     n_analyses: int,
@@ -834,7 +830,7 @@ def _write_dense_bands(
     are retained until the se-pass consumes them. Returns the concatenated top-hit
     candidate arrays ``(rows, cols, z, se)`` for the index build.
     """
-    root = zarr.open_group(str(output_path / "data.zarr"), mode="a")
+    root = staged.arrays(mode="a")
     z_arr = root["z"]
     se_arr = root["se"]
     band_cols = effective_chunks[1]
@@ -900,7 +896,7 @@ def _write_dense_bands(
 
 
 def _write_manifest(
-    output_path: Path,
+    staged: StagedRelease,
     store_id: str,
     release_id: str,
     n_variants: int,
@@ -912,7 +908,7 @@ def _write_manifest(
     manifest = StoreManifest(
         store_id=store_id,
         release_id=release_id,
-        format_version="0.1",
+        format_version=CURRENT_FORMAT_VERSION,
         primary_layout=PrimaryStorageLayout.DENSE,
         association_coverage=AssociationCoverage.FULL,
         completion_state=CompletionState.OBSERVED_ONLY,
@@ -932,7 +928,4 @@ def _write_manifest(
             },
         },
     )
-    (output_path / "manifest.json").write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    staged.write_manifest(manifest)

@@ -48,6 +48,7 @@ from pathlib import Path
 
 from opengwasdb.layouts.dense.build import AnalysisMetadata, add_hit_counts, write_analyses_tsv
 from opengwasdb.model.enums import OriginalSdMethod
+from opengwasdb.store.open import open_store
 
 _ANCESTRY_SIDECAR = "ancestry.tsv"
 _ANCESTRY_PROVENANCE = "ancestry_provenance.json"
@@ -107,12 +108,7 @@ def _fold_ancestry_provenance(store_path: Path) -> None:
     if not provenance_path.exists():
         return
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    manifest_path = store_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest.setdefault("provenance", {})["ancestry"] = provenance
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    open_store(store_path).amend_provenance({"ancestry": provenance})
     provenance_path.unlink()
 
 

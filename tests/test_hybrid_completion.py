@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import gzip
 import io
-from pathlib import Path
 
 import numpy as np
-import zarr
 
 from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
@@ -21,6 +19,7 @@ from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
 PANEL_ALIDS = ["1:100000:A:G", "1:814620:A:G", "1:1064620:A:G", "1:1564620:A:G"]
@@ -126,13 +125,13 @@ def test_hybrid_completion(tmp_path):
     assert manifest.primary_layout.value == "hybrid"
 
     # Dense Component carries imputed + on_panel arrays.
-    dense_root = zarr.open_group(str(dst / "dense" / "data.zarr"), mode="r")
+    dense_root = open_store(dst).dense_component().arrays(mode="r")
     assert "imputed" in dense_root
     assert "on_panel" in dense_root
 
     # Overflow is observed-only, untouched (byte-identical z/se).
-    src_ovf = zarr.open_group(str(src / "data.zarr" / "ragged"), mode="r")
-    dst_ovf = zarr.open_group(str(dst / "data.zarr" / "ragged"), mode="r")
+    src_ovf = open_store(src).arrays(mode="r")["ragged"]
+    dst_ovf = open_store(dst).arrays(mode="r")["ragged"]
     assert "imputed" not in dst_ovf
     assert np.array_equal(src_ovf["z"][:], dst_ovf["z"][:])
     assert np.array_equal(src_ovf["se"][:], dst_ovf["se"][:])

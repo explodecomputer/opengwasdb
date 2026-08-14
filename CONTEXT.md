@@ -14,7 +14,13 @@ A measured or derived outcome, such as disease status, LDL cholesterol, gene exp
 A self-contained logical distribution unit containing one or more Analyses and everything required to interpret and query them. A Store has a stable identity and one **Primary Storage Layout**.
 
 **Store Release**:
-An immutable, self-identifying published version of a Store. A release records Store identity, release identity, format version, creation time, completion state, provenance, and **Analytical Metadata** so downloaded or mirrored copies remain interpretable without a catalogue service.
+An immutable, self-identifying published version of a Store. A release records Store identity, release identity, format version, creation time, completion state, provenance, and **Analytical Metadata** so downloaded or mirrored copies remain interpretable without a catalogue service. A Hybrid release's **Dense Component** is a nested Store Release in its own right — same envelope, opened the same way — not merely an internal artifact shaped like one.
+
+**Staged Release**:
+A Store Release under construction, held at a `.{name}.tmp` sibling of its eventual path until every artifact is written. Committing renames it into place atomically; an error during staging discards the temporary directory and leaves the destination path exactly as it was found — a build or completion run can never leave a half-written release at its real path.
+
+**Provenance Amendment**:
+The one narrow, explicit exception to a Store Release's immutability: folding additional facts into an existing release's `provenance` dict in place (e.g. Catalogue subset facts recorded after a build, or a format migration updating its own record of itself). Everything else that changes association data or Analytical Metadata derives a new Store Release — a new **Staged Release** committed under a new release identity — rather than mutating one in place.
 
 **Analytical Metadata**:
 Metadata that affects the interpretation of association statistics in a Store Release — Assigned Ancestry, Ancestry Composition, sample-size kind/scope/counts, Original Effect Scale and its derivation method and dispersion diagnostic, a Reference Completion Quality rollup, and per-Analysis Top-Hit Counts (a signal for study power and test-statistic inflation risk, ADR 0032). Lives entirely in `analyses.tsv` (ADR 0030), one row per Analysis; never duplicated into `index.sqlite`. Distinct from a Trait Annotation (descriptive metadata curated after release) or build provenance (checksums, generator versions) — those stay registry-scoped, not store-scoped.
@@ -39,7 +45,7 @@ A Primary Storage Layout in which each Analysis has its own sequence of retained
 A Primary Storage Layout combining a **Dense Component** and a **Ragged Overflow Component** over a single Store Variant Table. It suits genome-wide collections whose Analyses share a large common core of variants but also carry heterogeneous, study-specific variants. Variants on the Dense Component's reference axis are stored densely for every Analysis; a study's observed variants that are off that axis are stored in the Ragged Overflow Component. The two components partition an Analysis's associations disjointly.
 
 **Dense Component**:
-The dense matrix part of a Hybrid Layout store, over a shared reference variant axis. It behaves like a Dense Layout and is the only part subject to Reference Completion.
+The dense matrix part of a Hybrid Layout store, over a shared reference variant axis. It behaves like a Dense Layout and is the only part subject to Reference Completion — it is a nested **Store Release** at `<store>/dense`, built, completed, and opened by the unchanged dense machinery.
 
 **Ragged Overflow Component**:
 The ragged part of a Hybrid Layout store, holding each Analysis's observed associations for variants that are off the Dense Component's reference axis. Overflow associations are always observed (never imputed), because off-axis variants lack the reference LD structure needed for completion.

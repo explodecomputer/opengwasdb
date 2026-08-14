@@ -16,12 +16,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import zarr
 
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
+from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
 HG19_POS_1 = 100_000
@@ -254,7 +254,7 @@ def test_store_envelope(hybrid_store):
 
 
 def test_dense_matrix_is_panel_sized(hybrid_store):
-    root = zarr.open_group(str(hybrid_store / "dense" / "data.zarr"), mode="r")
+    root = open_store(hybrid_store).dense_component().arrays(mode="r")
     # 2 panel variants × 2 analyses (off-panel variant is NOT a dense row).
     assert root["z"].shape == (2, 2)
 
@@ -368,9 +368,7 @@ def test_validate_passes(hybrid_store):
 
 def test_validate_catches_imputed_overflow(hybrid_store):
     """An imputed array on the overflow must fail — the overflow is never imputed."""
-    import zarr
-
-    root = zarr.open_group(str(hybrid_store / "data.zarr" / "ragged"), mode="a")
+    root = open_store(hybrid_store).arrays(mode="a")["ragged"]
     n = int(root["offsets"][:][-1])
     root.create_dataset("imputed", data=np.zeros(max(n, 1), dtype="uint8"))
     result = validate_store(hybrid_store)
@@ -380,11 +378,9 @@ def test_validate_catches_imputed_overflow(hybrid_store):
 
 def test_validate_catches_disjoint_violation(hybrid_store):
     """Point an overflow entry at an on-panel variant → disjoint partition fails."""
-    import zarr
-
     dense_to_shared = np.load(hybrid_store / "dense" / "dense_to_shared.npy")
     on_panel_shared = int(dense_to_shared[0])
-    root = zarr.open_group(str(hybrid_store / "data.zarr" / "ragged"), mode="a")
+    root = open_store(hybrid_store).arrays(mode="a")["ragged"]
     vi = root["variant_index"][:]
     if len(vi) == 0:
         pytest.skip("no overflow associations to corrupt")
@@ -396,7 +392,7 @@ def test_validate_catches_disjoint_violation(hybrid_store):
 
 
 def test_validate_catches_overflow_top_hit_offsets(hybrid_store):
-    root = zarr.open_group(str(hybrid_store / "data.zarr"), mode="r+")
+    root = open_store(hybrid_store).arrays(mode="r+")
     offsets = root["top_hits/p_5e_04/analysis_offsets"][:]
     offsets[-1] -= 1
     root["top_hits/p_5e_04/analysis_offsets"][:] = offsets

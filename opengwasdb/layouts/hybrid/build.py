@@ -14,7 +14,6 @@ through a ``SourceReader`` resolved from each row's ``source_reader_capability``
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import tempfile
@@ -63,6 +62,7 @@ from opengwasdb.model.enums import (
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY
 from opengwasdb.readers.registry import resolve_reader
+from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 
 log = logging.getLogger(__name__)
@@ -372,182 +372,182 @@ def build_hybrid_from_vcf_manifest(
         raise ValueError(f"manifest {manifest_path} contains no rows")
 
     out = Path(output_path)
-    if out.exists():
-        if not overwrite:
-            raise FileExistsError(f"output path already exists: {out}")
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-    dense_dir = dense_component_path(out)
-    dense_dir.mkdir()
+    with OpenGWASDBStore.staging(out, overwrite=overwrite) as staged:
+        dense_dir = dense_component_path(staged.path)
+        dense_dir.mkdir()
+        dense_staged = StagedRelease(dense_dir)
 
-    panel_alids = read_reference_panel_alids(reference_panel)
-    if not panel_alids:
-        raise ValueError(f"reference panel {reference_panel} contained no ALIDs")
-    log.info("Reference panel: %d variants", len(panel_alids))
+        panel_alids = read_reference_panel_alids(reference_panel)
+        if not panel_alids:
+            raise ValueError(f"reference panel {reference_panel} contained no ALIDs")
+        log.info("Reference panel: %d variants", len(panel_alids))
 
-    # ── Pass 1: union of source variants + liftover ──────────────────────────
-    log.info("Pass 1: collecting source variants from %d VCFs (serial)", len(manifest_rows))
-    hg19_tuples: set[tuple[str, int, str, str]] = set()
-    t0 = time.monotonic()
-    for i, row in enumerate(manifest_rows):
-        reader = resolve_reader(
-            row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+        # ── Pass 1: union of source variants + liftover ──────────────────────────
+        log.info("Pass 1: collecting source variants from %d VCFs (serial)", len(manifest_rows))
+        hg19_tuples: set[tuple[str, int, str, str]] = set()
+        t0 = time.monotonic()
+        for i, row in enumerate(manifest_rows):
+            reader = resolve_reader(
+                row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+            )
+            hg19_tuples.update(reader.stream_variants())
+            _log_progress("Pass 1", i + 1, len(manifest_rows), t0,
+                          f"{len(hg19_tuples)} unique variants", every=250)
+        log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
+        hg19_lookup = build_liftover_lookup(
+            hg19_tuples, from_build="hg19", to_build="hg38",
+            failure_threshold=liftover_failure_threshold, chain_file=chain_file,
         )
-        hg19_tuples.update(reader.stream_variants())
-        _log_progress("Pass 1", i + 1, len(manifest_rows), t0,
-                      f"{len(hg19_tuples)} unique variants", every=250)
-    log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
-    hg19_lookup = build_liftover_lookup(
-        hg19_tuples, from_build="hg19", to_build="hg38",
-        failure_threshold=liftover_failure_threshold, chain_file=chain_file,
-    )
-    log.info("Liftover complete: %d variants mapped", len(hg19_lookup))
+        log.info("Liftover complete: %d variants mapped", len(hg19_lookup))
 
-    # Partition observed hg38 ALIDs into on-panel and off-panel.
-    observed_alids = set(hg19_lookup.values())
-    off_panel_alids = sorted(observed_alids - panel_alids, key=_alid_sort_key)
-    panel_sorted = sorted(panel_alids, key=_alid_sort_key)
-    shared_sorted = sorted(panel_alids | set(off_panel_alids), key=_alid_sort_key)
+        # Partition observed hg38 ALIDs into on-panel and off-panel.
+        observed_alids = set(hg19_lookup.values())
+        off_panel_alids = sorted(observed_alids - panel_alids, key=_alid_sort_key)
+        panel_sorted = sorted(panel_alids, key=_alid_sort_key)
+        shared_sorted = sorted(panel_alids | set(off_panel_alids), key=_alid_sort_key)
 
-    dense_row = {alid: i for i, alid in enumerate(panel_sorted)}
-    shared_index = {alid: i for i, alid in enumerate(shared_sorted)}
-    n_panel = len(panel_sorted)
-    n_off_panel = len(off_panel_alids)
-    n_shared = len(shared_sorted)
-    n_analyses = len(manifest_rows)
-    analysis_index = {row.trait_id: i for i, row in enumerate(manifest_rows)}
-    log.info(
-        "Partition: %d panel (dense), %d off-panel (overflow), %d shared variants, %d analyses",
-        n_panel, n_off_panel, n_shared, n_analyses,
-    )
-
-    # Provenance: source (hg19) ALID each hg38 row was lifted from (None on collision).
-    hg38_to_source: dict[str, str | None] = {}
-    for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
-        a1, a2 = sorted((ref, alt))
-        origin = f"{chrom}:{pos}:{a1}:{a2}"
-        if hg38_alid in hg38_to_source:
-            if hg38_to_source[hg38_alid] != origin:
-                hg38_to_source[hg38_alid] = None
-        else:
-            hg38_to_source[hg38_alid] = origin
-
-    # stored_effect_scale comes from the manifest, not the VCF header (issue
-    # #17 -- the ieu-a-7 fix: the source header is not authoritative for
-    # effect scale).
-    analyses: list[AnalysisMetadata] = [
-        _manifest_row_to_analysis_metadata(row) for row in manifest_rows
-    ]
-
-    # ── Write the Dense Component skeleton (a valid dense store) ──────────────
-    _write_index(dense_dir, panel_sorted, analyses, chunk_shape, dtype)
-    _write_variant_table(dense_dir, panel_sorted, hg38_to_source)
-    effective_chunks = _create_dense_zarr(dense_dir, n_panel, n_analyses, chunk_shape, dtype)
-
-    # dense row -> shared variant_index (ascending — panel keeps genomic order).
-    dense_to_shared = np.array(
-        [shared_index[alid] for alid in panel_sorted], dtype=np.int32
-    )
-    np.save(dense_to_shared_path(out), dense_to_shared)
-
-    # ── Pass 2: route each study once (dense spill + overflow spill) ──────────
-    log.info("Pass 2: routing %d analyses (n_workers=%d)", n_analyses, n_workers)
-    keys_sorted, targets_sorted, ispanel_sorted = _build_routing_index(
-        hg19_lookup, dense_row, shared_index
-    )
-    del hg19_lookup
-    t2 = time.monotonic()
-    spill_dir = Path(tempfile.mkdtemp(prefix=f".{out.name}.hybridspill.", dir=out.parent))
-    try:
-        if n_workers <= 1:
-            for i, row in enumerate(manifest_rows):
-                col = analysis_index[row.trait_id]
-                dense, overflow = _resolve_column_hybrid(
-                    row.file_path,
-                    keys_sorted,
-                    targets_sorted,
-                    ispanel_sorted,
-                    row.se_divisor,
-                    capability=row.source_reader_capability,
-                    stored_effect_scale=row.stored_effect_scale,
-                )
-                _spill_hybrid_column(spill_dir, col, dense, overflow)
-                _log_progress("Pass 2", i + 1, n_analyses, t2, f"last: {row.trait_id}", every=25)
-        else:
-            global _pass2_keys_sorted, _pass2_targets_sorted, _pass2_ispanel_sorted
-            global _pass2_spill_dir
-            _pass2_keys_sorted = keys_sorted
-            _pass2_targets_sorted = targets_sorted
-            _pass2_ispanel_sorted = ispanel_sorted
-            _pass2_spill_dir = spill_dir
-            id_by_col = {analysis_index[row.trait_id]: row.trait_id for row in manifest_rows}
-            try:
-                with _fork_pool(n_workers) as pool:
-                    tasks = [
-                        (
-                            analysis_index[row.trait_id],
-                            row.file_path,
-                            row.se_divisor,
-                            row.source_reader_capability,
-                            row.stored_effect_scale,
-                        )
-                        for row in manifest_rows
-                    ]
-                    futures = [pool.submit(_pass2_worker, t) for t in tasks]
-                    for i, fut in enumerate(as_completed(futures)):
-                        col = fut.result()
-                        _log_progress("Pass 2", i + 1, n_analyses, t2,
-                                      f"last: {id_by_col[col]}", every=25)
-            finally:
-                _pass2_keys_sorted = None
-                _pass2_targets_sorted = None
-                _pass2_ispanel_sorted = None
-                _pass2_spill_dir = None
-
-        # Dense band-write (reuses the dense builder's band-streamer + top-hit harvest).
-        all_rows, all_cols, all_z, all_se = _write_dense_bands(
-            dense_dir, spill_dir, n_panel, n_analyses, effective_chunks, dtype, t2
+        dense_row = {alid: i for i, alid in enumerate(panel_sorted)}
+        shared_index = {alid: i for i, alid in enumerate(shared_sorted)}
+        n_panel = len(panel_sorted)
+        n_off_panel = len(off_panel_alids)
+        n_shared = len(shared_sorted)
+        n_analyses = len(manifest_rows)
+        analysis_index = {row.trait_id: i for i, row in enumerate(manifest_rows)}
+        log.info(
+            "Partition: %d panel (dense), %d off-panel (overflow), %d shared variants, %d analyses",
+            n_panel, n_off_panel, n_shared, n_analyses,
         )
-        log.info("Writing Dense Component top-hit index (%d candidates)", len(all_rows))
-        write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se)
-        # manifest.json before analyses.tsv/overview.html: overview.html
-        # reads manifest.json fresh from output_path for its header (ADR 0032).
-        _write_dense_manifest(dense_dir, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
-        write_analyses_tsv(dense_dir, add_hit_counts(dense_dir, analyses))
 
-        # Overflow CSR assembly (reuses RaggedCSRWriter).
-        log.info("Assembling Ragged Overflow CSR from %d columns", n_analyses)
-        csr = _assemble_overflow_csr(spill_dir, n_analyses)
-    finally:
-        shutil.rmtree(spill_dir, ignore_errors=True)
+        # Provenance: source (hg19) ALID each hg38 row was lifted from (None on collision).
+        hg38_to_source: dict[str, str | None] = {}
+        for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
+            a1, a2 = sorted((ref, alt))
+            origin = f"{chrom}:{pos}:{a1}:{a2}"
+            if hg38_alid in hg38_to_source:
+                if hg38_to_source[hg38_alid] != origin:
+                    hg38_to_source[hg38_alid] = None
+            else:
+                hg38_to_source[hg38_alid] = origin
 
-    csr.flush(out)
-    n_overflow = csr.n_associations
-    log.info("Building Ragged Overflow top-hit index")
-    build_ragged_top_hit_indexes(out)
+        # stored_effect_scale comes from the manifest, not the VCF header (issue
+        # #17 -- the ieu-a-7 fix: the source header is not authoritative for
+        # effect scale).
+        analyses: list[AnalysisMetadata] = [
+            _manifest_row_to_analysis_metadata(row) for row in manifest_rows
+        ]
 
-    # manifest.json before analyses.tsv/overview.html, same reasoning as the
-    # Dense Component write above.
-    _write_hybrid_manifest(
-        out, store_id, release_id, n_shared, n_analyses, n_panel, n_off_panel,
-        n_overflow, chain_file, chunk_shape, dtype,
-    )
+        # ── Write the Dense Component skeleton (a valid dense store) ──────────────
+        _write_index(dense_staged, panel_sorted, analyses, chunk_shape, dtype)
+        _write_variant_table(dense_dir, panel_sorted, hg38_to_source)
+        effective_chunks = _create_dense_zarr(dense_staged, n_panel, n_analyses, chunk_shape, dtype)
 
-    # ── Shared union table + shared index ─────────────────────────────────────
-    # Top-Hit Counts here are the Dense Component's and Ragged Overflow
-    # Component's counts summed (ADR 0032): the two partition an Analysis's
-    # associations disjointly, so neither alone is the whole picture.
-    dense_counted = add_hit_counts(dense_dir, analyses)
-    shared_analyses = add_hit_counts(out, dense_counted)
-    _write_index(out, shared_sorted, analyses, chunk_shape, dtype)
-    write_analyses_tsv(out, shared_analyses)
-    _write_variant_table(out, shared_sorted, hg38_to_source)
+        # dense row -> shared variant_index (ascending — panel keeps genomic order).
+        dense_to_shared = np.array(
+            [shared_index[alid] for alid in panel_sorted], dtype=np.int32
+        )
+        np.save(dense_to_shared_path(staged.path), dense_to_shared)
 
-    log.info(
-        "Hybrid build complete: %d shared variants (%d panel + %d off-panel), "
-        "%d analyses, %d overflow associations",
-        n_shared, n_panel, n_off_panel, n_analyses, n_overflow,
-    )
+        # ── Pass 2: route each study once (dense spill + overflow spill) ──────────
+        log.info("Pass 2: routing %d analyses (n_workers=%d)", n_analyses, n_workers)
+        keys_sorted, targets_sorted, ispanel_sorted = _build_routing_index(
+            hg19_lookup, dense_row, shared_index
+        )
+        del hg19_lookup
+        t2 = time.monotonic()
+        spill_dir = Path(
+            tempfile.mkdtemp(prefix=f".{out.name}.hybridspill.", dir=staged.path.parent)
+        )
+        try:
+            if n_workers <= 1:
+                for i, row in enumerate(manifest_rows):
+                    col = analysis_index[row.trait_id]
+                    dense, overflow = _resolve_column_hybrid(
+                        row.file_path,
+                        keys_sorted,
+                        targets_sorted,
+                        ispanel_sorted,
+                        row.se_divisor,
+                        capability=row.source_reader_capability,
+                        stored_effect_scale=row.stored_effect_scale,
+                    )
+                    _spill_hybrid_column(spill_dir, col, dense, overflow)
+                    _log_progress("Pass 2", i + 1, n_analyses, t2, f"last: {row.trait_id}", every=25)
+            else:
+                global _pass2_keys_sorted, _pass2_targets_sorted, _pass2_ispanel_sorted
+                global _pass2_spill_dir
+                _pass2_keys_sorted = keys_sorted
+                _pass2_targets_sorted = targets_sorted
+                _pass2_ispanel_sorted = ispanel_sorted
+                _pass2_spill_dir = spill_dir
+                id_by_col = {analysis_index[row.trait_id]: row.trait_id for row in manifest_rows}
+                try:
+                    with _fork_pool(n_workers) as pool:
+                        tasks = [
+                            (
+                                analysis_index[row.trait_id],
+                                row.file_path,
+                                row.se_divisor,
+                                row.source_reader_capability,
+                                row.stored_effect_scale,
+                            )
+                            for row in manifest_rows
+                        ]
+                        futures = [pool.submit(_pass2_worker, t) for t in tasks]
+                        for i, fut in enumerate(as_completed(futures)):
+                            col = fut.result()
+                            _log_progress("Pass 2", i + 1, n_analyses, t2,
+                                          f"last: {id_by_col[col]}", every=25)
+                finally:
+                    _pass2_keys_sorted = None
+                    _pass2_targets_sorted = None
+                    _pass2_ispanel_sorted = None
+                    _pass2_spill_dir = None
+
+            # Dense band-write (reuses the dense builder's band-streamer + top-hit harvest).
+            all_rows, all_cols, all_z, all_se = _write_dense_bands(
+                dense_staged, spill_dir, n_panel, n_analyses, effective_chunks, dtype, t2
+            )
+            log.info("Writing Dense Component top-hit index (%d candidates)", len(all_rows))
+            write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se)
+            # manifest.json before analyses.tsv/overview.html: overview.html
+            # reads manifest.json fresh from output_path for its header (ADR 0032).
+            _write_dense_manifest(dense_staged, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
+            write_analyses_tsv(dense_dir, add_hit_counts(dense_dir, analyses))
+
+            # Overflow CSR assembly (reuses RaggedCSRWriter).
+            log.info("Assembling Ragged Overflow CSR from %d columns", n_analyses)
+            csr = _assemble_overflow_csr(spill_dir, n_analyses)
+        finally:
+            shutil.rmtree(spill_dir, ignore_errors=True)
+
+        csr.flush(staged.path)
+        n_overflow = csr.n_associations
+        log.info("Building Ragged Overflow top-hit index")
+        build_ragged_top_hit_indexes(staged.path)
+
+        # manifest.json before analyses.tsv/overview.html, same reasoning as the
+        # Dense Component write above.
+        _write_hybrid_manifest(
+            staged, store_id, release_id, n_shared, n_analyses, n_panel, n_off_panel,
+            n_overflow, chain_file, chunk_shape, dtype,
+        )
+
+        # ── Shared union table + shared index ─────────────────────────────────────
+        # Top-Hit Counts here are the Dense Component's and Ragged Overflow
+        # Component's counts summed (ADR 0032): the two partition an Analysis's
+        # associations disjointly, so neither alone is the whole picture.
+        dense_counted = add_hit_counts(dense_dir, analyses)
+        shared_analyses = add_hit_counts(staged.path, dense_counted)
+        _write_index(staged, shared_sorted, analyses, chunk_shape, dtype)
+        write_analyses_tsv(staged.path, shared_analyses)
+        _write_variant_table(staged.path, shared_sorted, hg38_to_source)
+
+        log.info(
+            "Hybrid build complete: %d shared variants (%d panel + %d off-panel), "
+            "%d analyses, %d overflow associations",
+            n_shared, n_panel, n_off_panel, n_analyses, n_overflow,
+        )
+
     return HybridBuildResult(
         output_path=out, n_variants=n_shared, n_analyses=n_analyses,
         n_panel=n_panel, n_off_panel=n_off_panel, n_overflow=n_overflow,
@@ -569,7 +569,7 @@ def _write_variant_table(
 
 
 def _write_dense_manifest(
-    dense_dir: Path,
+    dense_staged: StagedRelease,
     store_id: str,
     release_id: str,
     n_variants: int,
@@ -580,7 +580,7 @@ def _write_dense_manifest(
     manifest = StoreManifest(
         store_id=f"{store_id}-dense",
         release_id=release_id,
-        format_version="0.1",
+        format_version=CURRENT_FORMAT_VERSION,
         primary_layout=PrimaryStorageLayout.DENSE,
         association_coverage=AssociationCoverage.FULL,
         completion_state=CompletionState.OBSERVED_ONLY,
@@ -594,13 +594,11 @@ def _write_dense_manifest(
             "dense": {"statistic_arrays": ["z", "se"], "dtype": dtype},
         },
     )
-    (dense_dir / "manifest.json").write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    dense_staged.write_manifest(manifest)
 
 
 def _write_hybrid_manifest(
-    out: Path,
+    staged: StagedRelease,
     store_id: str,
     release_id: str,
     n_variants: int,
@@ -615,7 +613,7 @@ def _write_hybrid_manifest(
     manifest = StoreManifest(
         store_id=store_id,
         release_id=release_id,
-        format_version="0.1",
+        format_version=CURRENT_FORMAT_VERSION,
         primary_layout=PrimaryStorageLayout.HYBRID,
         association_coverage=AssociationCoverage.FULL,
         completion_state=CompletionState.OBSERVED_ONLY,
@@ -637,6 +635,4 @@ def _write_hybrid_manifest(
             },
         },
     )
-    (out / "manifest.json").write_text(
-        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    staged.write_manifest(manifest)
