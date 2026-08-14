@@ -191,6 +191,152 @@ class TestCompletionFiles:
             complete_ragged_store(observed_store, completed_store, ld_panel, min_cor=0.0)
 
 
+class TestPanelAlidCanonicalisation:
+    """Before the fix, ragged completion resolved panel ids with a bare
+    ``chr``-prefix strip instead of ``canonical_panel_alid()``, so an
+    underscore-form id (``chr:pos_ref_alt``, the production UKB EUR panel's
+    convention) never matched the colon-delimited canonical variant table --
+    a panel-only variant was silently dropped from the completed store
+    rather than imputed. The ``ld_panel``/``completed_store`` fixtures above
+    already use underscore-form ids, but their block is too small (one
+    unobserved target, two observed points) for ``poly_rescale``'s degree-3
+    fit ever to succeed regardless of the alid bug, so that gap alone
+    wouldn't be caught by a test asserting actual imputation. This test uses
+    a block large enough (7 observed points) for imputation to genuinely
+    succeed, so the assertion demonstrates the fix rather than an
+    unreachable target (issue #52).
+    """
+
+    @staticmethod
+    def _write_underscore_panel(panel_dir: Path, snps: list[tuple[int, str, str, float]]) -> None:
+        panel_dir.mkdir(parents=True)
+        tsv_lines = ["CHR\tSNP\tOA\tEA\tEAF\tBP"]
+        for bp, a1, a2, eaf in snps:
+            snp_id = f"1:{bp}_{a1}_{a2}"  # production-panel underscore form
+            tsv_lines.append(f"1\t{snp_id}\t{a2}\t{a1}\t{eaf}\t{bp}")
+        (panel_dir / "block.tsv").write_text("\n".join(tsv_lines) + "\n")
+
+        n = len(snps)
+        rng = np.random.default_rng(0)
+        A = rng.standard_normal((n, n))
+        ld = A @ A.T + np.eye(n) * n * 0.1
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+            for row in ld:
+                gz.write(("\t".join(f"{v:.6f}" for v in row) + "\n").encode())
+        (panel_dir / "block.unphased.vcor1.gz").write_bytes(buf.getvalue())
+
+    def test_new_panel_variant_in_underscore_form_is_imputed(self, tmp_path):
+        from opengwasdb.variants import parse_canonical_alid
+        from opengwasdb.variants.axis import VariantAxis
+
+        # 7 observed positions (alleles already alphabetically A1<A2, so no
+        # orientation flip) plus one new, unobserved target at 1050000.
+        observed_bp = [800_000, 850_000, 900_000, 950_000, 1_000_000, 1_100_000, 1_150_000]
+        z_values = [1.0, -1.2, 2.0, -0.5, 1.5, -2.0, 0.8]
+        se = 0.15
+
+        snps = [
+            {"chr": "1", "snp_id": f"rs{i}", "bp": bp, "a1": "A", "a2": "G"}
+            for i, bp in enumerate(observed_bp)
+        ]
+        probes = [{"chr": "1", "probe_id": "ENSG00000000099", "bp": 975_000, "gene": "GENE99"}]
+        probe_assocs = [[(i, z * se, se) for i, z in enumerate(z_values)]]
+
+        fixture = tmp_path / "fixture"
+        fixture.mkdir()
+        _write_esi(fixture / "test.esi", snps)
+        _write_epi(fixture / "test.epi", probes)
+        _write_besd_sparse_3f(fixture / "test.besd", len(probes), probe_assocs)
+
+        observed_store = tmp_path / "obs.opengwasdb"
+        build_ragged_from_besd(
+            fixture / "test", observed_store, store_id="test", release_id="obs-v1", tissue="Blood"
+        )
+
+        panel_dir = tmp_path / "ld_panel_us" / "EUR" / "1"
+        self._write_underscore_panel(
+            panel_dir,
+            [(bp, "A", "G", 0.35) for bp in observed_bp] + [(1_050_000, "C", "T", 0.40)],
+        )
+
+        completed_store = tmp_path / "comp.opengwasdb"
+        complete_ragged_store(
+            observed_store, completed_store, tmp_path / "ld_panel_us",
+            ancestry="EUR", cis_window_bp=500_000, min_cor=0.0, release_id="comp-v1",
+        )
+
+        comp_ax = VariantAxis(completed_store)
+        rec = comp_ax.by_alid(parse_canonical_alid("1:1050000:C:T"))
+        comp_ax.close()
+        assert rec is not None, "new panel variant missing from the completed variant table"
+
+        q = query_store(completed_store)
+        result = q.analysis("ENSG00000000099")
+        q.close()
+
+        idx = np.where(result["variant_index"] == rec.variant_index)[0]
+        assert len(idx) == 1, "new panel variant missing from the completed association list"
+        assert result["association_status"][idx[0]] == "imputed"
+        assert np.isfinite(result["z"][idx[0]])
+
+
+class TestParallelAndResume:
+    def test_n_workers_matches_serial(self, tmp_path, observed_store, ld_panel):
+        serial_dst = tmp_path / "serial.opengwasdb"
+        serial = complete_ragged_store(
+            observed_store, serial_dst, ld_panel,
+            ancestry="EUR", cis_window_bp=500_000, min_cor=0.0, release_id="serial",
+        )
+        parallel_dst = tmp_path / "parallel.opengwasdb"
+        parallel = complete_ragged_store(
+            observed_store, parallel_dst, ld_panel,
+            ancestry="EUR", cis_window_bp=500_000, min_cor=0.0, release_id="parallel",
+            n_workers=2,
+        )
+        assert parallel.n_variants == serial.n_variants
+        assert parallel.n_imputed == serial.n_imputed
+        assert parallel.n_missing == serial.n_missing
+        assert parallel.n_associations == serial.n_associations
+
+    def test_resume_matches_fresh_run(self, tmp_path, observed_store, ld_panel):
+        import json
+
+        from opengwasdb.completion.checkpoint import checkpoint_dir_for
+        from opengwasdb.layouts.ragged.complete import resume_ragged_completion
+
+        fresh_dst = tmp_path / "fresh.opengwasdb"
+        fresh = complete_ragged_store(
+            observed_store, fresh_dst, ld_panel,
+            ancestry="EUR", cis_window_bp=500_000, min_cor=0.0,
+        )
+
+        resumable_dst = tmp_path / "resumable.opengwasdb"
+        checkpoint_dir = checkpoint_dir_for(resumable_dst)
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "blocks").mkdir()
+        (checkpoint_dir / "build_params.json").write_text(
+            json.dumps({
+                "source_path": str(Path(observed_store).resolve()),
+                "dest_path": str(resumable_dst.resolve()),
+                "ld_dir": str(Path(ld_panel).resolve()),
+                "ancestry": "EUR", "cis_window_bp": 500_000,
+                "min_cor": 0.0, "thresh": 0.9,
+                "release_id": None, "ld_panel_id": "eur-hg38-gpm",
+                "impute_analysis_ids": None, "region_cap_bp": 1_000_000,
+            }),
+            encoding="utf-8",
+        )
+        resumed = resume_ragged_completion(checkpoint_dir)
+
+        assert resumed.n_variants == fresh.n_variants
+        assert resumed.n_imputed == fresh.n_imputed
+        assert resumed.n_missing == fresh.n_missing
+        assert resumed.n_associations == fresh.n_associations
+        assert not checkpoint_dir.exists()
+        assert validate_store(resumable_dst).ok
+
+
 class TestValidation:
     def test_valid_completed_store_passes(self, completed_store):
         result = validate_store(completed_store)

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -30,9 +29,16 @@ from typing import Any
 
 import numpy as np
 from numcodecs import Blosc
-from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
-from opengwasdb.completion.impute import impute_z_block, scalar_n_se
+from opengwasdb.completion.ancestry_filter import derive_impute_analysis_ids
+from opengwasdb.completion.block import REGION_CAP_BP, complete_block_for_analysis
+from opengwasdb.completion.checkpoint import (
+    ALID_DTYPE,
+    BlockCompletionResult,
+    checkpoint_dir_for,
+    sanitize_block_id,
+    write_block_checkpoint,
+)
 from opengwasdb.completion.ld_panel import (
     canonical_panel_alid as _canonical_panel_alid,
 )
@@ -45,6 +51,9 @@ from opengwasdb.completion.ld_panel import (
 from opengwasdb.completion.ld_panel import (
     snp_position as _snp_position,
 )
+from opengwasdb.completion.manifest import build_completion_provenance
+from opengwasdb.completion.parallel import init_block_worker
+from opengwasdb.completion.schema import create_completion_quality_table
 from opengwasdb.index import initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import (
     add_hit_counts,
@@ -75,13 +84,6 @@ log = logging.getLogger(__name__)
 
 _COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 _LD_PANEL_ID = "eur-hg38-gpm"
-_COMPLETION_METHOD = "elastic_net_eigenvectors_v2_regioncap"
-_ALID_DTYPE = "S64"
-
-# Region-based imputation z-cap (QC): an imputed |z| may not exceed the largest
-# observed |z| within +/- this many bp of it (same chromosome / LD block). Caps
-# spurious large imputed z-scores from LD extrapolation. See pleiodb.
-REGION_CAP_BP = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -92,15 +94,6 @@ class CompletionResult:
     n_imputed: int
     n_missing_off_panel: int
     n_missing_imputation_failed: int
-
-
-def _sanitize_block_id(block_id: str) -> str:
-    return block_id.replace("/", "__")
-
-
-def _checkpoint_dir_for(dest_path: Path) -> Path:
-    dest_path = Path(dest_path)
-    return dest_path.parent / f".{dest_path.name}.checkpoint"
 
 
 def _work_dir_for(dest_path: Path) -> Path:
@@ -120,77 +113,6 @@ class _BlockTask:
     checkpoint_path: Path
 
 
-@dataclass(frozen=True)
-class BlockCompletionResult:
-    block_id: str
-    # (analysis_index, pearson_r | None, n_imputed, n_missing_imputation_failed)
-    quality_rows: list[tuple[int, float | None, int, int]]
-    # (alid, analysis_index, z, se)
-    fills: list[tuple[str, int, float, float]]
-
-
-def _write_checkpoint(path: Path, result: BlockCompletionResult) -> None:
-    q_ai = np.array([r[0] for r in result.quality_rows], dtype=np.int32)
-    q_pearson = np.array(
-        [r[1] if r[1] is not None else np.nan for r in result.quality_rows], dtype=np.float64
-    )
-    q_nimp = np.array([r[2] for r in result.quality_rows], dtype=np.int32)
-    q_nmiss = np.array([r[3] for r in result.quality_rows], dtype=np.int32)
-    f_alid = np.array([r[0].encode("ascii") for r in result.fills], dtype=_ALID_DTYPE)
-    f_ai = np.array([r[1] for r in result.fills], dtype=np.int32)
-    f_z = np.array([r[2] for r in result.fills], dtype=np.float32)
-    f_se = np.array([r[3] for r in result.fills], dtype=np.float32)
-
-    tmp_path = path.with_name(path.name + ".tmp")
-    with open(tmp_path, "wb") as fh:
-        np.savez(
-            fh,
-            block_id=np.array([result.block_id]),
-            q_ai=q_ai, q_pearson=q_pearson, q_nimp=q_nimp, q_nmiss=q_nmiss,
-            f_alid=f_alid, f_ai=f_ai, f_z=f_z, f_se=f_se,
-        )
-    os.replace(tmp_path, path)
-
-
-# Kept alive for the worker's lifetime so the BLAS thread cap persists (a bare
-# threadpool_limits() call would reset on garbage collection).
-_worker_thread_limiter: Any = None
-
-
-def _init_block_worker() -> None:
-    """Cap each pool worker's BLAS (OpenBLAS/MKL) to one thread. numpy's linear
-    algebra and sklearn otherwise spawn one thread per core *inside every worker*,
-    so n_workers processes each with ~n_core threads massively oversubscribe the
-    CPU (~1000 threads on 256 cores). One BLAS thread per worker gives clean
-    process-level parallelism — scale with n_workers, not threads."""
-    global _worker_thread_limiter
-    _worker_thread_limiter = threadpool_limits(limits=1)
-
-
-def _region_capped_z(
-    zv: float,
-    pos: int,
-    obs_pos_sorted: np.ndarray,
-    obs_absz_sorted: np.ndarray,
-    window_bp: int = REGION_CAP_BP,
-) -> float:
-    """Clamp an imputed z-score so its magnitude does not exceed the largest
-    observed |z| within +/- ``window_bp`` of ``pos`` (QC, per pleiodb). Returns
-    ``zv`` unchanged when there is no observed variant in the window.
-
-    ``obs_pos_sorted`` must be ascending, with ``obs_absz_sorted`` the matching
-    |z| of the observed variants.
-    """
-    lo = int(np.searchsorted(obs_pos_sorted, pos - window_bp, side="left"))
-    hi = int(np.searchsorted(obs_pos_sorted, pos + window_bp, side="right"))
-    if hi <= lo:
-        return zv
-    z_region_max = float(obs_absz_sorted[lo:hi].max())
-    if abs(zv) <= z_region_max:
-        return zv
-    return z_region_max if zv >= 0 else -z_region_max
-
-
 def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
     """Complete one LD block for every Analysis. Runs inside a worker process.
 
@@ -206,7 +128,7 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Block %s: cannot load eigenvectors (%s) — skipping", block.block_id, exc)
         result = BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
-        _write_checkpoint(task.checkpoint_path, result)
+        write_block_checkpoint(task.checkpoint_path, result)
         return result
 
     # Canonical ALID per block variant (None if it doesn't parse); the LD
@@ -244,45 +166,24 @@ def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
     fills: list[tuple[str, int, float, float]] = []
 
     for ai in range(n_analyses):
-        z_dense = z_obs[:, ai]
-        n_obs = int(np.isfinite(z_dense).sum())
-        n_miss_block = int((~np.isfinite(z_dense)).sum())
-        if n_obs < 2:
-            quality_rows.append((ai, None, 0, n_miss_block))
-            continue
-
-        z_imp_arr, corr = impute_z_block(z_dense, eigenvectors, eigenvalues, min_cor=task.min_cor)
-        if z_imp_arr is None:
-            quality_rows.append((ai, float(corr) if np.isfinite(corr) else None, 0, n_miss_block))
-            continue
-
-        obs_mask = np.isfinite(z_dense)
-        se_all = scalar_n_se(se_obs[obs_mask, ai], eaf[obs_mask], eaf)
-
-        # Region z-cap (QC, per pleiodb): an imputed |z| must not exceed the
-        # largest observed |z| among variants within +/- REGION_CAP_BP of it —
-        # imputation can extrapolate spurious large z-scores. Observed positions
-        # are sorted once so each missing variant's window is a searchsorted range.
-        obs_idx = np.where(obs_mask)[0]
-        o_order = np.argsort(positions[obs_idx])
-        obs_pos_s = positions[obs_idx][o_order]
-        obs_absz_s = np.abs(z_dense[obs_idx])[o_order]
-
-        missing_mask = ~obs_mask
+        block_result = complete_block_for_analysis(
+            z_obs[:, ai], se_obs[:, ai], eaf, positions,
+            eigenvectors, eigenvalues,
+            min_cor=task.min_cor, region_cap_bp=REGION_CAP_BP,
+        )
+        n_missing = block_result.n_missing
         n_filled = 0
-        for i in np.where(missing_mask)[0]:
-            alid = canonical_alids[i]
-            zv, sev = z_imp_arr[i], se_all[i]
-            if alid is None or not (np.isfinite(zv) and np.isfinite(sev)):
+        for local_idx, zv, sev in block_result.fills:
+            alid = canonical_alids[local_idx]
+            if alid is None:
+                n_missing += 1
                 continue
-            zv = _region_capped_z(float(zv), int(positions[i]), obs_pos_s, obs_absz_s)
-            fills.append((alid, ai, zv, float(sev)))
+            fills.append((alid, ai, zv, sev))
             n_filled += 1
-
-        quality_rows.append((ai, float(corr), n_filled, n_miss_block - n_filled))
+        quality_rows.append((ai, block_result.pearson_r, n_filled, n_missing))
 
     result = BlockCompletionResult(block_id=block.block_id, quality_rows=quality_rows, fills=fills)
-    _write_checkpoint(task.checkpoint_path, result)
+    write_block_checkpoint(task.checkpoint_path, result)
     # Fills stay on disk (the checkpoint); the parent reads them back from the
     # checkpoints in Phase 3. Returning them here would push potentially millions
     # of tuples per block through the pool result queue and accumulate them in the
@@ -315,10 +216,13 @@ def complete_dense_store(
     ld_dir:      root of LD panel; blocks at ld_dir/{ancestry}/{chr}/{block}.*
     impute_analysis_ids: if given, only these analyses are imputed (the
         ancestry-match filter, ADR 0028); others are carried through
-        observed-only. ``None`` imputes every analysis (no behaviour change).
+        observed-only. ``None`` auto-derives the filter from the source's
+        ``assigned_ancestry`` column when present, imputing every analysis
+        when it is not (no behaviour change for sources with no ancestry
+        information).
     """
     dst = Path(dest_path)
-    checkpoint_dir = _checkpoint_dir_for(dst)
+    checkpoint_dir = checkpoint_dir_for(dst)
 
     if dst.exists() and not overwrite:
         raise FileExistsError(f"Destination already exists: {dst}. Use overwrite=True.")
@@ -330,6 +234,11 @@ def complete_dense_store(
                 "Use resume_dense_completion() to continue it, or overwrite=True to discard it."
             )
         shutil.rmtree(checkpoint_dir)
+
+    if impute_analysis_ids is None:
+        impute_analysis_ids = derive_impute_analysis_ids(
+            read_analyses(Path(source_path) / "analyses.tsv").rows, ancestry
+        )
 
     (checkpoint_dir / "blocks").mkdir(parents=True)
     build_params = {
@@ -539,18 +448,7 @@ def _run_completion(
         print("Writing index.sqlite...")
         with staged.index_connection() as dst_db:
             initialise_schema(dst_db)
-            dst_db.execute(
-                """
-                CREATE TABLE completion_quality (
-                    analysis_index INTEGER NOT NULL,
-                    block_id       TEXT    NOT NULL,
-                    pearson_r      REAL,
-                    n_imputed      INTEGER NOT NULL,
-                    n_missing      INTEGER NOT NULL,
-                    PRIMARY KEY (analysis_index, block_id)
-                )
-                """
-            )
+            create_completion_quality_table(dst_db)
             set_metadata(dst_db, "schema_version", 2)
             set_metadata(dst_db, "n_variants", n_variants)
             set_metadata(dst_db, "n_analyses", n_analyses)
@@ -568,7 +466,7 @@ def _run_completion(
         n_existing = 0
         for tsv_path in tsv_paths:
             block_id = f"{tsv_path.parent.name}/{tsv_path.stem}"
-            ckpt_path = blocks_dir / f"{_sanitize_block_id(block_id)}.npz"
+            ckpt_path = blocks_dir / f"{sanitize_block_id(block_id)}.npz"
             if ckpt_path.exists():
                 n_existing += 1  # fills read from the checkpoint in Phase 3
             else:
@@ -587,7 +485,7 @@ def _run_completion(
                     print(f"  {i + 1:,} / {len(pending):,} blocks")
         else:
             with ProcessPoolExecutor(
-                max_workers=n_workers, initializer=_init_block_worker
+                max_workers=n_workers, initializer=init_block_worker
             ) as pool:
                 futures = [pool.submit(_run_block, task) for task in pending]
                 for i, fut in enumerate(as_completed(futures)):
@@ -603,7 +501,7 @@ def _run_completion(
         print("Merging block results from checkpoints...")
         union_alids = np.fromiter(
             (alid.encode("ascii") for alid in new_alid_to_idx),
-            dtype=_ALID_DTYPE,
+            dtype=ALID_DTYPE,
             count=len(new_alid_to_idx),
         )
         union_rows = np.fromiter(
@@ -655,18 +553,17 @@ def _run_completion(
             provenance={
                 **manifest.provenance,
                 "source_release_id": manifest.release_id,
-                "completion": {
-                    "method": _COMPLETION_METHOD,
-                    "ld_panel_id": ld_panel_id,
-                    "ancestry": ancestry,
-                    "min_cor": min_cor,
-                    "pca_thresh": thresh,
-                    "n_variants_total": n_variants,
-                    "n_variants_new": len(new_canonical),
-                    "n_imputed": total_imputed,
-                    "n_missing_off_panel": n_missing_off_panel_total,
-                    "n_missing_imputation_failed": n_missing_imputation_failed,
-                },
+                "completion": build_completion_provenance(
+                    ld_panel_id=ld_panel_id,
+                    ancestry=ancestry,
+                    min_cor=min_cor,
+                    thresh=thresh,
+                    n_variants_total=n_variants,
+                    n_variants_new=len(new_canonical),
+                    n_imputed=total_imputed,
+                    n_missing_off_panel=n_missing_off_panel_total,
+                    n_missing_imputation_failed=n_missing_imputation_failed,
+                ),
             },
         )
         staged.write_manifest(completed_manifest)
@@ -808,7 +705,7 @@ def _shard_checkpoint_fills_by_band(
                 if not len(f_alid):
                     continue
                 if f_alid.dtype.kind == "U":
-                    f_alid = f_alid.astype(_ALID_DTYPE)
+                    f_alid = f_alid.astype(ALID_DTYPE)
 
                 idx = np.minimum(
                     np.searchsorted(union_alids_s, f_alid), len(union_alids_s) - 1

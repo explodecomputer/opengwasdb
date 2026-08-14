@@ -2,25 +2,59 @@
 
 Reads an observed-only ragged store and writes a new Reference-Completed
 Store Release by imputing z-scores and SE for all LD reference panel
-variants within each analysis's declared cis window.
+variants within each Analysis's declared cis window.
+
+Pipeline shape mirrors dense completion (ADR 0023): LD blocks are the
+process-pool parallelism unit, checkpointed for resume. The difference from
+dense is the unit of relevance -- a block matters only to the Analyses whose
+cis window touches it, not to every Analysis genome-wide -- so Phase 1 also
+records a block-to-Analyses mapping alongside the union variant axis, and
+Phase 2's tasks are told which Analyses to complete rather than assuming all
+of them:
+  Phase 1 (sequential): scan every Analysis's cis window for touching LD
+    blocks, collecting the union variant axis and a block_id -> Analysis
+    indices mapping as it goes.
+  Phase 2 (parallel, n_workers processes over touched LD blocks): each
+    worker opens the source store and LD panel itself, completes every
+    Analysis assigned to its block, and writes its own checkpoint file.
+  Phase 3 (sequential): merge all block results, assemble each Analysis's
+    completed association list (CSR), write completion_quality, top-hit
+    indexes, and manifest.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import zarr
 from numcodecs import Blosc
 
-from opengwasdb.completion.impute import impute_z_block, scalar_n_se
-from opengwasdb.completion.ld_panel import (
-    find_blocks,
-    load_ld_eigenvectors,
+from opengwasdb.completion.ancestry_filter import derive_impute_analysis_ids
+from opengwasdb.completion.block import REGION_CAP_BP, complete_block_for_analysis
+from opengwasdb.completion.checkpoint import (
+    BlockCompletionResult,
+    checkpoint_dir_for,
+    read_block_checkpoint,
+    sanitize_block_id,
+    write_block_checkpoint,
 )
+from opengwasdb.completion.ld_panel import (
+    canonical_panel_alid,
+    find_blocks,
+    load_block,
+    load_ld_eigenvectors,
+    snp_position,
+)
+from opengwasdb.completion.manifest import build_completion_provenance
+from opengwasdb.completion.parallel import init_block_worker
+from opengwasdb.completion.schema import create_completion_quality_table
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RAGGED_ZARR_PATH, RaggedCSRReader
 from opengwasdb.model.enums import CompletionState
@@ -35,7 +69,6 @@ from opengwasdb.variants.normalise import (
     CanonicalVariant,
     VariantNormalisationError,
     chromosome_sort_key,
-    normalise_chromosome,
     orient_to_canonical,
 )
 
@@ -46,7 +79,6 @@ _ASSOC_CHUNK = 200_000
 _OFFSET_CHUNK = 10_000
 
 _LD_PANEL_ID = "eur-hg38-gpm"
-_COMPLETION_METHOD = "elastic_net_eigenvectors_v1"
 
 
 @dataclass(frozen=True)
@@ -57,6 +89,101 @@ class CompletionResult:
     n_associations: int
     n_imputed: int
     n_missing: int
+
+
+# ── Phase 2: per-block worker ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _BlockTask:
+    tsv_path: Path
+    source_path: Path
+    analysis_indices: list[int]
+    min_cor: float
+    thresh: float
+    region_cap_bp: int | None
+    checkpoint_path: Path
+
+
+def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
+    """Complete one LD block for the Analyses whose cis window touches it.
+
+    Opens the (read-only, immutable) source store and LD panel itself, so no
+    payload beyond a lightweight block descriptor and its Analysis list needs
+    to be pickled in.
+    """
+    block = load_block(task.tsv_path)
+    if block is None:
+        return None
+
+    try:
+        eigenvalues, eigenvectors = load_ld_eigenvectors(block, task.thresh)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Block %s: cannot load eigenvectors (%s) — skipping", block.block_id, exc)
+        result = BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
+        write_block_checkpoint(task.checkpoint_path, result)
+        return result
+
+    canonical_alids = [canonical_panel_alid(s) for s in block.snp_ids]
+    eaf = block.eaf
+    positions = np.array([snp_position(s) for s in block.snp_ids], dtype=np.int64)
+
+    src_csr = RaggedCSRReader(task.source_path)
+    src_variant_axis = VariantAxis(task.source_path)
+    try:
+        src_alids = [v.alid for v in src_variant_axis.all()]
+    finally:
+        src_variant_axis.close()
+
+    quality_rows: list[tuple[int, float | None, int, int]] = []
+    fills: list[tuple[str, int, float, float]] = []
+
+    for ai in task.analysis_indices:
+        obs = src_csr.get_analysis(ai)
+        obs_alid_to_z: dict[str, float] = {}
+        obs_alid_to_se: dict[str, float] = {}
+        for vi_old, z_val, se_val in zip(
+            obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
+        ):
+            alid = src_alids[vi_old]
+            obs_alid_to_z[alid] = float(z_val)
+            obs_alid_to_se[alid] = float(se_val)
+
+        z_dense = np.array(
+            [obs_alid_to_z.get(a, float("nan")) if a is not None else float("nan")
+             for a in canonical_alids],
+            dtype=np.float64,
+        )
+        se_dense = np.array(
+            [obs_alid_to_se.get(a, float("nan")) if a is not None else float("nan")
+             for a in canonical_alids],
+            dtype=np.float64,
+        )
+
+        block_result = complete_block_for_analysis(
+            z_dense, se_dense, eaf, positions,
+            eigenvectors, eigenvalues,
+            min_cor=task.min_cor, region_cap_bp=task.region_cap_bp,
+        )
+        n_missing = block_result.n_missing
+        n_filled = 0
+        for local_idx, zv, sev in block_result.fills:
+            alid = canonical_alids[local_idx]
+            if alid is None:
+                n_missing += 1
+                continue
+            fills.append((alid, ai, zv, sev))
+            n_filled += 1
+        quality_rows.append((ai, block_result.pearson_r, n_filled, n_missing))
+
+    result = BlockCompletionResult(block_id=block.block_id, quality_rows=quality_rows, fills=fills)
+    write_block_checkpoint(task.checkpoint_path, result)
+    # Fills stay on disk (the checkpoint); the parent reads them back in Phase 3
+    # (mirrors dense — see issue 044).
+    return BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
+
+
+# ── Public entry points ─────────────────────────────────────────────────────
 
 
 def complete_ragged_store(
@@ -70,14 +197,129 @@ def complete_ragged_store(
     thresh: float = 0.9,
     release_id: str | None = None,
     ld_panel_id: str = _LD_PANEL_ID,
+    n_workers: int = 1,
     overwrite: bool = False,
+    impute_analysis_ids: set[str] | None = None,
+    region_cap_bp: int | None = REGION_CAP_BP,
 ) -> CompletionResult:
     """Produce a Reference-Completed Store Release from an observed-only ragged store.
 
     source_path: existing observed-only ragged store.
     dest_path:   new store directory to create.
     ld_dir:      root of LD panel; blocks at ld_dir/{ancestry}/{chr}/{block}.*
+    impute_analysis_ids: if given, only these analyses are imputed (the
+        ancestry-match filter, ADR 0028); others are carried through
+        observed-only. ``None`` auto-derives the filter from the source's
+        ``assigned_ancestry`` column when present, imputing every analysis
+        when it is not (no behaviour change for sources with no ancestry
+        information).
     """
+    dst = Path(dest_path)
+    checkpoint_dir = checkpoint_dir_for(dst)
+
+    if dst.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {dst}. Use overwrite=True.")
+
+    if checkpoint_dir.exists():
+        if not overwrite:
+            raise FileExistsError(
+                f"A checkpoint directory already exists at {checkpoint_dir}. "
+                "Use resume_ragged_completion() to continue it, or overwrite=True to discard it."
+            )
+        shutil.rmtree(checkpoint_dir)
+
+    if impute_analysis_ids is None:
+        impute_analysis_ids = derive_impute_analysis_ids(
+            _read_analyses_rows(Path(source_path)), ancestry
+        )
+
+    (checkpoint_dir / "blocks").mkdir(parents=True)
+    build_params = {
+        "source_path": str(Path(source_path).resolve()),
+        "dest_path": str(dst.resolve()),
+        "ld_dir": str(Path(ld_dir).resolve()),
+        "ancestry": ancestry,
+        "cis_window_bp": cis_window_bp,
+        "min_cor": min_cor,
+        "thresh": thresh,
+        "release_id": release_id,
+        "ld_panel_id": ld_panel_id,
+        "impute_analysis_ids": sorted(impute_analysis_ids)
+        if impute_analysis_ids is not None
+        else None,
+        "region_cap_bp": region_cap_bp,
+    }
+    (checkpoint_dir / "build_params.json").write_text(
+        json.dumps(build_params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = _run_completion(
+        Path(source_path), dst, Path(ld_dir),
+        ancestry=ancestry, cis_window_bp=cis_window_bp, min_cor=min_cor, thresh=thresh,
+        release_id=release_id, ld_panel_id=ld_panel_id,
+        n_workers=n_workers, checkpoint_dir=checkpoint_dir,
+        impute_analysis_ids=impute_analysis_ids, region_cap_bp=region_cap_bp,
+    )
+    shutil.rmtree(checkpoint_dir)
+    return result
+
+
+def resume_ragged_completion(
+    checkpoint_dir: str | Path,
+    *,
+    n_workers: int = 1,
+) -> CompletionResult:
+    """Resume an interrupted complete_ragged_store() run.
+
+    Takes only the checkpoint directory path -- all other build parameters
+    are loaded from the build_params.json written on the first run, so a
+    resumed run can never silently apply a different parameter set than the
+    one its existing per-block checkpoints were computed under. Phase 1 (the
+    union variant axis and block/Analysis mapping) is cheap and re-derived
+    deterministically from source_path/ld_dir/cis_window_bp; only Phase 2's
+    per-block results need to survive on disk to make resume skip work.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    params = json.loads((checkpoint_dir / "build_params.json").read_text())
+
+    impute_ids = params.get("impute_analysis_ids")
+    result = _run_completion(
+        Path(params["source_path"]), Path(params["dest_path"]), Path(params["ld_dir"]),
+        ancestry=params["ancestry"], cis_window_bp=params["cis_window_bp"],
+        min_cor=params["min_cor"], thresh=params["thresh"],
+        release_id=params["release_id"], ld_panel_id=params["ld_panel_id"],
+        n_workers=n_workers, checkpoint_dir=checkpoint_dir,
+        impute_analysis_ids=set(impute_ids) if impute_ids is not None else None,
+        region_cap_bp=params.get("region_cap_bp"),
+    )
+    shutil.rmtree(checkpoint_dir)
+    return result
+
+
+def _read_analyses_rows(store_path: Path) -> list[dict]:
+    with open_store(store_path).index_connection() as conn:
+        return [dict(row) for row in conn.execute("SELECT * FROM analyses ORDER BY analysis_index")]
+
+
+# ── Shared pipeline core ────────────────────────────────────────────────────
+
+
+def _run_completion(
+    source_path: Path,
+    dest_path: Path,
+    ld_dir: Path,
+    *,
+    ancestry: str,
+    cis_window_bp: int,
+    min_cor: float,
+    thresh: float,
+    release_id: str | None,
+    ld_panel_id: str,
+    n_workers: int,
+    checkpoint_dir: Path,
+    impute_analysis_ids: set[str] | None,
+    region_cap_bp: int | None,
+) -> CompletionResult:
     src = Path(source_path)
     dst = Path(dest_path)
 
@@ -86,50 +328,68 @@ def complete_ragged_store(
     print(f"Source store: {manifest.store_id} / {manifest.release_id}")
     print(f"  completion_state: {manifest.completion_state}")
 
-    with OpenGWASDBStore.staging(dst, overwrite=overwrite) as staged:
-        # ── 1. Load source variant axis and traits ────────────────────────────────
+    with OpenGWASDBStore.staging(dst, overwrite=True) as staged:
+        # ── Phase 1: union variant axis + block/Analysis mapping ───────────
         src_variant_axis = VariantAxis(src)
         src_variants = src_variant_axis.all()
+        src_variant_axis.close()
         src_alids: list[str] = [v.alid for v in src_variants]
         alid_to_src_idx: dict[str, int] = {v.alid: v.variant_index for v in src_variants}
 
         traits_reader = TraitsAxisReader(src)
         trait_records = list(traits_reader.all())
+        traits_reader.close()
         n_analyses = len(trait_records)
 
         print(f"Source: {len(src_alids):,} variants, {n_analyses:,} analyses")
 
-        # ── 2. First pass: collect all LD panel variants across all cis windows ───
-        print("Collecting LD panel variants across all cis windows...")
-        new_alids: set[str] = set()  # LD panel variants not in source store
-        new_variant_eaf: dict[str, float] = {}
+        if impute_analysis_ids is None:
+            impute_mask = None
+        else:
+            impute_mask = np.array(
+                [rec.analysis_id in impute_analysis_ids for rec in trait_records], dtype=bool
+            )
+            n_match = int(impute_mask.sum())
+            print(f"Ancestry-match filter: imputing {n_match:,}/{n_analyses:,} analyses")
+
+        print("Scanning cis windows for LD blocks + new panel variants...")
+        new_alids: set[str] = set()
+        block_to_tsv: dict[str, Path] = {}
+        block_to_analyses: dict[str, list[int]] = {}
+        block_canonical_alids: dict[str, list[str | None]] = {}
+        analysis_to_blocks: dict[int, list[str]] = {}
 
         for i, rec in enumerate(trait_records):
             if rec.trait_chr is None or rec.trait_bp is None:
+                analysis_to_blocks[i] = []
                 continue
             chrom = rec.trait_chr
             start = max(1, rec.trait_bp - cis_window_bp)
             end = rec.trait_bp + cis_window_bp
 
             blocks = find_blocks(ld_dir, ancestry, chrom, start, end)
+            analysis_to_blocks[i] = [b.block_id for b in blocks]
             for block in blocks:
-                for ld_row, snp_id in enumerate(block.snp_ids):
-                    bare = snp_id[3:] if snp_id.startswith("chr") else snp_id
-                    if bare not in alid_to_src_idx:
-                        new_alids.add(bare)
-                        if np.isfinite(block.eaf[ld_row]):
-                            new_variant_eaf[bare] = float(block.eaf[ld_row])
+                block_to_analyses.setdefault(block.block_id, []).append(i)
+                if block.block_id in block_to_tsv:
+                    continue
+                block_to_tsv[block.block_id] = block.tsv_path
+                canonical_alids = [canonical_panel_alid(s) for s in block.snp_ids]
+                block_canonical_alids[block.block_id] = canonical_alids
+                for alid in canonical_alids:
+                    if alid is not None and alid not in alid_to_src_idx:
+                        new_alids.add(alid)
 
             if (i + 1) % 1000 == 0:
                 print(f"  Scanned {i + 1:,} / {n_analyses:,} analyses, "
-                      f"{len(new_alids):,} new LD panel variants found")
+                      f"{len(new_alids):,} new LD panel variants, "
+                      f"{len(block_to_tsv):,} blocks touched")
 
         print(f"New LD panel variants: {len(new_alids):,}")
+        print(f"LD blocks touched: {len(block_to_tsv):,}")
 
-        # ── 3. Build merged variant table ────────────────────────────────────────
-        # Parse and normalise the new LD panel variants; merge with source variants.
+        # ── Build merged variant table ──────────────────────────────────────
         new_canonical: list[CanonicalVariant] = []
-        new_alid_to_cv: dict[str, CanonicalVariant] = {}
         for alid in new_alids:
             try:
                 parts = alid.split(":")
@@ -139,27 +399,20 @@ def complete_ragged_store(
                 cv_result = orient_to_canonical(chrom, int(pos_str), a1, a2)
                 if cv_result.variant.alid not in alid_to_src_idx:
                     new_canonical.append(cv_result.variant)
-                    new_alid_to_cv[cv_result.variant.alid] = cv_result.variant
             except (VariantNormalisationError, ValueError):
                 continue
 
-        # Sort new variants by genomic position
-        new_canonical.sort(
-            key=lambda v: (chromosome_sort_key(v.chromosome), v.position, v.effect_allele, v.other_allele)
-        )
+        def _sort_key(v: CanonicalVariant) -> tuple[Any, int, str, str]:
+            return (chromosome_sort_key(v.chromosome), v.position, v.effect_allele, v.other_allele)
 
-        # Merge: source variants (keep indices) + new (sorted by position)
-        # Re-sort ALL variants together for a coherent sorted table.
-        all_src = [(chromosome_sort_key(v.chromosome), v.position, v.effect_allele, v.other_allele, v)
-                   for v in src_variants]
-        all_new = [(chromosome_sort_key(v.chromosome), v.position, v.effect_allele, v.other_allele, v)
-                   for v in new_canonical]
+        new_canonical.sort(key=_sort_key)
+        all_src = [(*_sort_key(v), v) for v in src_variants]
+        all_new = [(*_sort_key(v), v) for v in new_canonical]
         all_variants_sorted = sorted(all_src + all_new, key=lambda x: x[:4])
 
         merged_variants: list[CanonicalVariant] = [x[4] for x in all_variants_sorted]
         new_alid_to_idx: dict[str, int] = {v.alid: i for i, v in enumerate(merged_variants)}
 
-        # Build remapping: old source variant_index → new variant_index
         src_idx_remap: list[int] = [0] * len(src_alids)
         for v in src_variants:
             src_idx_remap[v.variant_index] = new_alid_to_idx[v.alid]
@@ -169,71 +422,126 @@ def complete_ragged_store(
         print("Writing variants.tsv.gz...")
         write_variant_axis(staged.path, merged_variants, {})
 
-        # ── 4. Copy traits axis ───────────────────────────────────────────────────
         shutil.copy2(src / "traits.tsv.gz", staged.traits_table_path)
         tbi_src = src / "traits.tsv.gz.tbi"
         if tbi_src.exists():
             shutil.copy2(tbi_src, staged.path / "traits.tsv.gz.tbi")
 
-        # ── 5. Build new SQLite: copy analyses, add completion_quality table ──────
         print("Writing index.sqlite...")
         src_db = source.index_connection()
         dst_db = staged.index_connection()
-
-        # Copy analyses table schema and data
-        src_schema = src_db.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='analyses'"
-        ).fetchone()
-        if src_schema:
-            dst_db.execute(src_schema["sql"])
-        for row in src_db.execute("SELECT * FROM analyses ORDER BY analysis_index"):
-            cols = list(row.keys())
-            placeholders = ",".join("?" * len(cols))
+        try:
+            src_schema = src_db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='analyses'"
+            ).fetchone()
+            if src_schema:
+                dst_db.execute(src_schema["sql"])
+            for row in src_db.execute("SELECT * FROM analyses ORDER BY analysis_index"):
+                cols = list(row.keys())
+                placeholders = ",".join("?" * len(cols))
+                dst_db.execute(
+                    f"INSERT INTO analyses ({','.join(cols)}) VALUES ({placeholders})",
+                    list(row),
+                )
+            dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_trait_id ON analyses(trait_id)")
+            dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_gene_id ON analyses(gene_id)")
             dst_db.execute(
-                f"INSERT INTO analyses ({','.join(cols)}) VALUES ({placeholders})",
-                list(row),
+                "CREATE INDEX IF NOT EXISTS idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)"
             )
-        dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_trait_id  ON analyses(trait_id)")
-        dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_gene_id   ON analyses(gene_id)")
-        dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)")
+            create_completion_quality_table(dst_db)
+            dst_db.commit()
+        finally:
+            src_db.close()
 
-        dst_db.execute("""
-            CREATE TABLE completion_quality (
-                analysis_index INTEGER NOT NULL,
-                block_id       TEXT    NOT NULL,
-                pearson_r      REAL,
-                n_imputed      INTEGER NOT NULL,
-                n_missing      INTEGER NOT NULL,
-                PRIMARY KEY (analysis_index, block_id)
-            )
-        """)
-        dst_db.commit()
-        src_db.close()
+        # ── Phase 2: parallel LD-block completion ───────────────────────────
+        print(f"Running reference completion across {len(block_to_tsv):,} LD blocks "
+              f"(n_workers={n_workers})...")
+        blocks_dir = checkpoint_dir / "blocks"
+        blocks_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── 6. Build completion CSR with imputed mask ─────────────────────────────
-        print("Running reference completion per analysis...")
+        pending: list[_BlockTask] = []
+        n_existing = 0
+        for block_id, tsv_path in block_to_tsv.items():
+            ckpt_path = blocks_dir / f"{sanitize_block_id(block_id)}.npz"
+            if ckpt_path.exists():
+                n_existing += 1
+            else:
+                pending.append(_BlockTask(
+                    tsv_path=tsv_path, source_path=src,
+                    analysis_indices=block_to_analyses[block_id],
+                    min_cor=min_cor, thresh=thresh, region_cap_bp=region_cap_bp,
+                    checkpoint_path=ckpt_path,
+                ))
+
+        if pending:
+            print(f"  {n_existing:,} blocks already checkpointed, {len(pending):,} remaining")
+
+        if n_workers <= 1:
+            for i, task in enumerate(pending):
+                _run_block(task)
+                if (i + 1) % 200 == 0:
+                    print(f"  {i + 1:,} / {len(pending):,} blocks")
+        else:
+            with ProcessPoolExecutor(
+                max_workers=n_workers, initializer=init_block_worker
+            ) as pool:
+                futures = [pool.submit(_run_block, task) for task in pending]
+                for i, fut in enumerate(as_completed(futures)):
+                    fut.result()  # propagate worker errors; result is on disk
+                    if (i + 1) % 200 == 0:
+                        print(f"  {i + 1:,} / {len(pending):,} blocks")
+
+        # ── Phase 3: merge checkpoints, assemble CSR, finalise ──────────────
+        print("Merging block results from checkpoints...")
+        fills_by_analysis: dict[int, dict[str, tuple[float, float]]] = {}
+        quality_batch: list[tuple[int, str, float | None, int, int]] = []
+        quality_batch_size = 100_000
+        quality_count = 0
+
+        def _flush_quality() -> None:
+            nonlocal quality_count
+            if quality_batch:
+                dst_db.executemany(
+                    "INSERT INTO completion_quality "
+                    "(analysis_index, block_id, pearson_r, n_imputed, n_missing) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    quality_batch,
+                )
+                dst_db.commit()
+                quality_count += len(quality_batch)
+                quality_batch.clear()
+
+        for ckpt in sorted(blocks_dir.glob("*.npz")):
+            block_result = read_block_checkpoint(ckpt)
+            for ai, pearson_r, n_imp, n_miss in block_result.quality_rows:
+                quality_batch.append((ai, block_result.block_id, pearson_r, n_imp, n_miss))
+                if len(quality_batch) >= quality_batch_size:
+                    _flush_quality()
+            for alid, ai, z, se in block_result.fills:
+                fills_by_analysis.setdefault(ai, {})[alid] = (z, se)
+        _flush_quality()
+        print(f"Wrote {quality_count:,} completion quality rows")
+
+        print("Assembling completed CSR per analysis...")
         src_csr = RaggedCSRReader(src)
-
         all_vi: list[np.ndarray] = []
         all_z: list[np.ndarray] = []
         all_se: list[np.ndarray] = []
         all_imp: list[np.ndarray] = []
         offsets: list[int] = [0]
-
-        quality_rows: list[tuple] = []
         total_imputed = 0
         total_missing = 0
 
-        for ai, rec in enumerate(trait_records):
+        for ai in range(n_analyses):
             obs = src_csr.get_analysis(ai)
-
-            # Remap observed variant indices to new indexing scheme
-            obs_vi_new = np.array([src_idx_remap[vi] for vi in obs.variant_index.tolist()], dtype=np.int32)
+            obs_vi_new = np.array(
+                [src_idx_remap[vi] for vi in obs.variant_index.tolist()], dtype=np.int32
+            )
             obs_z = obs.z.astype(np.float32)
             obs_se = obs.se.astype(np.float32)
 
-            if rec.trait_chr is None or rec.trait_bp is None:
-                # No cis region — write observed associations as-is, no completion.
+            block_ids_here = analysis_to_blocks.get(ai, [])
+            if not block_ids_here:
                 all_vi.append(obs_vi_new)
                 all_z.append(obs_z)
                 all_se.append(obs_se)
@@ -241,118 +549,31 @@ def complete_ragged_store(
                 offsets.append(offsets[-1] + len(obs_vi_new))
                 continue
 
-            chrom = rec.trait_chr
-            cis_start = max(1, rec.trait_bp - cis_window_bp)
-            cis_end = rec.trait_bp + cis_window_bp
-
-            blocks = find_blocks(ld_dir, ancestry, chrom, cis_start, cis_end)
-            if not blocks:
-                all_vi.append(obs_vi_new)
-                all_z.append(obs_z)
-                all_se.append(obs_se)
-                all_imp.append(np.zeros(len(obs_vi_new), dtype=np.uint8))
-                offsets.append(offsets[-1] + len(obs_vi_new))
-                continue
-
-            # Build per-analysis ALID → z/se lookup from observed data
             obs_alid_to_z: dict[str, float] = {}
             obs_alid_to_se: dict[str, float] = {}
             for vi_old, z_val, se_val in zip(
-                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist()
+                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
             ):
                 alid = src_alids[vi_old]
                 obs_alid_to_z[alid] = float(z_val)
                 obs_alid_to_se[alid] = float(se_val)
 
-            # Collect all reference panel variants in cis window
-            ref_alids_in_cis: list[str] = []
-            for block in blocks:
-                for snp_id in block.snp_ids:
-                    bare = snp_id[3:] if snp_id.startswith("chr") else snp_id
-                    ref_alids_in_cis.append(bare)
-
-            # Deduplicate (variants can appear in multiple blocks)
-            seen: set[str] = set()
             unique_ref_alids: list[str] = []
-            for alid in ref_alids_in_cis:
-                if alid not in seen:
-                    seen.add(alid)
-                    unique_ref_alids.append(alid)
+            seen_block_alids: set[str] = set()
+            for block_id in block_ids_here:
+                for alid in block_canonical_alids[block_id]:
+                    if alid is not None and alid not in seen_block_alids:
+                        seen_block_alids.add(alid)
+                        unique_ref_alids.append(alid)
 
-            # Process each block: run imputation, record quality
-            alid_imputed_z: dict[str, float] = {}
-            alid_imputed_se: dict[str, float] = {}
+            fills_here = fills_by_analysis.get(ai, {})
+            apply_fills = impute_mask is None or bool(impute_mask[ai])
 
-            for block in blocks:
-                bl_alids = [
-                    (snp_id[3:] if snp_id.startswith("chr") else snp_id)
-                    for snp_id in block.snp_ids
-                ]
-
-                # Build dense z-score vector for this block
-                z_dense = np.array(
-                    [obs_alid_to_z.get(a, float("nan")) for a in bl_alids],
-                    dtype=np.float64,
-                )
-                n_obs_in_block = int(np.isfinite(z_dense).sum())
-
-                try:
-                    eigenvalues, eigenvectors = load_ld_eigenvectors(block, thresh)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Block %s: cannot load eigenvectors (%s) — skipping", block.block_id, exc)
-                    quality_rows.append((ai, block.block_id, None, 0, int((~np.isfinite(z_dense)).sum())))
-                    continue
-
-                if n_obs_in_block < 2:
-                    n_miss = int((~np.isfinite(z_dense)).sum())
-                    quality_rows.append((ai, block.block_id, None, 0, n_miss))
-                    continue
-
-                z_imp_arr, corr = impute_z_block(z_dense, eigenvectors, eigenvalues, min_cor=min_cor)
-
-                n_miss_block = int((~np.isfinite(z_dense)).sum())
-                if z_imp_arr is None:
-                    quality_rows.append((ai, block.block_id, float(corr) if np.isfinite(corr) else None, 0, n_miss_block))
-                    continue
-
-                # SE via scalar-N model using LD panel EAF
-                eaf_obs_in_block = np.array(
-                    [float(block.eaf[i]) for i in range(block.n_ld_snps)],
-                    dtype=np.float64,
-                )
-                se_obs_in_block = np.array(
-                    [obs_alid_to_se.get(a, float("nan")) for a in bl_alids],
-                    dtype=np.float64,
-                )
-                se_all = scalar_n_se(
-                    se_obs_in_block[np.isfinite(z_dense)],
-                    eaf_obs_in_block[np.isfinite(z_dense)],
-                    eaf_obs_in_block,
-                )
-
-                # Fill missing positions
-                missing_mask = ~np.isfinite(z_dense)
-                n_filled = 0
-                for i, (alid, is_miss, z_v, se_v) in enumerate(
-                    zip(bl_alids, missing_mask, z_imp_arr, se_all)
-                ):
-                    if is_miss and np.isfinite(z_v) and np.isfinite(se_v):
-                        alid_imputed_z[alid] = float(z_v)
-                        alid_imputed_se[alid] = float(se_v)
-                        n_filled += 1
-
-                quality_rows.append((ai, block.block_id, float(corr), n_filled, n_miss_block - n_filled))
-                total_imputed += n_filled
-
-            # Assemble merged association sequence for this analysis
-            # All reference panel variants in cis window + any observed off-panel
             ref_vi: list[int] = []
             ref_z: list[float] = []
             ref_se: list[float] = []
             ref_imp: list[int] = []
-
             seen_alids: set[str] = set()
-            # Reference panel variants (observed or imputed or missing)
             for alid in unique_ref_alids:
                 vi = new_alid_to_idx.get(alid)
                 if vi is None:
@@ -363,22 +584,22 @@ def complete_ragged_store(
                     ref_z.append(obs_alid_to_z[alid])
                     ref_se.append(obs_alid_to_se[alid])
                     ref_imp.append(0)
-                elif alid in alid_imputed_z:
+                elif apply_fills and alid in fills_here:
+                    z_v, se_v = fills_here[alid]
                     ref_vi.append(vi)
-                    ref_z.append(alid_imputed_z[alid])
-                    ref_se.append(alid_imputed_se[alid])
+                    ref_z.append(z_v)
+                    ref_se.append(se_v)
                     ref_imp.append(1)
+                    total_imputed += 1
                 else:
-                    # Missing reference variant
                     ref_vi.append(vi)
                     ref_z.append(float("nan"))
                     ref_se.append(float("nan"))
                     ref_imp.append(0)
                     total_missing += 1
 
-            # Off-panel observed variants (observed but not in reference panel)
             for vi_old, z_val, se_val in zip(
-                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist()
+                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
             ):
                 alid = src_alids[vi_old]
                 if alid not in seen_alids:
@@ -387,7 +608,6 @@ def complete_ragged_store(
                     ref_se.append(float(se_val))
                     ref_imp.append(0)
 
-            # Sort by variant_index
             order = np.argsort(ref_vi)
             vi_arr = np.array(ref_vi, dtype=np.int32)[order]
             z_arr = np.array(ref_z, dtype=np.float16)[order]
@@ -404,9 +624,12 @@ def complete_ragged_store(
                 print(f"  {ai + 1:,} / {n_analyses:,} analyses | "
                       f"imputed {total_imputed:,} | missing {total_missing:,}")
 
+        dst_db.commit()
+        dst_db.close()
+
         print(f"Completion done: {total_imputed:,} imputed, {total_missing:,} missing")
 
-        # ── 7. Write zarr CSR with imputed mask ───────────────────────────────────
+        # ── Write zarr CSR with imputed mask ───────────────────────────────
         print("Writing zarr CSR...")
         n_total = offsets[-1]
         offsets_arr = np.array(offsets, dtype=np.int64)
@@ -418,31 +641,32 @@ def complete_ragged_store(
         ragged_path = staged.path / RAGGED_ZARR_PATH
         ragged_path.mkdir(parents=True, exist_ok=True)
         root = zarr.open_group(str(ragged_path), mode="w")
-        root.create_dataset("offsets", data=offsets_arr, chunks=(_OFFSET_CHUNK,), compressor=_COMPRESSOR, dtype=np.int64)
-        root.create_dataset("variant_index", data=vi_all, chunks=(_ASSOC_CHUNK,), compressor=_COMPRESSOR, dtype=np.int32)
-        root.create_dataset("z", data=z_all, chunks=(_ASSOC_CHUNK,), compressor=_COMPRESSOR, dtype=np.float16)
-        root.create_dataset("se", data=se_all, chunks=(_ASSOC_CHUNK,), compressor=_COMPRESSOR, dtype=np.float16)
-        root.create_dataset("imputed", data=imp_all, chunks=(_ASSOC_CHUNK,), compressor=_COMPRESSOR, dtype=np.uint8)
+        root.create_dataset(
+            "offsets", data=offsets_arr, chunks=(_OFFSET_CHUNK,),
+            compressor=_COMPRESSOR, dtype=np.int64,
+        )
+        root.create_dataset(
+            "variant_index", data=vi_all, chunks=(_ASSOC_CHUNK,),
+            compressor=_COMPRESSOR, dtype=np.int32,
+        )
+        root.create_dataset(
+            "z", data=z_all, chunks=(_ASSOC_CHUNK,), compressor=_COMPRESSOR, dtype=np.float16
+        )
+        root.create_dataset(
+            "se", data=se_all, chunks=(_ASSOC_CHUNK,), compressor=_COMPRESSOR, dtype=np.float16
+        )
+        root.create_dataset(
+            "imputed", data=imp_all, chunks=(_ASSOC_CHUNK,),
+            compressor=_COMPRESSOR, dtype=np.uint8,
+        )
         root.attrs["layout"] = "ragged"
         root.attrs["completion_state"] = "reference_completed"
         root.attrs["n_analyses"] = n_analyses
         root.attrs["n_associations"] = n_total
 
-        # ── 8. Write completion quality rows ──────────────────────────────────────
-        print(f"Writing {len(quality_rows):,} completion quality rows...")
-        dst_db.executemany(
-            "INSERT INTO completion_quality (analysis_index, block_id, pearson_r, n_imputed, n_missing) "
-            "VALUES (?, ?, ?, ?, ?)",
-            quality_rows,
-        )
-        dst_db.commit()
-        dst_db.close()
-
-        # ── 9. Build top-hit indexes ──────────────────────────────────────────────
         print("Building top-hit indexes...")
         build_ragged_top_hit_indexes(staged.path)
 
-        # ── 10. Write manifest ────────────────────────────────────────────────────
         new_release_id = release_id or f"{manifest.release_id}-completed"
         completed_manifest = StoreManifest(
             store_id=manifest.store_id,
@@ -456,24 +680,20 @@ def complete_ragged_store(
             provenance={
                 **manifest.provenance,
                 "source_release_id": manifest.release_id,
-                "completion": {
-                    "method": _COMPLETION_METHOD,
-                    "ld_panel_id": ld_panel_id,
-                    "ancestry": ancestry,
-                    "cis_window_bp": cis_window_bp,
-                    "min_cor": min_cor,
-                    "pca_thresh": thresh,
-                    "n_variants_total": len(merged_variants),
-                    "n_variants_new": len(new_canonical),
-                    "n_imputed": total_imputed,
-                    "n_missing": total_missing,
-                },
+                "completion": build_completion_provenance(
+                    ld_panel_id=ld_panel_id,
+                    ancestry=ancestry,
+                    min_cor=min_cor,
+                    thresh=thresh,
+                    n_variants_total=len(merged_variants),
+                    n_variants_new=len(new_canonical),
+                    cis_window_bp=cis_window_bp,
+                    n_imputed=total_imputed,
+                    n_missing=total_missing,
+                ),
             },
         )
         staged.write_manifest(completed_manifest)
-
-        src_variant_axis.close()
-        traits_reader.close()
 
         result = CompletionResult(
             output_path=dst,

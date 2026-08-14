@@ -93,22 +93,12 @@ def complete_hybrid_store(
             f"(completion_state={src_manifest.completion_state})"
         )
 
-    # Per-Analysis ancestry-match filter (ADR 0028): if the store's analyses.tsv
-    # carries Assigned Ancestry, only impute Analyses whose value matches the
-    # applied panel; the rest are carried through observed-only. No ancestry
-    # information anywhere = impute everything (no behaviour change).
-    src_analyses = read_analyses(src / "analyses.tsv").rows
-    impute_ids: set[str] | None = None
-    if any(r.get("assigned_ancestry") for r in src_analyses):
-        matched = {r["analysis_id"] for r in src_analyses if r.get("assigned_ancestry") == ancestry}
-        impute_ids = matched
-        log.info(
-            "Ancestry-matched completion: %d/%d analyses match panel ancestry %s",
-            len(matched), len(src_analyses), ancestry,
-        )
-
     with OpenGWASDBStore.staging(dst, overwrite=overwrite) as staged:
         # ── 1. Complete the Dense Component (dense pipeline, unchanged) ────────
+        # complete_dense_store derives the per-Analysis ancestry-match filter
+        # (ADR 0028) itself from the Dense Component's own analyses.tsv when
+        # impute_analysis_ids is not given -- the same filter hybrid used to
+        # compute here inline, now applied uniformly regardless of entry point.
         log.info("Completing Dense Component via the dense reference-completion pipeline")
         dense_result = complete_dense_store(
             dense_component_path(src),
@@ -120,7 +110,6 @@ def complete_hybrid_store(
             release_id=release_id,
             n_workers=n_workers,
             overwrite=True,
-            impute_analysis_ids=impute_ids,
         )
 
         # ── 2. Rebuild the shared union table from the completed dense axis ────
