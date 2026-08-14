@@ -185,8 +185,11 @@ class OpenGWASDBStore(_ReleasePaths):
         large store takes. Renames are single filesystem operations, so that
         window shrinks to two syscalls, and if a crash lands between them the
         old release is still intact at its ``.old`` path rather than gone.
-        On any exception, the staging directory is discarded and
-        ``dest_path`` is left as it was found.
+        On any exception -- including one raised by the commit-time renames
+        themselves -- ``dest_path`` is left as it was found: if the swap
+        fails after the old release has been moved aside but before the new
+        one has moved in, the old release is moved back rather than left
+        stranded at ``.{name}.old``.
         """
         dst = Path(dest_path)
         if dst.exists() and not overwrite:
@@ -200,18 +203,23 @@ class OpenGWASDBStore(_ReleasePaths):
         staged = StagedRelease(work)
         try:
             yield staged
-            if dst.exists():
-                old = dst.with_name(f".{dst.name}.old")
-                if old.exists():
-                    shutil.rmtree(old)
-                dst.rename(old)
-                work.rename(dst)
-                shutil.rmtree(old, ignore_errors=True)
-            else:
-                work.rename(dst)
         except Exception:
             shutil.rmtree(work, ignore_errors=True)
             raise
+
+        if dst.exists():
+            old = dst.with_name(f".{dst.name}.old")
+            if old.exists():
+                shutil.rmtree(old)
+            dst.rename(old)
+            try:
+                work.rename(dst)
+            except Exception:
+                old.rename(dst)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            work.rename(dst)
 
 
 @dataclass(frozen=True)

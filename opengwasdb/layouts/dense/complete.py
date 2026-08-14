@@ -320,10 +320,8 @@ def complete_dense_store(
     dst = Path(dest_path)
     checkpoint_dir = _checkpoint_dir_for(dst)
 
-    if dst.exists():
-        if not overwrite:
-            raise FileExistsError(f"Destination already exists: {dst}. Use overwrite=True.")
-        shutil.rmtree(dst)
+    if dst.exists() and not overwrite:
+        raise FileExistsError(f"Destination already exists: {dst}. Use overwrite=True.")
 
     if checkpoint_dir.exists():
         if not overwrite:
