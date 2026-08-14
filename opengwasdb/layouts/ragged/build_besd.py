@@ -10,7 +10,7 @@ import numpy as np
 
 from opengwasdb.layouts.ragged.analyses_schema import create_analyses_table, insert_analysis_row
 from opengwasdb.layouts.ragged.besd_reader import BESDReader, read_epi, read_esi
-from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
+from opengwasdb.layouts.ragged.top_hits import apply_hit_counts, build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
 from opengwasdb.model.enums import (
     AssociationCoverage,
@@ -252,6 +252,7 @@ def build_ragged_from_besd(
         # ── 7. Build top-hit indexes ─────────────────────────────────────────────
         print("Building top-hit indexes ...")
         build_ragged_top_hit_indexes(staged.path)
+        apply_hit_counts(staged, len(probes))
 
         # ── 8. Write manifest.json ───────────────────────────────────────────────
         _write_manifest(

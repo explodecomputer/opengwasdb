@@ -5,6 +5,7 @@ import numpy as np
 from opengwasdb.layouts.dense.rho import build_dense_rho
 from opengwasdb.model.analyses import read_analyses, write_analyses
 from opengwasdb.store.open import open_store
+from opengwasdb.top_hits.format import threshold_key
 from opengwasdb.validation import validate_store
 
 
@@ -53,20 +54,22 @@ def test_validator_rejects_invalid_stored_effect_scale(dense_store_path):
 
 
 def test_validator_rejects_inconsistent_top_hit_index(dense_store_path):
+    key = threshold_key(5e-8)
     root = open_store(dense_store_path).arrays(mode="a")
-    root["top_hits"]["p_5e_08"]["z"][0] = 0.0
+    root["top_hits"][key]["z"][0] = 0.0
 
     result = validate_store(dense_store_path)
 
     assert not result.ok
-    assert any("top-hit index p_5e_08" in error for error in result.errors)
+    assert any(f"top-hit index {key}" in error for error in result.errors)
 
 
 def test_validator_rejects_invalid_top_hit_offsets(dense_store_path):
     root = open_store(dense_store_path).arrays(mode="r+")
-    offsets = root["top_hits/p_5e_08/analysis_offsets"][:]
+    path = f"top_hits/{threshold_key(5e-8)}/analysis_offsets"
+    offsets = root[path][:]
     offsets[-1] -= 1
-    root["top_hits/p_5e_08/analysis_offsets"][:] = offsets
+    root[path][:] = offsets
 
     result = validate_store(dense_store_path)
 

@@ -52,7 +52,7 @@ from opengwasdb.completion.ld_panel import (
 from opengwasdb.completion.manifest import build_completion_provenance
 from opengwasdb.completion.parallel import init_block_worker
 from opengwasdb.completion.schema import create_completion_quality_table
-from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
+from opengwasdb.layouts.ragged.top_hits import apply_hit_counts, build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RAGGED_ZARR_PATH, RaggedCSRReader
 from opengwasdb.model.enums import CompletionState
 from opengwasdb.model.manifest import StoreManifest
@@ -654,6 +654,7 @@ def _run_completion(
 
         print("Building top-hit indexes...")
         build_ragged_top_hit_indexes(staged.path)
+        apply_hit_counts(staged, n_analyses)
 
         new_release_id = release_id or f"{manifest.release_id}-completed"
         completed_manifest = StoreManifest(

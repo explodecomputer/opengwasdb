@@ -17,7 +17,7 @@ from opengwasdb.layouts.dense.constants import (
     DEFAULT_DTYPE,
 )
 from opengwasdb.layouts.dense.overview import write_overview_html
-from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes, read_top_hit_counts
+from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
 from opengwasdb.model.analyses import (
     ANCESTRY_PROP_PREFIX,
     SHARED_CORE_COLUMNS,
@@ -28,6 +28,7 @@ from opengwasdb.model.analyses import (
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
+from opengwasdb.top_hits.reader import counts as read_top_hit_counts
 from opengwasdb.variants import (
     VARIANT_AXIS_FORMAT,
     VARIANT_OFFSETS_FILENAME,

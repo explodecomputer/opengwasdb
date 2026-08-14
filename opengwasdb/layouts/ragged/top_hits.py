@@ -1,16 +1,27 @@
-"""Ragged top-hit index builder — mirrors opengwasdb/layouts/dense/top_hits.py."""
+"""Ragged top-hit index builder: harvest candidate cells from the CSR store.
+
+The Top-Hit Index format itself -- write/read/counts/validation -- lives in
+``opengwasdb.top_hits``. This module owns only what is genuinely Ragged-specific:
+deriving each association's Analysis from the CSR offsets, and (unlike Dense
+and Hybrid, whose per-Analysis metadata lives in ``analyses.tsv``) persisting
+Top-Hit Counts onto Ragged's own SQLite ``analyses`` table (ADR 0030).
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-import zarr
-from numcodecs import Blosc
 
-from opengwasdb.layouts.dense.constants import TOP_HIT_THRESHOLDS
-from opengwasdb.layouts.dense.top_hits import TOP_HIT_CHUNK_SIZE, threshold_key, z_critical
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS
+from opengwasdb.top_hits.format import TOP_HIT_THRESHOLDS, threshold_key, z_critical
+from opengwasdb.top_hits.reader import counts
+from opengwasdb.top_hits.writer import write
+
+if TYPE_CHECKING:
+    from opengwasdb.store.open import OpenGWASDBStore, StagedRelease
 
 
 def build_ragged_top_hit_indexes(
@@ -39,74 +50,38 @@ def build_ragged_top_hit_indexes(
     positions = np.arange(len(vi_all), dtype=np.int64)
     analysis_indices = np.searchsorted(offsets[1:], positions, side="right").astype(np.int32)
 
+    # write() re-filters per threshold, so the full (already-sparse) CSR can be
+    # passed directly -- no candidate pre-filtering needed the way Dense's
+    # band scan needs one to avoid holding a whole matrix in memory.
+    write(
+        store_path, vi_all, analysis_indices, z_all, se_all, n_analyses,
+        thresholds, imputed=imputed_all,
+    )
+
     abs_z = np.abs(z_all)
-    root = zarr.open_group(str(store_path / "data.zarr"), mode="a")
-    top = root.require_group("top_hits")
-    compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
-
     for threshold in thresholds:
-        keep = abs_z >= z_critical(threshold)
+        n_hits = int(np.count_nonzero(abs_z >= z_critical(threshold)))
+        print(f"  {threshold_key(threshold)}: {n_hits:,} hits")
 
-        kept_vi = vi_all[keep]
-        kept_ai = analysis_indices[keep]
-        kept_abs = abs_z[keep]
-        kept_z = z_all[keep]
-        kept_se = se_all[keep]
-        # Compute float64 p-values only for the survivors
-        from scipy.special import erfc  # type: ignore[import-untyped]
 
-        kept_p = erfc(kept_abs.astype("float64") / np.sqrt(2.0))
-        kept_imputed = None if imputed_all is None else imputed_all[keep]
+def apply_hit_counts(store: OpenGWASDBStore | StagedRelease, n_analyses: int) -> None:
+    """Write per-Analysis Top-Hit Counts from ``store``'s already-built
+    top-hit index onto its SQLite ``analyses`` table (ADR 0032).
 
-        # CSR is analysis-major; make the genomic ordering contract explicit.
-        order = np.lexsort((kept_vi, kept_ai))
-        kept_vi = kept_vi[order]
-        kept_ai = kept_ai[order]
-        kept_abs = kept_abs[order]
-        kept_z = kept_z[order]
-        kept_se = kept_se[order]
-        kept_p = kept_p[order]
-        kept_imputed = None if kept_imputed is None else kept_imputed[order]
-
-        key = threshold_key(threshold)
-        if key in top:
-            del top[key]
-        group = top.create_group(key)
-        analysis_offsets = np.empty(n_analyses + 1, dtype="uint64")
-        analysis_offsets[0] = 0
-        np.cumsum(
-            np.bincount(kept_ai, minlength=n_analyses),
-            dtype=np.uint64,
-            out=analysis_offsets[1:],
-        )
-        chunk = max(1, min(len(kept_vi), TOP_HIT_CHUNK_SIZE))
-        group.create_dataset(
-            "analysis_offsets", data=analysis_offsets, chunks=(len(analysis_offsets),),
-            compressor=compressor, dtype="uint64",
-        )
-
-        for name, data, dtype in [
-            ("variant_index", kept_vi, "uint32"),
-            ("analysis_index", kept_ai, "uint32"),
-            ("abs_z", kept_abs, "float32"),
-            ("z", kept_z, "float32"),
-            ("se", kept_se, "float32"),
-            ("p_value", kept_p, "float64"),
-        ]:
-            group.create_dataset(
-                name,
-                data=data.astype(dtype),
-                chunks=(chunk,),
-                compressor=compressor,
-                dtype=dtype,
+    The Ragged counterpart of ``opengwasdb.layouts.dense.build.add_hit_counts``:
+    Ragged Analytical Metadata lives in SQLite, not ``analyses.tsv``
+    (ADR 0030), so counts land in a column ``UPDATE`` rather than a rebuilt
+    ``AnalysisMetadata`` list. Call after ``build_ragged_top_hit_indexes()``.
+    """
+    hit_counts = counts(store.path, n_analyses)
+    conn = store.index_connection()
+    try:
+        set_clause = ", ".join(f"{column} = ?" for column in TOP_HIT_COUNT_COLUMNS)
+        for i in range(n_analyses):
+            conn.execute(
+                f"UPDATE analyses SET {set_clause} WHERE analysis_index = ?",
+                (*(hit_counts[column][i] for column in TOP_HIT_COUNT_COLUMNS), i),
             )
-        if kept_imputed is not None:
-            group.create_dataset(
-                "imputed", data=kept_imputed, chunks=(chunk,),
-                compressor=compressor, dtype="uint8",
-            )
-        group.attrs["threshold"] = threshold
-        group.attrs["order"] = "analysis_index,variant_index"
-        print(f"  {key}: {len(kept_vi):,} hits")
-
-    top.attrs["thresholds"] = list(thresholds)
+        conn.commit()
+    finally:
+        conn.close()

@@ -12,7 +12,6 @@ import numpy as np
 import zarr
 
 from opengwasdb.completion.schema import COMPLETION_QUALITY_COLUMNS
-from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS, read_analyses
@@ -25,6 +24,8 @@ from opengwasdb.model.enums import (
 )
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.store.open import OpenGWASDBStore, UnsupportedFormatVersion, open_store
+from opengwasdb.top_hits.format import threshold_key, z_critical
+from opengwasdb.top_hits.validation import validate_group_structure
 from opengwasdb.traits.axis import traits_table_path
 from opengwasdb.variants import (
     VariantAxis,
@@ -396,61 +397,19 @@ def _validate_ragged_top_hits(
     offsets = csr._offsets[:]
     vi_all = csr._variant_index[:].astype(np.int32)
     z_all = csr._z[:].astype(np.float32)
+    n_analyses = len(offsets) - 1
+    imputed_required = "imputed" in csr._root
 
     for key in top:
         group = top[key]
-        required = {
-            "analysis_offsets", "variant_index", "analysis_index", "abs_z",
-            "z", "se", "p_value",
-        }
-        missing = sorted(required.difference(group.keys()))
-        if missing:
-            errors.append(f"top-hit index {key} is missing {', '.join(missing)}")
-            continue
         threshold = float(group.attrs.get("threshold", 0))
-        vis = group["variant_index"][:].astype(np.int32)
-        ais = group["analysis_index"][:].astype(np.int32)
-        zs = group["z"][:].astype(np.float32)
-        abs_zs = group["abs_z"][:].astype(np.float32)
-        analysis_offsets = group["analysis_offsets"][:].astype(np.int64)
-        imputed = group["imputed"][:].astype(np.uint8) if "imputed" in group else None
-
-        if not (
-            len(vis) == len(ais) == len(zs) == len(abs_zs)
-            == len(group["se"]) == len(group["p_value"])
-            and (imputed is None or len(imputed) == len(vis))
-        ):
-            errors.append(f"top-hit index {key} has inconsistent array lengths")
+        group_errors, arrays = validate_group_structure(
+            key, group, n_analyses, imputed_required=imputed_required,
+        )
+        errors.extend(group_errors)
+        if arrays is None:
             continue
-
-        n_analyses = len(offsets) - 1
-        if (
-            len(analysis_offsets) != n_analyses + 1
-            or analysis_offsets[0] != 0
-            or np.any(analysis_offsets[:-1] > analysis_offsets[1:])
-            or analysis_offsets[-1] != len(vis)
-        ):
-            errors.append(f"top-hit index {key} has invalid analysis offsets")
-            continue
-        ordered = True
-        for analysis_index in range(n_analyses):
-            start = int(analysis_offsets[analysis_index])
-            end = int(analysis_offsets[analysis_index + 1])
-            if np.any(ais[start:end] != analysis_index):
-                ordered = False
-                break
-            if end - start > 1 and np.any(vis[start : end - 1] >= vis[start + 1 : end]):
-                ordered = False
-                break
-        if not ordered:
-            errors.append(f"top-hit index {key} has incorrect or non-genomic analysis slices")
-            continue
-        if "imputed" in csr._root and imputed is None:
-            errors.append(f"top-hit index {key} is missing imputed completion status")
-            continue
-        if imputed is not None and not np.all((imputed == 0) | (imputed == 1)):
-            errors.append(f"top-hit index {key} has invalid imputed completion status")
-            continue
+        vis, ais, zs, abs_zs = arrays["rows"], arrays["cols"], arrays["z_values"], arrays["abs_z"]
 
         # Exhaustive: all abs_z must match |z|
         if not np.allclose(abs_zs, np.abs(zs), rtol=1e-3, atol=1e-3):
@@ -916,71 +875,21 @@ def _validate_top_hits(root: Any, errors: list[str]) -> None:
     for key in top:
         group = top[key]
         threshold = float(group.attrs.get("threshold", key.replace("p_", "").replace("_", "-")))
-        required = {
-            "analysis_offsets", "variant_index", "analysis_index", "abs_z",
-            "z", "se", "p_value",
-        }
-        missing = sorted(required.difference(group.keys()))
-        if missing:
-            errors.append(f"top-hit index {key} is missing {', '.join(missing)}")
-            continue
-        rows = group["variant_index"][:].astype(np.int64)
-        cols = group["analysis_index"][:].astype(np.int64)
-        z_values = group["z"][:].astype("float32")
-        abs_z = group["abs_z"][:].astype("float32")
-        offsets = group["analysis_offsets"][:].astype(np.int64)
-        imputed_values = (
-            group["imputed"][:].astype(np.uint8) if "imputed" in group else None
+        group_errors, arrays = validate_group_structure(
+            key, group, n_analyses,
+            imputed_required=imputed_arr is not None,
+            check_cell_uniqueness=True,
         )
-        if imputed_arr is not None and imputed_values is None:
-            errors.append(f"top-hit index {key} is missing imputed completion status")
+        errors.extend(group_errors)
+        if arrays is None:
             continue
-        if (
-            len(rows) != len(cols)
-            or len(rows) != len(z_values)
-            or len(rows) != len(abs_z)
-            or len(rows) != len(group["se"])
-            or len(rows) != len(group["p_value"])
-            or (imputed_values is not None and len(rows) != len(imputed_values))
-        ):
-            errors.append(f"top-hit index {key} has inconsistent array lengths")
-            continue
-        if (
-            len(offsets) != n_analyses + 1
-            or len(offsets) == 0
-            or offsets[0] != 0
-            or np.any(offsets[:-1] > offsets[1:])
-            or offsets[-1] != len(rows)
-        ):
-            errors.append(f"top-hit index {key} has invalid analysis offsets")
-            continue
-        ordered = True
-        for analysis_index in range(n_analyses):
-            start, stop = int(offsets[analysis_index]), int(offsets[analysis_index + 1])
-            if np.any(cols[start:stop] != analysis_index):
-                ordered = False
-                break
-            if stop - start > 1 and np.any(rows[start : stop - 1] >= rows[start + 1 : stop]):
-                ordered = False
-                break
-        if not ordered:
-            errors.append(f"top-hit index {key} has incorrect or non-genomic analysis slices")
-            continue
-        if imputed_values is not None and not np.all((imputed_values == 0) | (imputed_values == 1)):
-            errors.append(f"top-hit index {key} has invalid imputed completion status")
-            continue
-        if len(rows):
-            flat = rows * n_analyses + cols
-            if len(np.unique(flat)) != len(flat):
-                errors.append(f"top-hit index {key} does not match stored z values")
-                continue
         groups[key] = {
             "z_crit": z_critical(threshold),
-            "rows": rows,
-            "cols": cols,
-            "z_values": z_values,
-            "imputed_values": imputed_values,
-            "n": len(rows),
+            "rows": arrays["rows"],
+            "cols": arrays["cols"],
+            "z_values": arrays["z_values"],
+            "imputed_values": arrays["imputed_values"],
+            "n": len(arrays["rows"]),
             "pass_count": 0,
             "consistent": True,
             "imputed_consistent": True,

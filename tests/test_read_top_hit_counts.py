@@ -1,4 +1,4 @@
-"""Tests for opengwasdb.layouts.dense.top_hits.read_top_hit_counts (issue #34/#35).
+"""Tests for opengwasdb.top_hits.reader.counts (issue #34/#35).
 
 Covers the fallback path for real pre-issue-#22-era stores (e.g. ukb-b) whose
 top-hit index predates the `analysis_offsets` array `read_top_hit_counts`
@@ -10,7 +10,8 @@ from __future__ import annotations
 import numpy as np
 import zarr
 
-from opengwasdb.layouts.dense.top_hits import read_top_hit_counts, threshold_key
+from opengwasdb.top_hits.format import threshold_key
+from opengwasdb.top_hits.reader import counts as read_top_hit_counts
 
 
 def _write_group(store_path, threshold, analysis_index, *, with_offsets: bool, n_analyses: int):

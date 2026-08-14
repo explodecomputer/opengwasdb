@@ -13,13 +13,13 @@ import io
 
 import numpy as np
 
-from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
 from opengwasdb.store.open import open_store
+from opengwasdb.top_hits.reader import counts as read_top_hit_counts
 from opengwasdb.validation import validate_store
 
 PANEL_ALIDS = ["1:100000:A:G", "1:814620:A:G", "1:1064620:A:G", "1:1564620:A:G"]

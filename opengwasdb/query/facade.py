@@ -40,7 +40,7 @@ would be an anomaly rather than an expected outcome.
 
 `top_hits()` sits outside the point-query finiteness contract above, on
 every adapter: candidacy is decided at build time by
-`|z| >= z_critical(threshold)` (`layouts/*/top_hits.py`), which excludes NaN
+`|z| >= z_critical(threshold)` (`opengwasdb.top_hits.writer`), which excludes NaN
 `z` (a NaN comparison is always false) but does not itself guarantee a
 finite paired `se` -- no separate `isfinite(se)` filter is applied at query
 time.
@@ -69,11 +69,12 @@ import zarr
 
 from opengwasdb.index import AnalysesIndex
 from opengwasdb.layouts.dense.rho import DenseRhoReader
-from opengwasdb.layouts.dense.top_hits import DenseTopHitReader, threshold_key
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
 from opengwasdb.store.open import OpenGWASDBStore, open_store
+from opengwasdb.top_hits.format import threshold_key, z_critical
+from opengwasdb.top_hits.reader import TopHitReader
 from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants import VariantAxis
 
@@ -366,23 +367,21 @@ class StoreQuery:
             if analysis is None or "analysis_offsets" not in group:
                 return _empty_result()
             analysis_index = int(analysis["analysis_index"])
-        reader = DenseTopHitReader(group)
-        bounds = reader.bounds(analysis_index)
-        variant_indices = reader.read("variant_index", bounds, "int32")
-        analysis_indices = reader.read("analysis_index", bounds, "int32")
-        z_values = reader.read("z", bounds, "float32")
-        if "se" in group:
-            se_values = reader.read("se", bounds, "float32")
-        else:
-            # Pointwise (coordinate) read: fetch se at exactly the index cells,
-            # not the full analysis width per row (issue 052).
-            se_values = self._root["se"].vindex[
-                variant_indices.astype("int64"), analysis_indices.astype("int64")
-            ].astype("float32")
-        if "imputed" in group:
-            imp = reader.read("imputed", bounds, "uint8")
-        else:
-            imp = self._imputed_pairs(variant_indices, analysis_indices)
+        # Pointwise (coordinate) se fallback: fetch se at exactly the index
+        # cells, not the full analysis width per row (issue 052). Applies
+        # only to legacy groups that predate storing se directly (issue 052).
+        slice_ = TopHitReader(group).slice(
+            analysis_index,
+            se_fallback=lambda vi, ai: self._root["se"].vindex[
+                vi.astype("int64"), ai.astype("int64")
+            ].astype("float32"),
+            imputed_fallback=self._imputed_pairs,
+        )
+        variant_indices = slice_["variant_index"]
+        analysis_indices = slice_["analysis_index"]
+        z_values = slice_["z"]
+        se_values = slice_["se"]
+        imp = slice_["imputed"]
         if observed_only:
             keep = imp == 0
             variant_indices, analysis_indices, z_values, se_values, imp = (
@@ -734,7 +733,7 @@ class RaggedStoreQuery:
         """Associations passing a significance threshold, in genomic order
         (analysis_index, then variant_index) -- the "analysis_index,
         variant_index" order the top-hit index itself is built in (see
-        ``group.attrs["order"]`` in ``layouts/*/top_hits.py``). Both the
+        ``group.attrs["order"]`` written by ``opengwasdb.top_hits.writer``). Both the
         indexed fast path and the full-scan fallback apply observed_only
         before limit, so ``limit`` caps the returned (post-filter) rows.
 
@@ -752,15 +751,10 @@ class RaggedStoreQuery:
                 analysis_index = self._resolve_analysis_id(analysis_id)
                 if analysis_index is None or "analysis_offsets" not in group:
                     return _empty_result()
-            reader = DenseTopHitReader(group)
-            bounds = reader.bounds(analysis_index)
-            vi = reader.read("variant_index", bounds, "int32")
-            ai = reader.read("analysis_index", bounds, "int32")
-            z = reader.read("z", bounds, "float32")
-            se = reader.read("se", bounds, "float32")
-            imp = (
-                reader.read("imputed", bounds, "uint8")
-                if "imputed" in group else np.zeros(len(vi), dtype=np.uint8)
+            slice_ = TopHitReader(group).slice(analysis_index)
+            vi, ai, z, se, imp = (
+                slice_["variant_index"], slice_["analysis_index"], slice_["z"],
+                slice_["se"], slice_["imputed"],
             )
             if observed_only:
                 keep = imp == 0
@@ -777,7 +771,6 @@ class RaggedStoreQuery:
         # too (the indexed path resolves it via `bounds()`) so a caller
         # passing analysis_id gets a filtered result on both paths, not an
         # unfiltered store-wide scan on the fallback.
-        import math
         analysis_index = None
         if analysis_id is not None:
             analysis_index = self._resolve_analysis_id(analysis_id)
@@ -789,17 +782,8 @@ class RaggedStoreQuery:
         z_all = self._csr._z[:]
         se_all = self._csr._se[:]
 
-        sqrt2 = math.sqrt(2.0)
-        lo, hi, mid = 0.0, 40.0, 0.0
-        for _ in range(60):
-            mid = (lo + hi) / 2.0
-            if math.erfc(mid / sqrt2) > threshold:
-                lo = mid
-            else:
-                hi = mid
-        z_thresh = float(mid)
         z_f32 = z_all.astype("float32")
-        mask = np.abs(z_f32) >= z_thresh
+        mask = np.abs(z_f32) >= z_critical(threshold)
         if analysis_index is not None:
             start, stop = int(offsets[analysis_index]), int(offsets[analysis_index + 1])
             segment_mask = np.zeros(len(vi_all), dtype=bool)
@@ -1091,18 +1075,19 @@ class HybridStoreQuery:
         group = root[path]
         if analysis_index is not None and "analysis_offsets" not in group:
             return _empty_result()
-        reader = DenseTopHitReader(group)
-        bounds = reader.bounds(analysis_index)
-        vi = reader.read("variant_index", bounds, "int32")
-        ai = reader.read("analysis_index", bounds, "int32")
-        z = reader.read("z", bounds, "float32")
-        se = reader.read("se", bounds, "float32")
+        slice_ = TopHitReader(group).slice(analysis_index)
         return {
-            "variant_index": vi,
-            "analysis_index": ai,
-            "z": z,
-            "se": se,
-            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z, se),
+            "variant_index": slice_["variant_index"],
+            "analysis_index": slice_["analysis_index"],
+            "z": slice_["z"],
+            "se": slice_["se"],
+            # Overflow is always observed, never imputed (ADR 0026) --
+            # ignore slice_["imputed"] (all-zeros here anyway, since the
+            # overflow-only index never carries an imputed column) and say
+            # so directly, matching every other overflow read in this class.
+            "association_status": _status_array(
+                np.zeros(len(slice_["z"]), dtype=np.uint8), slice_["z"], slice_["se"]
+            ),
         }
 
     def top_hits(

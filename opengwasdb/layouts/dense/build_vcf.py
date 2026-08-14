@@ -35,9 +35,7 @@ from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
     DEFAULT_DTYPE,
-    TOP_HIT_THRESHOLDS,
 )
-from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
 from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX
 from opengwasdb.model.enums import (
     AncestryAssignmentMethod,
@@ -51,6 +49,8 @@ from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY
 from opengwasdb.readers.registry import resolve_reader
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
+from opengwasdb.top_hits.format import TOP_HIT_THRESHOLDS, z_critical
+from opengwasdb.top_hits.writer import write as write_top_hit_indexes
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 from opengwasdb.variants.normalise import chromosome_sort_key
 
@@ -611,7 +611,7 @@ def build_dense_from_vcf_manifest(
             staged, store_id, release_id, n_variants, n_analyses, chain_file, chunk_shape, dtype
         )
         log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
-        write_top_hit_indexes(staged.path, all_rows, all_cols, all_z, all_se)
+        write_top_hit_indexes(staged.path, all_rows, all_cols, all_z, all_se, n_analyses)
         write_analyses_tsv(staged.path, add_hit_counts(staged.path, analyses))
         log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
 

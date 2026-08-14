@@ -366,6 +366,8 @@ def test_liftover_failure_above_threshold_raises(tmp_path):
 
 class TestParallel:
     def test_two_workers_matches_serial(self, tmp_path):
+        from opengwasdb.top_hits.format import threshold_key
+
         vcf1 = _make_vcf(
             tmp_path,
             "trait_a",
@@ -417,7 +419,7 @@ class TestParallel:
         )
 
         # Inline-harvested top hits must match between serial and parallel.
-        for key in ("p_5e_04", "p_5e_06"):
+        for key in (threshold_key(5e-4), threshold_key(5e-6)):
             s = serial_root[f"top_hits/{key}"]
             p = parallel_root[f"top_hits/{key}"]
             np.testing.assert_array_equal(s["variant_index"][:], p["variant_index"][:])
@@ -428,10 +430,8 @@ class TestParallel:
 class TestTopHitHarvest:
     def test_harvest_matches_full_scan(self, tmp_path):
         """Top hits harvested during Pass 2 must equal a full-matrix rescan."""
-        from opengwasdb.layouts.dense.top_hits import (
-            build_top_hit_indexes,
-            threshold_key,
-        )
+        from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
+        from opengwasdb.top_hits.format import threshold_key
 
         # trait z-scores: 4.0 and 5.0 clear the loosest tier; 3.0 does not.
         vcf1 = _make_vcf(
@@ -474,7 +474,7 @@ class TestTopHitHarvest:
         """Issue 046: the top-hit index z must equal the stored (float16) matrix
         value exactly, so the index agrees with what a query reads from `z`, and
         the store validates cleanly."""
-        from opengwasdb.layouts.dense.top_hits import threshold_key
+        from opengwasdb.top_hits.format import threshold_key
 
         vcf = _make_vcf(
             tmp_path,

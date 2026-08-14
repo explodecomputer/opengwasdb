@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from opengwasdb.layouts.dense.top_hits import threshold_key
+from opengwasdb.top_hits.format import threshold_key
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.query import query_store

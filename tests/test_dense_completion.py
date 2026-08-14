@@ -237,7 +237,7 @@ class TestCompletionFiles:
         # (ADR 0032) must reflect *this* store's post-completion top-hit
         # index, not be carried forward (or double-counted) from the
         # pre-completion source's counts.
-        from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
+        from opengwasdb.top_hits.reader import counts as read_top_hit_counts
         from opengwasdb.model.analyses import read_analyses
 
         rows = sorted(
@@ -336,7 +336,7 @@ class TestValidation:
         assert any("NaN z" in e for e in result.errors), result.errors
 
     def test_corrupt_top_hit_imputed_index_fails(self, completed_store):
-        from opengwasdb.layouts.dense.top_hits import threshold_key
+        from opengwasdb.top_hits.format import threshold_key
 
         root = open_store(completed_store).arrays(mode="r+")
         group = root[f"top_hits/{threshold_key(5e-4)}"]
@@ -434,7 +434,7 @@ class TestQuery:
         q.close()
 
     def test_top_hit_index_stores_imputed_flags(self, completed_store):
-        from opengwasdb.layouts.dense.top_hits import threshold_key
+        from opengwasdb.top_hits.format import threshold_key
 
         root = open_store(completed_store).arrays(mode="r")
         group = root[f"top_hits/{threshold_key(5e-4)}"]
@@ -479,7 +479,7 @@ class TestQuery:
         q.close()
 
     def test_top_hits_falls_back_without_indexed_imputed_flags(self, completed_store):
-        from opengwasdb.layouts.dense.top_hits import threshold_key
+        from opengwasdb.top_hits.format import threshold_key
 
         q = query_store(completed_store)
         indexed = q.top_hits(threshold=5e-4)

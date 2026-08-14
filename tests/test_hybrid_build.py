@@ -22,6 +22,7 @@ from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
 from opengwasdb.store.open import open_store
+from opengwasdb.top_hits.format import threshold_key
 from opengwasdb.validation import validate_store
 
 HG19_POS_1 = 100_000
@@ -393,9 +394,10 @@ def test_validate_catches_disjoint_violation(hybrid_store):
 
 def test_validate_catches_overflow_top_hit_offsets(hybrid_store):
     root = open_store(hybrid_store).arrays(mode="r+")
-    offsets = root["top_hits/p_5e_04/analysis_offsets"][:]
+    path = f"top_hits/{threshold_key(5e-4)}/analysis_offsets"
+    offsets = root[path][:]
     offsets[-1] -= 1
-    root["top_hits/p_5e_04/analysis_offsets"][:] = offsets
+    root[path][:] = offsets
 
     result = validate_store(hybrid_store)
     assert not result.ok

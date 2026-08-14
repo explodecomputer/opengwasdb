@@ -8,4 +8,3 @@ DEFAULT_COMPRESSOR = {
     "shuffle": "bitshuffle",
 }
 DEFAULT_DTYPE = "float16"
-TOP_HIT_THRESHOLDS = (5e-8, 5e-6, 5e-4)

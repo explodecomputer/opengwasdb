@@ -7,6 +7,12 @@ from __future__ import annotations
 
 import sqlite3
 
+#: n_hits_5e8/n_hits_5e6/n_hits_5e4 (opengwasdb.model.analyses.TOP_HIT_COUNT_COLUMNS,
+#: ADR 0032) default to 0, then are overwritten by
+#: opengwasdb.layouts.ragged.top_hits.apply_hit_counts() once the top-hit
+#: index has been built -- Ragged Analytical Metadata lives here, not
+#: analyses.tsv (ADR 0030), so this is Ragged's counterpart to Dense/Hybrid's
+#: add_hit_counts() writing those same three columns into analyses.tsv.
 CREATE_ANALYSES_TABLE_SQL = """
     CREATE TABLE analyses (
         analysis_index    INTEGER PRIMARY KEY,
@@ -19,7 +25,10 @@ CREATE_ANALYSES_TABLE_SQL = """
         trait_chr         TEXT,
         trait_bp          INTEGER,
         n                 INTEGER,
-        assigned_ancestry TEXT
+        assigned_ancestry TEXT,
+        n_hits_5e8        INTEGER NOT NULL DEFAULT 0,
+        n_hits_5e6        INTEGER NOT NULL DEFAULT 0,
+        n_hits_5e4        INTEGER NOT NULL DEFAULT 0
     )
 """
 

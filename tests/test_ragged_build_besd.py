@@ -10,6 +10,7 @@ from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.store.open import open_store
+from opengwasdb.top_hits.format import threshold_key, z_critical
 from opengwasdb.traits.axis import TraitsAxisReader
 
 
@@ -282,13 +283,46 @@ def test_validation_rejects_ragged_top_hit_offsets(tmp_path):
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
     root = open_store(out).arrays(mode="r+")
-    offsets = root["top_hits/p_5e_04/analysis_offsets"][:]
+    path = f"top_hits/{threshold_key(5e-4)}/analysis_offsets"
+    offsets = root[path][:]
     offsets[-1] -= 1
-    root["top_hits/p_5e_04/analysis_offsets"][:] = offsets
+    root[path][:] = offsets
 
     result = validate_store(out)
     assert not result.ok
     assert any("invalid analysis offsets" in error for error in result.errors)
+
+
+def test_build_populates_hit_counts_in_sqlite(tmp_path):
+    """build_ragged_from_besd wires the top-hit index onto per-Analysis
+    Top-Hit Counts on the SQLite `analyses` table (ADR 0032, issue #53) --
+    Ragged builders previously never called this counting step, unlike
+    Dense/Hybrid's add_hit_counts()."""
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    csr = RaggedCSRReader(out)
+    offsets = csr._offsets[:]
+    z_all = csr._z[:].astype("float32")
+
+    conn = open_store(out).index_connection()
+    rows = conn.execute(
+        "SELECT analysis_index, n_hits_5e8, n_hits_5e6, n_hits_5e4 "
+        "FROM analyses ORDER BY analysis_index"
+    ).fetchall()
+    conn.close()
+
+    assert len(rows) == 3  # three probes in the fixture
+    for column, threshold in (
+        ("n_hits_5e8", 5e-8), ("n_hits_5e6", 5e-6), ("n_hits_5e4", 5e-4),
+    ):
+        z_crit = z_critical(threshold)
+        for row in rows:
+            ai = int(row["analysis_index"])
+            start, end = int(offsets[ai]), int(offsets[ai + 1])
+            expected = int(np.count_nonzero(np.abs(z_all[start:end]) >= z_crit))
+            assert row[column] == expected, f"{column} analysis {ai}"
 
 
 def test_overwrite_flag(tmp_path):

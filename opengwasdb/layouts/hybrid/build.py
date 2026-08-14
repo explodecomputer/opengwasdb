@@ -45,7 +45,6 @@ from opengwasdb.layouts.dense.constants import (
     DEFAULT_COMPRESSOR,
     DEFAULT_DTYPE,
 )
-from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes
 from opengwasdb.layouts.hybrid.layout import (
     DENSE_SUBDIR,
     dense_component_path,
@@ -63,6 +62,7 @@ from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY
 from opengwasdb.readers.registry import resolve_reader
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
+from opengwasdb.top_hits.writer import write as write_top_hit_indexes
 from opengwasdb.variants import CanonicalVariant, write_variant_axis
 
 log = logging.getLogger(__name__)
@@ -508,7 +508,7 @@ def build_hybrid_from_vcf_manifest(
                 dense_staged, spill_dir, n_panel, n_analyses, effective_chunks, dtype, t2
             )
             log.info("Writing Dense Component top-hit index (%d candidates)", len(all_rows))
-            write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se)
+            write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se, n_analyses)
             # manifest.json before analyses.tsv/overview.html: overview.html
             # reads manifest.json fresh from output_path for its header (ADR 0032).
             _write_dense_manifest(dense_staged, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
