@@ -281,6 +281,130 @@ class TestPanelAlidCanonicalisation:
         assert np.isfinite(result["z"][idx[0]])
 
 
+_SSF_HEADER = [
+    "chromosome", "base_pair_location", "effect_allele", "other_allele",
+    "beta", "standard_error", "rsid", "variant_id",
+]
+
+
+def _write_ssf_filtered(path: Path, rows: list[dict]) -> None:
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write("\t".join(_SSF_HEADER) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row.get(col, "")) for col in _SSF_HEADER) + "\n")
+
+
+def _write_ssf_manifest(path: Path, rows: list[dict]) -> None:
+    header = [
+        "analysis_index", "analysis_id", "trait_id", "gene_id", "gene_name",
+        "trait_chr", "trait_bp", "n", "tissue", "context", "mhc", "filtered_file",
+        "assigned_ancestry",
+    ]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\t".join(header) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row.get(col, "")) for col in header) + "\n")
+
+
+class TestAncestryMatchedRaggedCompletion:
+    """Before the fix, complete_ragged_store had no impute_analysis_ids
+    parameter at all, and even once added, the derivation was inert against
+    real ragged sources: neither ragged builder's SQLite analyses schema
+    carried assigned_ancestry, so derive_impute_analysis_ids always saw no
+    ancestry information and imputed everything. build_ragged_from_ssf now
+    reads an optional assigned_ancestry manifest column (mirroring dense's
+    build_vcf.py), and complete_ragged_store derives the filter from it --
+    this test proves an EUR panel actually imputes an EUR-assigned Analysis
+    while leaving an AFR-assigned one observed-only, and that
+    completed_against is recorded per Analysis (issue #52).
+    """
+
+    def test_only_matching_ancestry_analysis_is_imputed(self, tmp_path):
+        import sqlite3
+
+        from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
+        from opengwasdb.variants import parse_canonical_alid
+        from opengwasdb.variants.axis import VariantAxis
+
+        observed_bp = [800_000, 850_000, 900_000, 950_000, 1_000_000, 1_100_000, 1_150_000]
+        z_values = [1.0, -1.2, 2.0, -0.5, 1.5, -2.0, 0.8]
+        se = 0.15
+
+        filtered_dir = tmp_path / "filtered"
+        filtered_dir.mkdir()
+        for analysis_id in ("eur_trait", "afr_trait"):
+            _write_ssf_filtered(filtered_dir / f"{analysis_id}.tsv.gz", [
+                {
+                    "chromosome": "1", "base_pair_location": bp,
+                    "effect_allele": "A", "other_allele": "G",
+                    "beta": z * se, "standard_error": se, "rsid": f"rs{bp}",
+                }
+                for bp, z in zip(observed_bp, z_values, strict=True)
+            ])
+
+        manifest = tmp_path / "manifest.tsv"
+        _write_ssf_manifest(manifest, [
+            {"analysis_index": 0, "analysis_id": "eur_trait", "trait_id": "T1",
+             "trait_chr": "1", "trait_bp": 975_000, "n": 5000, "mhc": "FALSE",
+             "filtered_file": "eur_trait.tsv.gz", "assigned_ancestry": "EUR"},
+            {"analysis_index": 1, "analysis_id": "afr_trait", "trait_id": "T2",
+             "trait_chr": "1", "trait_bp": 975_000, "n": 5000, "mhc": "FALSE",
+             "filtered_file": "afr_trait.tsv.gz", "assigned_ancestry": "AFR"},
+        ])
+
+        observed_store = tmp_path / "obs.opengwasdb"
+        build_ragged_from_ssf(
+            manifest, filtered_dir, observed_store, store_id="test", release_id="obs-v1"
+        )
+
+        with sqlite3.connect(str(observed_store / "index.sqlite")) as conn:
+            rows = {
+                r[0]: r[1]
+                for r in conn.execute("SELECT analysis_id, assigned_ancestry FROM analyses")
+            }
+        assert rows == {"eur_trait": "EUR", "afr_trait": "AFR"}
+
+        panel_dir = tmp_path / "ld_panel_us" / "EUR" / "1"
+        TestPanelAlidCanonicalisation._write_underscore_panel(
+            panel_dir,
+            [(bp, "A", "G", 0.35) for bp in observed_bp] + [(1_050_000, "C", "T", 0.40)],
+        )
+
+        completed_store = tmp_path / "comp.opengwasdb"
+        complete_ragged_store(
+            observed_store, completed_store, tmp_path / "ld_panel_us",
+            ancestry="EUR", cis_window_bp=500_000, min_cor=0.0, release_id="comp-v1",
+        )
+
+        with sqlite3.connect(str(completed_store / "index.sqlite")) as conn:
+            completed_against = {
+                r[0]: r[1]
+                for r in conn.execute("SELECT analysis_id, completed_against FROM analyses")
+            }
+        assert completed_against == {"eur_trait": "EUR", "afr_trait": ""}
+
+        comp_ax = VariantAxis(completed_store)
+        rec = comp_ax.by_alid(parse_canonical_alid("1:1050000:C:T"))
+        comp_ax.close()
+        assert rec is not None
+
+        q = query_store(completed_store)
+        eur_result = q.analysis("eur_trait")
+        afr_result = q.analysis("afr_trait")
+        q.close()
+
+        eur_idx = np.where(eur_result["variant_index"] == rec.variant_index)[0]
+        afr_idx = np.where(afr_result["variant_index"] == rec.variant_index)[0]
+        assert len(eur_idx) == 1 and len(afr_idx) == 1
+
+        assert eur_result["association_status"][eur_idx[0]] == "imputed"
+        assert np.isfinite(eur_result["z"][eur_idx[0]])
+        # Ancestry-mismatched: the panel variant appears (still part of the
+        # cis window's reference set) but was never filled -- missing, not
+        # imputed, even though the same block/data shape succeeded for EUR.
+        assert afr_result["association_status"][afr_idx[0]] != "imputed"
+
+
 class TestParallelAndResume:
     def test_n_workers_matches_serial(self, tmp_path, observed_store, ld_panel):
         serial_dst = tmp_path / "serial.opengwasdb"

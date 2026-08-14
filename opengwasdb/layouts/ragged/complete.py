@@ -37,7 +37,7 @@ import zarr
 from numcodecs import Blosc
 
 from opengwasdb.completion.ancestry_filter import derive_impute_analysis_ids
-from opengwasdb.completion.block import REGION_CAP_BP, complete_block_for_analysis
+from opengwasdb.completion.block import REGION_CAP_BP, run_block
 from opengwasdb.completion.checkpoint import (
     BlockCompletionResult,
     checkpoint_dir_for,
@@ -48,9 +48,6 @@ from opengwasdb.completion.checkpoint import (
 from opengwasdb.completion.ld_panel import (
     canonical_panel_alid,
     find_blocks,
-    load_block,
-    load_ld_eigenvectors,
-    snp_position,
 )
 from opengwasdb.completion.manifest import build_completion_provenance
 from opengwasdb.completion.parallel import init_block_worker
@@ -105,82 +102,59 @@ class _BlockTask:
     checkpoint_path: Path
 
 
-def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
-    """Complete one LD block for the Analyses whose cis window touches it.
-
-    Opens the (read-only, immutable) source store and LD panel itself, so no
-    payload beyond a lightweight block descriptor and its Analysis list needs
-    to be pickled in.
+def _make_reader(task: _BlockTask):
+    """ragged's half of the ``run_block`` seam: read one Analysis's observed
+    z/se at a time from its CSR row, since (unlike dense's Full Coverage
+    matrix) only the Analyses this task was assigned even have a cis window
+    touching this block.
     """
-    block = load_block(task.tsv_path)
-    if block is None:
+    def make_reader(block, canonical_alids: list[str | None]):
+        src_csr = RaggedCSRReader(task.source_path)
+        src_variant_axis = VariantAxis(task.source_path)
+        try:
+            src_alids = [v.alid for v in src_variant_axis.all()]
+        finally:
+            src_variant_axis.close()
+
+        def read(ai: int) -> tuple[np.ndarray, np.ndarray]:
+            obs = src_csr.get_analysis(ai)
+            obs_alid_to_z: dict[str, float] = {}
+            obs_alid_to_se: dict[str, float] = {}
+            for vi_old, z_val, se_val in zip(
+                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
+            ):
+                alid = src_alids[vi_old]
+                obs_alid_to_z[alid] = float(z_val)
+                obs_alid_to_se[alid] = float(se_val)
+
+            z_dense = np.array(
+                [obs_alid_to_z.get(a, float("nan")) if a is not None else float("nan")
+                 for a in canonical_alids],
+                dtype=np.float64,
+            )
+            se_dense = np.array(
+                [obs_alid_to_se.get(a, float("nan")) if a is not None else float("nan")
+                 for a in canonical_alids],
+                dtype=np.float64,
+            )
+            return z_dense, se_dense
+
+        return task.analysis_indices, read
+
+    return make_reader
+
+
+def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
+    """Complete one LD block for the Analyses whose cis window touches it."""
+    result = run_block(
+        task.tsv_path, task.thresh, task.min_cor, task.region_cap_bp, _make_reader(task)
+    )
+    if result is None:
         return None
-
-    try:
-        eigenvalues, eigenvectors = load_ld_eigenvectors(block, task.thresh)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Block %s: cannot load eigenvectors (%s) — skipping", block.block_id, exc)
-        result = BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
-        write_block_checkpoint(task.checkpoint_path, result)
-        return result
-
-    canonical_alids = [canonical_panel_alid(s) for s in block.snp_ids]
-    eaf = block.eaf
-    positions = np.array([snp_position(s) for s in block.snp_ids], dtype=np.int64)
-
-    src_csr = RaggedCSRReader(task.source_path)
-    src_variant_axis = VariantAxis(task.source_path)
-    try:
-        src_alids = [v.alid for v in src_variant_axis.all()]
-    finally:
-        src_variant_axis.close()
-
-    quality_rows: list[tuple[int, float | None, int, int]] = []
-    fills: list[tuple[str, int, float, float]] = []
-
-    for ai in task.analysis_indices:
-        obs = src_csr.get_analysis(ai)
-        obs_alid_to_z: dict[str, float] = {}
-        obs_alid_to_se: dict[str, float] = {}
-        for vi_old, z_val, se_val in zip(
-            obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
-        ):
-            alid = src_alids[vi_old]
-            obs_alid_to_z[alid] = float(z_val)
-            obs_alid_to_se[alid] = float(se_val)
-
-        z_dense = np.array(
-            [obs_alid_to_z.get(a, float("nan")) if a is not None else float("nan")
-             for a in canonical_alids],
-            dtype=np.float64,
-        )
-        se_dense = np.array(
-            [obs_alid_to_se.get(a, float("nan")) if a is not None else float("nan")
-             for a in canonical_alids],
-            dtype=np.float64,
-        )
-
-        block_result = complete_block_for_analysis(
-            z_dense, se_dense, eaf, positions,
-            eigenvectors, eigenvalues,
-            min_cor=task.min_cor, region_cap_bp=task.region_cap_bp,
-        )
-        n_missing = block_result.n_missing
-        n_filled = 0
-        for local_idx, zv, sev in block_result.fills:
-            alid = canonical_alids[local_idx]
-            if alid is None:
-                n_missing += 1
-                continue
-            fills.append((alid, ai, zv, sev))
-            n_filled += 1
-        quality_rows.append((ai, block_result.pearson_r, n_filled, n_missing))
-
-    result = BlockCompletionResult(block_id=block.block_id, quality_rows=quality_rows, fills=fills)
     write_block_checkpoint(task.checkpoint_path, result)
     # Fills stay on disk (the checkpoint); the parent reads them back in Phase 3
     # (mirrors dense — see issue 044).
-    return BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
+    return BlockCompletionResult(block_id=result.block_id, quality_rows=[], fills=[])
 
 
 # ── Public entry points ─────────────────────────────────────────────────────
@@ -436,12 +410,19 @@ def _run_completion(
             ).fetchone()
             if src_schema:
                 dst_db.execute(src_schema["sql"])
+            # completed_against (ADR 0028): "" for an Analysis that was
+            # imputed against ancestry, "" otherwise -- the completion-time
+            # counterpart to build's assigned_ancestry, mirroring dense's
+            # analyses.tsv field of the same name and meaning.
+            dst_db.execute("ALTER TABLE analyses ADD COLUMN completed_against TEXT")
             for row in src_db.execute("SELECT * FROM analyses ORDER BY analysis_index"):
-                cols = list(row.keys())
+                ai = int(row["analysis_index"])
+                cols = [*row.keys(), "completed_against"]
                 placeholders = ",".join("?" * len(cols))
+                completed_against = ancestry if impute_mask is None or bool(impute_mask[ai]) else ""
                 dst_db.execute(
                     f"INSERT INTO analyses ({','.join(cols)}) VALUES ({placeholders})",
-                    list(row),
+                    [*row, completed_against],
                 )
             dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_trait_id ON analyses(trait_id)")
             dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_gene_id ON analyses(gene_id)")

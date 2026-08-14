@@ -321,20 +321,25 @@ def _write_manifest(
 
 
 def _write_index_sqlite(staged: StagedRelease, trait_records: list[TraitRecord]) -> None:
+    # assigned_ancestry (ADR 0028): BESD/ESI/EPI bulk-QTL sources carry no
+    # per-analysis ancestry assignment, unlike build_ssf's manifest-driven
+    # sources, so the column exists (for schema parity with the completion
+    # pipeline's uniform ancestry-filter derivation) but is always empty here.
     conn = staged.index_connection()
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE analyses (
-            analysis_index INTEGER PRIMARY KEY,
-            analysis_id    TEXT NOT NULL,
-            trait_id       TEXT NOT NULL,
-            gene_id        TEXT,
-            gene_name      TEXT,
-            tissue         TEXT,
-            context        TEXT,
-            trait_chr      TEXT,
-            trait_bp       INTEGER,
-            n              INTEGER
+            analysis_index    INTEGER PRIMARY KEY,
+            analysis_id       TEXT NOT NULL,
+            trait_id          TEXT NOT NULL,
+            gene_id           TEXT,
+            gene_name         TEXT,
+            tissue            TEXT,
+            context           TEXT,
+            trait_chr         TEXT,
+            trait_bp          INTEGER,
+            n                 INTEGER,
+            assigned_ancestry TEXT
         )
     """)
     cursor.execute("CREATE INDEX idx_analyses_trait_id  ON analyses(trait_id)")
@@ -345,12 +350,12 @@ def _write_index_sqlite(staged: StagedRelease, trait_records: list[TraitRecord])
         cursor.execute("""
             INSERT INTO analyses
               (analysis_index, analysis_id, trait_id, gene_id, gene_name,
-               tissue, context, trait_chr, trait_bp, n)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               tissue, context, trait_chr, trait_bp, n, assigned_ancestry)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             rec.analysis_index, rec.analysis_id, rec.trait_id,
             rec.gene_id, rec.gene_name, rec.tissue, rec.context,
-            rec.trait_chr, rec.trait_bp, rec.n,
+            rec.trait_chr, rec.trait_bp, rec.n, None,
         ))
 
     conn.commit()

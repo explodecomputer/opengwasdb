@@ -31,7 +31,7 @@ import numpy as np
 from numcodecs import Blosc
 
 from opengwasdb.completion.ancestry_filter import derive_impute_analysis_ids
-from opengwasdb.completion.block import REGION_CAP_BP, complete_block_for_analysis
+from opengwasdb.completion.block import REGION_CAP_BP, run_block
 from opengwasdb.completion.checkpoint import (
     ALID_DTYPE,
     BlockCompletionResult,
@@ -45,11 +45,6 @@ from opengwasdb.completion.ld_panel import (
 from opengwasdb.completion.ld_panel import (
     list_all_blocks,
     list_chromosomes,
-    load_block,
-    load_ld_eigenvectors,
-)
-from opengwasdb.completion.ld_panel import (
-    snp_position as _snp_position,
 )
 from opengwasdb.completion.manifest import build_completion_provenance
 from opengwasdb.completion.parallel import init_block_worker
@@ -113,82 +108,54 @@ class _BlockTask:
     checkpoint_path: Path
 
 
-def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
-    """Complete one LD block for every Analysis. Runs inside a worker process.
-
-    Opens the (read-only, immutable) source store and LD panel itself, so no
-    payload beyond a lightweight block descriptor needs to be pickled in.
+def _make_reader(task: _BlockTask):
+    """dense's half of the ``run_block`` seam: read every Analysis's observed
+    z/se at a block's positions as one matrix slice, opening the source store
+    and LD panel itself so no payload beyond a lightweight block descriptor
+    needs to be pickled into the worker process.
     """
-    block = load_block(task.tsv_path)
-    if block is None:
+    def make_reader(block, canonical_alids: list[str | None]):
+        src_axis = VariantAxis(task.source_path)
+        try:
+            src_root = open_store(task.source_path).arrays(mode="r")
+            n_analyses = int(src_root["z"].shape[1])
+
+            src_rows: list[int | None] = []
+            for alid in canonical_alids:
+                parsed = parse_canonical_alid(alid) if alid is not None else None
+                rec = src_axis.by_alid(parsed) if parsed is not None else None
+                src_rows.append(rec.variant_index if rec is not None else None)
+
+            matched_local = [i for i, r in enumerate(src_rows) if r is not None]
+            matched_src = [src_rows[i] for i in matched_local]
+
+            z_obs = np.full((len(canonical_alids), n_analyses), np.nan, dtype=np.float64)
+            se_obs = np.full((len(canonical_alids), n_analyses), np.nan, dtype=np.float64)
+            if matched_local:
+                z_obs[matched_local, :] = src_root["z"].oindex[matched_src, :].astype(np.float64)
+                se_obs[matched_local, :] = src_root["se"].oindex[matched_src, :].astype(np.float64)
+        finally:
+            src_axis.close()
+
+        def read(ai: int) -> tuple[np.ndarray, np.ndarray]:
+            return z_obs[:, ai], se_obs[:, ai]
+
+        return range(n_analyses), read
+
+    return make_reader
+
+
+def _run_block(task: _BlockTask) -> BlockCompletionResult | None:
+    """Complete one LD block for every Analysis. Runs inside a worker process."""
+    result = run_block(task.tsv_path, task.thresh, task.min_cor, REGION_CAP_BP, _make_reader(task))
+    if result is None:
         return None
-
-    try:
-        eigenvalues, eigenvectors = load_ld_eigenvectors(block, task.thresh)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Block %s: cannot load eigenvectors (%s) — skipping", block.block_id, exc)
-        result = BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
-        write_block_checkpoint(task.checkpoint_path, result)
-        return result
-
-    # Canonical ALID per block variant (None if it doesn't parse); the LD
-    # eigenvectors are indexed by block position, so every block SNP keeps its
-    # slot even when unmatched.
-    canonical_alids = [_canonical_panel_alid(s) for s in block.snp_ids]
-
-    src_axis = VariantAxis(task.source_path)
-    try:
-        src_root = open_store(task.source_path).arrays(mode="r")
-        n_analyses = int(src_root["z"].shape[1])
-
-        src_rows: list[int | None] = []
-        for alid in canonical_alids:
-            parsed = parse_canonical_alid(alid) if alid is not None else None
-            rec = src_axis.by_alid(parsed) if parsed is not None else None
-            src_rows.append(rec.variant_index if rec is not None else None)
-
-        matched_local = [i for i, r in enumerate(src_rows) if r is not None]
-        matched_src = [src_rows[i] for i in matched_local]
-
-        z_obs = np.full((len(canonical_alids), n_analyses), np.nan, dtype=np.float64)
-        se_obs = np.full((len(canonical_alids), n_analyses), np.nan, dtype=np.float64)
-        if matched_local:
-            z_obs[matched_local, :] = src_root["z"].oindex[matched_src, :].astype(np.float64)
-            se_obs[matched_local, :] = src_root["se"].oindex[matched_src, :].astype(np.float64)
-    finally:
-        src_axis.close()
-
-    eaf = block.eaf
-    # Base-pair position per block variant (all same chromosome within a block),
-    # for the region-based imputation z-cap below.
-    positions = np.array([_snp_position(s) for s in block.snp_ids], dtype=np.int64)
-    quality_rows: list[tuple[int, float | None, int, int]] = []
-    fills: list[tuple[str, int, float, float]] = []
-
-    for ai in range(n_analyses):
-        block_result = complete_block_for_analysis(
-            z_obs[:, ai], se_obs[:, ai], eaf, positions,
-            eigenvectors, eigenvalues,
-            min_cor=task.min_cor, region_cap_bp=REGION_CAP_BP,
-        )
-        n_missing = block_result.n_missing
-        n_filled = 0
-        for local_idx, zv, sev in block_result.fills:
-            alid = canonical_alids[local_idx]
-            if alid is None:
-                n_missing += 1
-                continue
-            fills.append((alid, ai, zv, sev))
-            n_filled += 1
-        quality_rows.append((ai, block_result.pearson_r, n_filled, n_missing))
-
-    result = BlockCompletionResult(block_id=block.block_id, quality_rows=quality_rows, fills=fills)
     write_block_checkpoint(task.checkpoint_path, result)
     # Fills stay on disk (the checkpoint); the parent reads them back from the
     # checkpoints in Phase 3. Returning them here would push potentially millions
     # of tuples per block through the pool result queue and accumulate them in the
     # parent (issue 044 follow-up), so return an empty-fills marker.
-    return BlockCompletionResult(block_id=block.block_id, quality_rows=[], fills=[])
+    return BlockCompletionResult(block_id=result.block_id, quality_rows=[], fills=[])
 
 
 # ── Public entry points ─────────────────────────────────────────────────────

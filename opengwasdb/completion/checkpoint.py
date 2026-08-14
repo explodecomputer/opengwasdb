@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -27,26 +28,46 @@ def sanitize_block_id(block_id: str) -> str:
     return block_id.replace("/", "__")
 
 
+class QualityRow(NamedTuple):
+    """One ``completion_quality`` row: one (LD block, Analysis) pair's
+    imputation outcome. ``pearson_r`` is ``None`` when imputation was never
+    attempted (see ``BlockAnalysisResult``); ``n_missing`` is however many of
+    the block's positions are still unfilled for this Analysis."""
+
+    analysis_index: int
+    pearson_r: float | None
+    n_imputed: int
+    n_missing: int
+
+
+class FillRow(NamedTuple):
+    """One imputed cell: an Analysis's completed z/se at one ALID."""
+
+    alid: str
+    analysis_index: int
+    z: float
+    se: float
+
+
 @dataclass(frozen=True)
 class BlockCompletionResult:
     block_id: str
-    # (analysis_index, pearson_r | None, n_imputed, n_missing)
-    quality_rows: list[tuple[int, float | None, int, int]]
-    # (alid, analysis_index, z, se)
-    fills: list[tuple[str, int, float, float]]
+    quality_rows: list[QualityRow]
+    fills: list[FillRow]
 
 
 def write_block_checkpoint(path: Path, result: BlockCompletionResult) -> None:
-    q_ai = np.array([r[0] for r in result.quality_rows], dtype=np.int32)
+    q_ai = np.array([r.analysis_index for r in result.quality_rows], dtype=np.int32)
     q_pearson = np.array(
-        [r[1] if r[1] is not None else np.nan for r in result.quality_rows], dtype=np.float64
+        [r.pearson_r if r.pearson_r is not None else np.nan for r in result.quality_rows],
+        dtype=np.float64,
     )
-    q_nimp = np.array([r[2] for r in result.quality_rows], dtype=np.int32)
-    q_nmiss = np.array([r[3] for r in result.quality_rows], dtype=np.int32)
-    f_alid = np.array([r[0].encode("ascii") for r in result.fills], dtype=ALID_DTYPE)
-    f_ai = np.array([r[1] for r in result.fills], dtype=np.int32)
-    f_z = np.array([r[2] for r in result.fills], dtype=np.float32)
-    f_se = np.array([r[3] for r in result.fills], dtype=np.float32)
+    q_nimp = np.array([r.n_imputed for r in result.quality_rows], dtype=np.int32)
+    q_nmiss = np.array([r.n_missing for r in result.quality_rows], dtype=np.int32)
+    f_alid = np.array([r.alid.encode("ascii") for r in result.fills], dtype=ALID_DTYPE)
+    f_ai = np.array([r.analysis_index for r in result.fills], dtype=np.int32)
+    f_z = np.array([r.z for r in result.fills], dtype=np.float32)
+    f_se = np.array([r.se for r in result.fills], dtype=np.float32)
 
     tmp_path = path.with_name(path.name + ".tmp")
     with open(tmp_path, "wb") as fh:
@@ -63,7 +84,7 @@ def read_block_checkpoint(path: Path) -> BlockCompletionResult:
     with np.load(path, allow_pickle=False) as d:
         block_id = str(d["block_id"][0])
         quality_rows = [
-            (int(ai), None if not np.isfinite(p) else float(p), int(ni), int(nm))
+            QualityRow(int(ai), None if not np.isfinite(p) else float(p), int(ni), int(nm))
             for ai, p, ni, nm in zip(
                 d["q_ai"], d["q_pearson"], d["q_nimp"], d["q_nmiss"], strict=True
             )
@@ -71,7 +92,7 @@ def read_block_checkpoint(path: Path) -> BlockCompletionResult:
         f_alid = d["f_alid"]
         alids = [a.decode("ascii") if isinstance(a, bytes) else str(a) for a in f_alid]
         fills = [
-            (alid, int(ai), float(z), float(se))
+            FillRow(alid, int(ai), float(z), float(se))
             for alid, ai, z, se in zip(alids, d["f_ai"], d["f_z"], d["f_se"], strict=True)
         ]
     return BlockCompletionResult(block_id=block_id, quality_rows=quality_rows, fills=fills)

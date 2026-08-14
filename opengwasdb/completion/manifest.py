@@ -24,11 +24,10 @@ def build_completion_provenance(
     thresh: float,
     n_variants_total: int,
     n_variants_new: int,
-    method: str = COMPLETION_METHOD,
     **extra: Any,
 ) -> dict[str, Any]:
     return {
-        "method": method,
+        "method": COMPLETION_METHOD,
         "ld_panel_id": ld_panel_id,
         "ancestry": ancestry,
         "min_cor": min_cor,
