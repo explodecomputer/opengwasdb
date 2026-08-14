@@ -154,6 +154,49 @@ offset table mapping each analysis directly to one contiguous slice. The
 reference-completed index stores the `imputed` flag alongside `z`/`se`, avoiding
 random reads into `data.zarr/imputed`.
 
+### `random_lookup` across request sizes
+
+The table above reports one fixed `random_lookup` shape (100 variants × 10
+analyses). The table below re-measures `lookup` on the observed-only store
+across four request shapes, with no competing background job on the host, to
+separate the row-axis cost (scattered variants, each its own row-chunk) from
+the column-axis cost (requested analyses).
+
+```{python}
+#| echo: false
+#| output: asis
+matrix = json.loads((HERE / "opengwasdb_ukbb_dense_random_lookup_matrix.json").read_text())
+rows = [
+    (
+        f"{s['n_variants']:,}",
+        f"{s['n_analyses']:,}",
+        f"{s['n_variants'] * s['n_analyses']:,}",
+        fmt_ms(s["median_ms"]),
+        fmt_ms(s["p95_ms"]),
+        f"{s['result_count']:,}",
+    )
+    for s in matrix["scenarios"]
+]
+print(md_table(
+    ["Variants", "Analyses", "Cells requested", "Median", "p95", "Result cells"],
+    rows,
+))
+print()
+print(f"{matrix['repetitions']} repetitions per shape after one warm-up, "
+      f"store: `{matrix['store']}`.")
+```
+
+Latency tracks the number of **scattered row-chunks touched**, not the number
+of requested cells: 100 variants × 10 analyses (777.9 ms) and 100 variants ×
+500 analyses (898.0 ms) cost almost the same despite a 50× difference in
+requested cells, because both scatter 100 variants across 100 separate
+row-chunks. 10 variants × 100 analyses (100.1 ms) is far cheaper with the
+*same* 1,000 requested cells, because it only touches 10 row-chunks. The
+single-cell lookup (2.3 ms) is close to the store's point-query floor. This is
+the read pattern issue opengwasdb#52 targets: `lookup` currently reads full
+analysis-width column-chunks per selected row rather than only the
+column-chunks intersecting the requested analyses.
+
 ### Analysis-major top-hit experiment
 
 The previous implementation materialised the complete 5.5–6.4 million-entry
