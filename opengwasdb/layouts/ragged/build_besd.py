@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from opengwasdb.layouts.ragged.analyses_schema import create_analyses_table, insert_analysis_row
 from opengwasdb.layouts.ragged.besd_reader import BESDReader, read_epi, read_esi
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
@@ -326,37 +327,14 @@ def _write_index_sqlite(staged: StagedRelease, trait_records: list[TraitRecord])
     # sources, so the column exists (for schema parity with the completion
     # pipeline's uniform ancestry-filter derivation) but is always empty here.
     conn = staged.index_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE analyses (
-            analysis_index    INTEGER PRIMARY KEY,
-            analysis_id       TEXT NOT NULL,
-            trait_id          TEXT NOT NULL,
-            gene_id           TEXT,
-            gene_name         TEXT,
-            tissue            TEXT,
-            context           TEXT,
-            trait_chr         TEXT,
-            trait_bp          INTEGER,
-            n                 INTEGER,
-            assigned_ancestry TEXT
-        )
-    """)
-    cursor.execute("CREATE INDEX idx_analyses_trait_id  ON analyses(trait_id)")
-    cursor.execute("CREATE INDEX idx_analyses_gene_id   ON analyses(gene_id)")
-    cursor.execute("CREATE INDEX idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)")
-
+    create_analyses_table(conn)
     for rec in trait_records:
-        cursor.execute("""
-            INSERT INTO analyses
-              (analysis_index, analysis_id, trait_id, gene_id, gene_name,
-               tissue, context, trait_chr, trait_bp, n, assigned_ancestry)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            rec.analysis_index, rec.analysis_id, rec.trait_id,
-            rec.gene_id, rec.gene_name, rec.tissue, rec.context,
-            rec.trait_chr, rec.trait_bp, rec.n, None,
-        ))
-
+        insert_analysis_row(
+            conn,
+            analysis_index=rec.analysis_index, analysis_id=rec.analysis_id,
+            trait_id=rec.trait_id, gene_id=rec.gene_id, gene_name=rec.gene_name,
+            tissue=rec.tissue, context=rec.context, trait_chr=rec.trait_chr,
+            trait_bp=rec.trait_bp, n=rec.n, assigned_ancestry=None,
+        )
     conn.commit()
     conn.close()

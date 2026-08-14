@@ -334,6 +334,14 @@ def _run_completion(
         analysis_to_blocks: dict[int, list[str]] = {}
 
         for i, rec in enumerate(trait_records):
+            # Ancestry-mismatched Analyses are left observed-only (ADR 0028):
+            # not assigned to any block, not touched by Phase 2, no
+            # completion_quality rows -- Phase 3's pass-through path below
+            # (the same one "no trait position" already uses) carries their
+            # original associations through completely unchanged.
+            if impute_mask is not None and not impute_mask[i]:
+                analysis_to_blocks[i] = []
+                continue
             if rec.trait_chr is None or rec.trait_bp is None:
                 analysis_to_blocks[i] = []
                 continue
@@ -548,7 +556,6 @@ def _run_completion(
                         unique_ref_alids.append(alid)
 
             fills_here = fills_by_analysis.get(ai, {})
-            apply_fills = impute_mask is None or bool(impute_mask[ai])
 
             ref_vi: list[int] = []
             ref_z: list[float] = []
@@ -565,7 +572,7 @@ def _run_completion(
                     ref_z.append(obs_alid_to_z[alid])
                     ref_se.append(obs_alid_to_se[alid])
                     ref_imp.append(0)
-                elif apply_fills and alid in fills_here:
+                elif alid in fills_here:
                     z_v, se_v = fills_here[alid]
                     ref_vi.append(vi)
                     ref_z.append(z_v)

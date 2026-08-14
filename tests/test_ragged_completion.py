@@ -388,21 +388,46 @@ class TestAncestryMatchedRaggedCompletion:
         comp_ax.close()
         assert rec is not None
 
+        obs_ax = VariantAxis(observed_store)
+        afr_observed_alids = set()
+        obs_q = query_store(observed_store)
+        afr_observed = obs_q.analysis("afr_trait")
+        obs_q.close()
+        for vi in afr_observed["variant_index"].tolist():
+            afr_observed_alids.add(obs_ax.by_index(vi).alid)
+        obs_ax.close()
+
         q = query_store(completed_store)
         eur_result = q.analysis("eur_trait")
         afr_result = q.analysis("afr_trait")
         q.close()
 
         eur_idx = np.where(eur_result["variant_index"] == rec.variant_index)[0]
-        afr_idx = np.where(afr_result["variant_index"] == rec.variant_index)[0]
-        assert len(eur_idx) == 1 and len(afr_idx) == 1
-
+        assert len(eur_idx) == 1
         assert eur_result["association_status"][eur_idx[0]] == "imputed"
         assert np.isfinite(eur_result["z"][eur_idx[0]])
-        # Ancestry-mismatched: the panel variant appears (still part of the
-        # cis window's reference set) but was never filled -- missing, not
-        # imputed, even though the same block/data shape succeeded for EUR.
-        assert afr_result["association_status"][afr_idx[0]] != "imputed"
+
+        # Ancestry-mismatched (ADR 0028: "left observed-only"): the new panel
+        # variant must not appear at all, and the association list must be
+        # exactly the untouched source (compared by ALID, since variant_index
+        # spaces differ between the observed and completed variant tables) --
+        # not expanded with a "missing" row for a reference-panel position
+        # this Analysis was never completed against, even though the same
+        # block/data shape succeeded for EUR.
+        assert len(np.where(afr_result["variant_index"] == rec.variant_index)[0]) == 0
+        assert len(afr_result["z"]) == len(afr_observed["z"]) == len(observed_bp)
+        assert set(afr_result["association_status"].tolist()) == {"observed"}
+        comp_ax2 = VariantAxis(completed_store)
+        afr_result_alids = {comp_ax2.by_index(vi).alid for vi in afr_result["variant_index"].tolist()}
+        comp_ax2.close()
+        assert afr_result_alids == afr_observed_alids
+
+        with sqlite3.connect(str(completed_store / "index.sqlite")) as conn:
+            afr_quality_rows = conn.execute(
+                "SELECT COUNT(*) FROM completion_quality WHERE analysis_index = "
+                "(SELECT analysis_index FROM analyses WHERE analysis_id = 'afr_trait')"
+            ).fetchone()[0]
+        assert afr_quality_rows == 0
 
 
 class TestParallelAndResume:

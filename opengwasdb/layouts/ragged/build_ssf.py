@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from opengwasdb.layouts.ragged.analyses_schema import create_analyses_table, insert_analysis_row
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
 from opengwasdb.model.enums import (
@@ -277,38 +278,18 @@ def _write_manifest(
 
 
 def _write_index_sqlite(staged: StagedRelease, analytes: list[AnalyteInput]) -> None:
-    # Same schema as build_besd._write_index_sqlite (kept compatible with the
-    # completion pipeline and query paths). assigned_ancestry (ADR 0028) comes
-    # from the manifest here (SSF sources carry per-analysis Catalogue
-    # metadata); build_besd has no equivalent per-analysis source, so its
-    # column is always empty.
+    # assigned_ancestry (ADR 0028) comes from the manifest here (SSF sources
+    # carry per-analysis Catalogue metadata); build_besd has no equivalent
+    # per-analysis source, so its column is always empty.
     conn = staged.index_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE analyses (
-            analysis_index    INTEGER PRIMARY KEY,
-            analysis_id       TEXT NOT NULL,
-            trait_id          TEXT NOT NULL,
-            gene_id           TEXT,
-            gene_name         TEXT,
-            tissue            TEXT,
-            context           TEXT,
-            trait_chr         TEXT,
-            trait_bp          INTEGER,
-            n                 INTEGER,
-            assigned_ancestry TEXT
-        )
-    """)
-    cur.execute("CREATE INDEX idx_analyses_trait_id  ON analyses(trait_id)")
-    cur.execute("CREATE INDEX idx_analyses_gene_id   ON analyses(gene_id)")
-    cur.execute("CREATE INDEX idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)")
+    create_analyses_table(conn)
     for a in analytes:
-        cur.execute(
-            "INSERT INTO analyses (analysis_index, analysis_id, trait_id, gene_id, "
-            "gene_name, tissue, context, trait_chr, trait_bp, n, assigned_ancestry) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (a.analysis_index, a.analysis_id, a.trait_id, a.gene_id, a.gene_name,
-             a.tissue, a.context, a.trait_chr, a.trait_bp, a.n, a.assigned_ancestry or None),
+        insert_analysis_row(
+            conn,
+            analysis_index=a.analysis_index, analysis_id=a.analysis_id,
+            trait_id=a.trait_id, gene_id=a.gene_id, gene_name=a.gene_name,
+            tissue=a.tissue, context=a.context, trait_chr=a.trait_chr,
+            trait_bp=a.trait_bp, n=a.n, assigned_ancestry=a.assigned_ancestry,
         )
     conn.commit()
     conn.close()
