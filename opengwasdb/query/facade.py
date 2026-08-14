@@ -1,4 +1,63 @@
-"""Layout-independent query facade."""
+"""Layout-independent query facade (ADR-0006, ADR-0020, ADR-0033).
+
+Three adapter classes share one result contract but not one method set --
+`query_store()` / `OpenGWASDBStore.query()` dispatch to the right one from
+the store manifest: `StoreQuery` (Dense), `RaggedStoreQuery` (Ragged),
+`HybridStoreQuery` (Hybrid). See ADR-0033 for the full rationale; in short:
+
+Result shape -- every association-returning method returns
+``{"variant_index", "analysis_index", "z", "se", "association_status"}`` as
+parallel arrays (int32, int32, float32, float32, object; ADR-0020).
+
+Ordering -- `analysis()`, `phewas()`, `range_phewas()`, `range_by_analysis()`,
+and `lookup()` make no ordering guarantee beyond grouping (rows for one scan
+target are contiguous, not sorted). `top_hits()` returns genomic order --
+sorted by `(analysis_index, variant_index)` -- on every adapter and every
+internal path (indexed and full-scan fallback alike), matching the
+`group.attrs["order"]` the top-hit index itself is built with.
+
+observed_only / limit -- both apply as filter-then-limit everywhere they are
+accepted, on every internal path: `observed_only` narrows the result set
+first, `limit` then caps the already-filtered rows.
+
+Finiteness vs "missing" (point-query methods only -- `analysis()`,
+`phewas()`, `range_phewas()`, `lookup()`; `top_hits()` is a separate case,
+below) -- `StoreQuery` only ever returns finite `(z, se)` cells; a
+non-finite Dense grid cell (untested, or an attempted-but-failed completion
+-- ADR-0013, ADR-0022) is silently absent from the result rather than
+returned with `association_status="missing"`. This keeps point queries
+against a mostly-empty Dense grid sparse (ADR-0020). `RaggedStoreQuery`
+never filters for finiteness: a CSR entry only exists for a variant x
+analysis pair someone attempted (observed, or a completion attempt), so a
+non-finite entry is already a small, deliberate set, and is returned with
+`association_status="missing"` via `_status_array`. `HybridStoreQuery` is
+split by construction, not a third uniform behaviour: on-panel results are
+delegated to its Dense Component (`StoreQuery`) and inherit Dense's
+drop-non-finite behaviour; off-panel (Ragged Overflow) results are read the
+same unfiltered way as `RaggedStoreQuery`, though the Overflow Component is
+documented as always-observed (ADR-0026), so a non-finite overflow cell
+would be an anomaly rather than an expected outcome.
+
+`top_hits()` sits outside the point-query finiteness contract above, on
+every adapter: candidacy is decided at build time by
+`|z| >= z_critical(threshold)` (`layouts/*/top_hits.py`), which excludes NaN
+`z` (a NaN comparison is always false) but does not itself guarantee a
+finite paired `se` -- no separate `isfinite(se)` filter is applied at query
+time.
+
+Method availability -- `variants_table()`/`analyses_table()` and
+`__enter__`/`__exit__` are present on all three adapters, though
+`analyses_table()`'s row shape differs by layout: Dense/Hybrid rows carry
+phenotype/effect-scale fields (`analyses.tsv`); Ragged rows carry
+molecular-QTL fields -- probe/gene, tissue, context (the `analyses` SQLite
+table) -- since Ragged Analyses are QTL probes, not GWAS phenotypes.
+`analysis_id` is the one field both shapes share. `rho()`/
+`rho_row()`/`rho_matrix()` (ADR-0025, a Dense storage artifact) are exposed
+on `StoreQuery` and on `HybridStoreQuery` (delegated to its Dense Component);
+`RaggedStoreQuery` has no Rho Matrix format. `range_by_analysis()` (query by
+probe/TSS position) is Ragged-only: it needs `TraitsAxisReader`, which only
+Ragged/molecular-QTL releases populate.
+"""
 
 from __future__ import annotations
 
@@ -29,10 +88,11 @@ def _empty_result() -> dict[str, np.ndarray]:
     }
 
 
-def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray) -> np.ndarray:
-    """Derive association_status strings from imputed mask and z values."""
+def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray, se_vals: np.ndarray) -> np.ndarray:
+    """Derive association_status strings from imputed mask, z, and se (ADR-0013:
+    finite Z and SE means observed/imputed; NaN Z *or* SE means missing)."""
     out = np.where(imputed_flags == 1, "imputed", "observed").astype(object)
-    out[~np.isfinite(z_vals)] = "missing"
+    out[~(np.isfinite(z_vals) & np.isfinite(se_vals))] = "missing"
     return out
 
 
@@ -58,6 +118,25 @@ def _empty_rho_matrix_result() -> dict[str, np.ndarray]:
         "analysis_id": np.empty(0, dtype=object),
         "rho": np.empty((0, 0), dtype="float32"),
         "n_null": np.empty((0, 0), dtype="int64"),
+    }
+
+
+def _variants_table(variant_axis: VariantAxis) -> dict[int, dict]:
+    """Return all variants keyed by variant_index.
+
+    The Store Variant Table's shape is layout-independent, so all three
+    adapters share this projection rather than each repeating it.
+    """
+    return {
+        r.variant_index: {
+            "alid": r.alid,
+            "chromosome": r.chromosome,
+            "position": r.position,
+            "effect_allele": r.effect_allele,
+            "other_allele": r.other_allele,
+            "rsid": r.rsid,
+        }
+        for r in variant_axis.all()
     }
 
 
@@ -113,19 +192,15 @@ class StoreQuery:
         self._variant_axis.close()
         self._connection.close()
 
+    def __enter__(self) -> StoreQuery:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def variants_table(self) -> dict[int, dict]:
         """Return all variants keyed by variant_index."""
-        return {
-            r.variant_index: {
-                "alid": r.alid,
-                "chromosome": r.chromosome,
-                "position": r.position,
-                "effect_allele": r.effect_allele,
-                "other_allele": r.other_allele,
-                "rsid": r.rsid,
-            }
-            for r in self._variant_axis.all()
-        }
+        return _variants_table(self._variant_axis)
 
     def analyses_table(self) -> dict[int, dict]:
         """Return all analyses keyed by analysis_index."""
@@ -164,7 +239,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def phewas(self, identifier: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
@@ -191,7 +266,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def range_phewas(
@@ -224,7 +299,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def lookup(
@@ -268,7 +343,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def top_hits(
@@ -325,7 +400,7 @@ class StoreQuery:
             "analysis_index": analysis_indices,
             "z": z_values,
             "se": se_values,
-            "association_status": _status_array(imp, z_values),
+            "association_status": _status_array(imp, z_values, se_values),
         }
 
     def rho(self, *ids: str) -> dict[str, np.ndarray]:
@@ -445,6 +520,39 @@ class RaggedStoreQuery:
         ).fetchone()
         return None if row is None else int(row["analysis_index"])
 
+    def variants_table(self) -> dict[int, dict]:
+        """Return all variants keyed by variant_index."""
+        return _variants_table(self._variant_axis)
+
+    def analyses_table(self) -> dict[int, dict]:
+        """Return all analyses keyed by analysis_index.
+
+        Ragged Analyses carry molecular-QTL metadata (probe/gene, tissue,
+        context) rather than Dense's phenotype/effect-scale fields -- the
+        ``analyses`` SQLite table (``layouts/ragged/analyses_schema.py``),
+        not ``analyses.tsv``, is this layout's source of truth. ``analysis_id``
+        is the one field both layouts' tables share.
+        """
+        rows = self._db.execute(
+            "SELECT analysis_index, analysis_id, trait_id, gene_id, gene_name, "
+            "tissue, context, trait_chr, trait_bp, n, assigned_ancestry FROM analyses"
+        ).fetchall()
+        return {
+            int(row["analysis_index"]): {
+                "analysis_id": row["analysis_id"],
+                "trait_id": row["trait_id"],
+                "gene_id": row["gene_id"],
+                "gene_name": row["gene_name"],
+                "tissue": row["tissue"],
+                "context": row["context"],
+                "trait_chr": row["trait_chr"],
+                "trait_bp": row["trait_bp"],
+                "n": row["n"],
+                "assigned_ancestry": row["assigned_ancestry"],
+            }
+            for row in rows
+        }
+
     def _get_imputed_slice(self, start: int, end: int) -> np.ndarray:
         """Return imputed mask slice [start:end]; all-zeros if not a completed store."""
         if self._imputed is not None:
@@ -467,7 +575,7 @@ class RaggedStoreQuery:
         if observed_only:
             mask = imp == 0
             vi, z, se, imp = vi[mask], z[mask], se[mask], imp[mask]
-        status = _status_array(imp, z)
+        status = _status_array(imp, z, se)
         return {
             "variant_index": vi,
             "analysis_index": np.full(len(z), idx, dtype="int32"),
@@ -520,7 +628,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "association_status": _status_array(imp, z_out),
+            "association_status": _status_array(imp, z_out, se_out),
         }
 
     def range_by_analysis(
@@ -561,7 +669,7 @@ class RaggedStoreQuery:
             all_ai.append(np.full(len(z), ai, dtype="int32"))
             all_z.append(z)
             all_se.append(se)
-            all_status.append(_status_array(imp, z))
+            all_status.append(_status_array(imp, z, se))
 
         if not all_vi:
             return _empty_result()
@@ -612,7 +720,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "association_status": _status_array(imp, z_out),
+            "association_status": _status_array(imp, z_out, se_out),
         }
 
     def top_hits(
@@ -623,11 +731,16 @@ class RaggedStoreQuery:
         limit: int | None = None,
         observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
-        """Associations passing a significance threshold.
+        """Associations passing a significance threshold, in genomic order
+        (analysis_index, then variant_index) -- the "analysis_index,
+        variant_index" order the top-hit index itself is built in (see
+        ``group.attrs["order"]`` in ``layouts/*/top_hits.py``). Both the
+        indexed fast path and the full-scan fallback apply observed_only
+        before limit, so ``limit`` caps the returned (post-filter) rows.
 
         Uses the precomputed top-hit index when available (fast path);
-        falls back to a full CSR scan otherwise.
-        observed_only=True forces a full scan to exclude imputed associations.
+        falls back to a full CSR scan otherwise. The two paths return the
+        same shape of answer for the same call.
         """
         key = threshold_key(threshold)
         root = self.store.arrays(mode="r")
@@ -657,11 +770,20 @@ class RaggedStoreQuery:
                 imp = imp[:limit]
             return {
                 "variant_index": vi, "analysis_index": ai, "z": z, "se": se,
-                "association_status": _status_array(imp, z),
+                "association_status": _status_array(imp, z, se),
             }
 
-        # Fallback: full scan
+        # Fallback: full CSR scan. analysis_id is resolved and applied here
+        # too (the indexed path resolves it via `bounds()`) so a caller
+        # passing analysis_id gets a filtered result on both paths, not an
+        # unfiltered store-wide scan on the fallback.
         import math
+        analysis_index = None
+        if analysis_id is not None:
+            analysis_index = self._resolve_analysis_id(analysis_id)
+            if analysis_index is None:
+                return _empty_result()
+
         offsets = self._csr._offsets[:]
         vi_all = self._csr._variant_index[:]
         z_all = self._csr._z[:]
@@ -678,15 +800,21 @@ class RaggedStoreQuery:
         z_thresh = float(mid)
         z_f32 = z_all.astype("float32")
         mask = np.abs(z_f32) >= z_thresh
+        if analysis_index is not None:
+            start, stop = int(offsets[analysis_index]), int(offsets[analysis_index + 1])
+            segment_mask = np.zeros(len(vi_all), dtype=bool)
+            segment_mask[start:stop] = True
+            mask &= segment_mask
+        # CSR segments are analysis-major and variant_index-ascending within
+        # each analysis -- a build-time invariant (build_besd.py,
+        # build_ssf.py, complete.py all re-sort each analysis's segment by
+        # variant_index) -- so np.where(mask) already yields positions in
+        # "analysis_index,variant_index" order with no re-sort needed: the
+        # same ordering contract the top-hit index itself is built in.
         hit_positions = np.where(mask)[0]
 
         if len(hit_positions) == 0:
             return _empty_result()
-
-        order = np.argsort(-np.abs(z_f32[hit_positions]))
-        hit_positions = hit_positions[order]
-        if limit is not None:
-            hit_positions = hit_positions[:limit]
 
         analysis_indices = np.searchsorted(offsets[1:], hit_positions, side="right").astype("int32")
         imp_all = (
@@ -699,6 +827,10 @@ class RaggedStoreQuery:
             hit_positions = hit_positions[keep]
             analysis_indices = analysis_indices[keep]
             imp_hits = imp_hits[keep]
+        if limit is not None:
+            hit_positions = hit_positions[:limit]
+            analysis_indices = analysis_indices[:limit]
+            imp_hits = imp_hits[:limit]
 
         z_out = z_f32[hit_positions]
         se_out = se_all[hit_positions].astype("float32")
@@ -707,7 +839,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "association_status": _status_array(imp_hits, z_out),
+            "association_status": _status_array(imp_hits, z_out, se_out),
         }
 
     def lookup(
@@ -754,7 +886,7 @@ class RaggedStoreQuery:
             all_ai.append(np.full(len(z), idx, dtype="int32"))
             all_z.append(z)
             all_se.append(se)
-            all_status.append(_status_array(imp, z))
+            all_status.append(_status_array(imp, z, se))
 
         if not all_vi:
             return _empty_result()
@@ -816,18 +948,23 @@ class HybridStoreQuery:
     def analyses_table(self) -> dict[int, dict]:
         return self._dense.analyses_table()
 
+    # ── Rho Matrix (ADR 0025, Dense-only artifact) ───────────────────────────
+    # Delegated to the Dense Component: Rho is opt-in, built against a Dense
+    # store's own variant axis. A Hybrid release's Dense Component is a
+    # self-contained Dense Store Release, so if Rho was built against it these
+    # just work; otherwise they return the same empty result StoreQuery
+    # returns for a Dense store with no Rho Matrix.
+    def rho(self, *ids: str) -> dict[str, np.ndarray]:
+        return self._dense.rho(*ids)
+
+    def rho_row(self, analysis_id: str) -> dict[str, np.ndarray]:
+        return self._dense.rho_row(analysis_id)
+
+    def rho_matrix(self, ids: list[str] | None = None) -> dict[str, np.ndarray]:
+        return self._dense.rho_matrix(ids)
+
     def variants_table(self) -> dict[int, dict]:
-        return {
-            r.variant_index: {
-                "alid": r.alid,
-                "chromosome": r.chromosome,
-                "position": r.position,
-                "effect_allele": r.effect_allele,
-                "other_allele": r.other_allele,
-                "rsid": r.rsid,
-            }
-            for r in self._variant_axis.all()
-        }
+        return _variants_table(self._variant_axis)
 
     # ── dispatch helpers ─────────────────────────────────────────────────────
     def _remap_dense(self, result: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -855,7 +992,7 @@ class HybridStoreQuery:
             "analysis_index": np.full(len(z), col, dtype="int32"),
             "z": z,
             "se": se,
-            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z),
+            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z, se),
         }
 
     def _overflow_by_variants(self, shared_indices: set[int]) -> dict[str, np.ndarray]:
@@ -877,7 +1014,7 @@ class HybridStoreQuery:
             "analysis_index": analysis_indices,
             "z": z,
             "se": se,
-            "association_status": _status_array(np.zeros(len(hits), dtype=np.uint8), z),
+            "association_status": _status_array(np.zeros(len(hits), dtype=np.uint8), z, se),
         }
 
     # ── public query surface ─────────────────────────────────────────────────
@@ -965,7 +1102,7 @@ class HybridStoreQuery:
             "analysis_index": ai,
             "z": z,
             "se": se,
-            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z),
+            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z, se),
         }
 
     def top_hits(

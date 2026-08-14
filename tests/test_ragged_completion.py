@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from opengwasdb.layouts.dense.top_hits import threshold_key
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.query import query_store
@@ -521,6 +522,99 @@ class TestQuery:
             np.testing.assert_array_equal(selected[name], global_result[name][expected])
         assert "imputed" not in set(observed["association_status"].tolist())
         q.close()
+
+    def test_top_hits_fallback_matches_indexed_path(self, completed_store):
+        """The full-CSR-scan fallback and the precomputed-index fast path must
+        return the identical result (same order, same rows) for the same
+        call -- issue 051. Force the fallback by deleting the precomputed
+        top-hit group for a threshold the store already built, and compare
+        both the default call and an observed_only+limit call, since the two
+        filters interact (limit must apply after observed_only) and that
+        interaction is exactly what previously diverged between the two
+        paths."""
+        threshold = 5e-4
+        path = f"top_hits/{threshold_key(threshold)}"
+        q = query_store(completed_store)
+        indexed_default = q.top_hits(threshold=threshold)
+        indexed_filtered = q.top_hits(threshold=threshold, observed_only=True, limit=1)
+        q.close()
+        assert len(indexed_default["z"]) > 0
+
+        root = open_store(completed_store).arrays(mode="r+")
+        del root[path]
+
+        q2 = query_store(completed_store)
+        assert path not in q2.store.arrays(mode="r")
+        fallback_default = q2.top_hits(threshold=threshold)
+        fallback_filtered = q2.top_hits(threshold=threshold, observed_only=True, limit=1)
+        for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
+            np.testing.assert_array_equal(fallback_default[name], indexed_default[name])
+            np.testing.assert_array_equal(fallback_filtered[name], indexed_filtered[name])
+        q2.close()
+
+    def test_top_hits_fallback_excludes_earliest_hit_when_forced_imputed(self, completed_store):
+        """Force the genomically-first significant hit in one analysis to
+        read as imputed, so observed_only must drop it and limit=1 must
+        still return the *next* (observed) hit rather than an empty result.
+        This is the exact scenario the original bug got wrong: applying
+        limit before observed_only would slice down to the now-imputed
+        first hit, then filter it away, leaving nothing -- the default-args
+        parity test above can't distinguish that because this fixture's
+        completion run happens to impute nothing (0 imputed, 3 missing), so
+        observed_only is otherwise a no-op on it."""
+        threshold = 5e-4
+        root = open_store(completed_store).arrays(mode="r+")
+        del root[f"top_hits/{threshold_key(threshold)}"]
+
+        ragged = root["ragged"]
+        offsets = ragged["offsets"][:]
+        start, end = int(offsets[0]), int(offsets[1])  # analysis_index 0 == ENSG00000000001
+        z_segment = ragged["z"][start:end].astype("float32")
+        finite = np.where(np.isfinite(z_segment))[0]
+        assert len(finite) >= 2, "fixture must have >=2 finite associations in analysis 0"
+        forced_offset = start + int(finite[0])
+        second_variant_index = int(ragged["variant_index"][start + int(finite[1])])
+
+        imputed = ragged["imputed"][:]
+        imputed[forced_offset] = 1
+        ragged["imputed"][:] = imputed
+
+        q = query_store(completed_store)
+        result = q.top_hits(
+            analysis_id="ENSG00000000001", threshold=threshold, observed_only=True, limit=1
+        )
+        assert len(result["z"]) == 1
+        assert result["association_status"][0] == "observed"
+        assert int(result["variant_index"][0]) == second_variant_index
+        q.close()
+
+    def test_top_hits_fallback_filters_by_analysis_id(self, completed_store):
+        threshold = 5e-4
+        root = open_store(completed_store).arrays(mode="r+")
+        del root[f"top_hits/{threshold_key(threshold)}"]
+        q = query_store(completed_store)
+        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=threshold)
+        assert len(selected["z"]) > 0
+        assert set(selected["analysis_index"].tolist()) == {0}
+        q.close()
+
+    def test_variants_table_and_analyses_table(self, completed_store):
+        q = query_store(completed_store)
+        variants = q.variants_table()
+        analyses = q.analyses_table()
+        assert len(variants) > 0
+        assert len(analyses) > 0
+        assert all(
+            {"alid", "chromosome", "position", "effect_allele", "other_allele", "rsid"}
+            <= v.keys()
+            for v in variants.values()
+        )
+        assert all("analysis_id" in a for a in analyses.values())
+        q.close()
+
+    def test_context_manager(self, completed_store):
+        with query_store(completed_store) as q:
+            assert q.analyses_table()
 
     def test_analysis_returns_imputed_by_default(self, completed_store):
         q = query_store(completed_store)

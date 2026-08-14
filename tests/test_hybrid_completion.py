@@ -177,3 +177,18 @@ def test_completed_status_only_on_dense(tmp_path):
     assert statuses <= {"observed", "imputed"}
     if result.n_imputed > 0:
         assert "imputed" in statuses
+
+
+def test_rho_delegates_to_dense_component(tmp_path):
+    # No Rho Matrix is built for this fixture's Dense Component -- rho()
+    # must delegate through and return the same empty shape StoreQuery
+    # returns for a Dense store with no Rho Matrix, not raise.
+    src = _build_source(tmp_path)
+    ld = _make_ld_panel(tmp_path)
+    dst = tmp_path / "dst.opengwasdb"
+    complete_hybrid_store(src, dst, ld, min_cor=0.0, thresh=0.9)
+
+    q = query_store(dst)
+    assert len(q.rho("trait_a", "trait_b")["rho"]) == 0
+    assert len(q.rho_row("trait_a")["rho"]) == 0
+    assert q.rho_matrix(["trait_a", "trait_b"])["rho"].shape == (0, 0)
