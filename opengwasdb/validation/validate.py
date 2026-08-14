@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import zarr
 
+from opengwasdb.completion.schema import COMPLETION_QUALITY_COLUMNS
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
@@ -211,7 +212,7 @@ def _validate_completion_metadata(
         cols = {
             r[1] for r in connection.execute("PRAGMA table_info(completion_quality)").fetchall()
         }
-        required = {"analysis_index", "block_id", "pearson_r", "n_imputed", "n_missing"}
+        required = COMPLETION_QUALITY_COLUMNS
         missing_cols = required - cols
         if missing_cols:
             errors.append(
@@ -368,7 +369,7 @@ def _validate_ragged_completion(
             )
         else:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(completion_quality)").fetchall()}
-            required = {"analysis_index", "block_id", "pearson_r", "n_imputed", "n_missing"}
+            required = COMPLETION_QUALITY_COLUMNS
             missing_cols = required - cols
             if missing_cols:
                 errors.append(

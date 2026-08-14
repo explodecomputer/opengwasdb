@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from opengwasdb.build.observed import build_dense_observed_from_sources
+from opengwasdb.completion.checkpoint import checkpoint_dir_for
 from opengwasdb.completion.ld_panel import (
     canonical_panel_alid,
     load_block,
@@ -265,7 +266,7 @@ class TestRegionCap:
         return pos, absz
 
     def test_caps_overshoot_to_window_max(self):
-        from opengwasdb.layouts.dense.complete import _region_capped_z
+        from opengwasdb.completion.block import _region_capped_z
 
         pos, absz = self._obs()
         # at 1.5 Mb, window +/-1 Mb -> [1.0, 2.0] Mb (|z| 3, 4) -> cap to 4
@@ -273,20 +274,20 @@ class TestRegionCap:
         assert _region_capped_z(-10.0, 1_500_000, pos, absz) == pytest.approx(-4.0)
 
     def test_within_window_unchanged(self):
-        from opengwasdb.layouts.dense.complete import _region_capped_z
+        from opengwasdb.completion.block import _region_capped_z
 
         pos, absz = self._obs()
         assert _region_capped_z(2.5, 1_500_000, pos, absz) == pytest.approx(2.5)
 
     def test_no_observed_in_window_uncapped(self):
-        from opengwasdb.layouts.dense.complete import _region_capped_z
+        from opengwasdb.completion.block import _region_capped_z
 
         pos, absz = self._obs()
         # 10 Mb is >1 Mb from every observed variant -> no window -> unchanged
         assert _region_capped_z(9.9, 10_000_000, pos, absz) == pytest.approx(9.9)
 
     def test_window_excludes_distant_large_z(self):
-        from opengwasdb.layouts.dense.complete import _region_capped_z
+        from opengwasdb.completion.block import _region_capped_z
 
         pos, absz = self._obs()
         # at 5 Mb, window includes only the 5 Mb observed (|z|=2) -> cap to 2,
@@ -509,7 +510,7 @@ class TestResume:
         with pytest.raises(RuntimeError, match="simulated crash"):
             complete_dense_store(observed_store, dst, ld_panel, ancestry="EUR", min_cor=0.0)
 
-        checkpoint_dir = complete_module._checkpoint_dir_for(dst)
+        checkpoint_dir = checkpoint_dir_for(dst)
         assert checkpoint_dir.exists()
         assert not dst.exists()
         assert not complete_module._work_dir_for(dst).exists()
@@ -531,7 +532,7 @@ class TestResume:
         )
 
         resumable_dst = tmp_path / "resumable.opengwasdb"
-        checkpoint_dir = complete_module._checkpoint_dir_for(resumable_dst)
+        checkpoint_dir = checkpoint_dir_for(resumable_dst)
         checkpoint_dir.mkdir(parents=True)
         (checkpoint_dir / "blocks").mkdir()
         import json

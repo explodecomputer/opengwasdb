@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from opengwasdb.layouts.ragged.analyses_schema import create_analyses_table, insert_analysis_row
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
 from opengwasdb.model.enums import (
@@ -70,6 +71,7 @@ class AnalyteInput:
     context: str | None
     mhc: bool
     filtered_path: Path
+    assigned_ancestry: str = ""  # optional manifest column (ADR 0028); "" when omitted
 
 
 def _opt(value: str | None) -> str | None:
@@ -97,6 +99,7 @@ def _read_manifest(manifest_path: str | Path, filtered_dir: str | Path) -> list[
                 context=_opt(r.get("context")),
                 mhc=str(r.get("mhc", "")).strip().upper() in {"TRUE", "1", "YES"},
                 filtered_path=Path(filtered_dir) / r["filtered_file"],
+                assigned_ancestry=_opt(r.get("assigned_ancestry")) or "",
             ))
     rows.sort(key=lambda a: a.analysis_index)
     # analysis_index must be a dense 0..n-1 sequence for CSR offset alignment.
@@ -200,7 +203,7 @@ def build_ragged_from_ssf(
             for a in analytes
         ]
         write_traits_axis(staged.path, trait_records)
-        _write_index_sqlite(staged, trait_records)
+        _write_index_sqlite(staged, analytes)
 
         # ── Stream per-analysis associations into the CSR store ──────────────────
         csr = RaggedCSRWriter()
@@ -274,34 +277,19 @@ def _write_manifest(
     staged.write_manifest(manifest)
 
 
-def _write_index_sqlite(staged: StagedRelease, trait_records: list[TraitRecord]) -> None:
-    # Same schema as build_besd._write_index_sqlite (kept compatible with the
-    # completion pipeline and query paths).
+def _write_index_sqlite(staged: StagedRelease, analytes: list[AnalyteInput]) -> None:
+    # assigned_ancestry (ADR 0028) comes from the manifest here (SSF sources
+    # carry per-analysis Catalogue metadata); build_besd has no equivalent
+    # per-analysis source, so its column is always empty.
     conn = staged.index_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE analyses (
-            analysis_index INTEGER PRIMARY KEY,
-            analysis_id    TEXT NOT NULL,
-            trait_id       TEXT NOT NULL,
-            gene_id        TEXT,
-            gene_name      TEXT,
-            tissue         TEXT,
-            context        TEXT,
-            trait_chr      TEXT,
-            trait_bp       INTEGER,
-            n              INTEGER
-        )
-    """)
-    cur.execute("CREATE INDEX idx_analyses_trait_id  ON analyses(trait_id)")
-    cur.execute("CREATE INDEX idx_analyses_gene_id   ON analyses(gene_id)")
-    cur.execute("CREATE INDEX idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)")
-    for r in trait_records:
-        cur.execute(
-            "INSERT INTO analyses (analysis_index, analysis_id, trait_id, gene_id, "
-            "gene_name, tissue, context, trait_chr, trait_bp, n) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (r.analysis_index, r.analysis_id, r.trait_id, r.gene_id, r.gene_name,
-             r.tissue, r.context, r.trait_chr, r.trait_bp, r.n),
+    create_analyses_table(conn)
+    for a in analytes:
+        insert_analysis_row(
+            conn,
+            analysis_index=a.analysis_index, analysis_id=a.analysis_id,
+            trait_id=a.trait_id, gene_id=a.gene_id, gene_name=a.gene_name,
+            tissue=a.tissue, context=a.context, trait_chr=a.trait_chr,
+            trait_bp=a.trait_bp, n=a.n, assigned_ancestry=a.assigned_ancestry,
         )
     conn.commit()
     conn.close()
