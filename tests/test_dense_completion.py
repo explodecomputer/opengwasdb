@@ -446,6 +446,10 @@ class TestQuery:
         gathered = root["imputed"].vindex[rows, cols].astype(np.uint8)
         np.testing.assert_array_equal(indexed, gathered)
 
+    def test_context_manager(self, completed_store):
+        with query_store(completed_store) as q:
+            assert q.analyses_table()
+
     def test_top_hits_uses_indexed_imputed_flags(self, completed_store):
         q = query_store(completed_store)
 

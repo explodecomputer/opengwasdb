@@ -522,6 +522,65 @@ class TestQuery:
         assert "imputed" not in set(observed["association_status"].tolist())
         q.close()
 
+    def test_top_hits_fallback_matches_indexed_path(self, completed_store):
+        """The full-CSR-scan fallback and the precomputed-index fast path must
+        return the identical result (same order, same rows) for the same
+        call -- issue 051. Force the fallback by deleting the precomputed
+        top-hit group for a threshold the store already built."""
+        q = query_store(completed_store)
+        indexed = q.top_hits(threshold=5e-4)
+        q.close()
+        assert len(indexed["z"]) > 0
+
+        root = open_store(completed_store).arrays(mode="r+")
+        del root["top_hits/p_5e_04"]
+
+        q2 = query_store(completed_store)
+        assert "top_hits/p_5e_04" not in q2.store.arrays(mode="r")
+        fallback = q2.top_hits(threshold=5e-4)
+        for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
+            np.testing.assert_array_equal(fallback[name], indexed[name])
+        q2.close()
+
+    def test_top_hits_fallback_filters_by_analysis_id(self, completed_store):
+        root = open_store(completed_store).arrays(mode="r+")
+        del root["top_hits/p_5e_04"]
+        q = query_store(completed_store)
+        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=5e-4)
+        assert len(selected["z"]) > 0
+        assert set(selected["analysis_index"].tolist()) == {0}
+        q.close()
+
+    def test_top_hits_fallback_applies_observed_only_before_limit(self, completed_store):
+        root = open_store(completed_store).arrays(mode="r+")
+        del root["top_hits/p_5e_04"]
+        q = query_store(completed_store)
+        observed_only = q.top_hits(threshold=5e-4, observed_only=True)
+        limited = q.top_hits(threshold=5e-4, observed_only=True, limit=1)
+        assert "imputed" not in set(limited["association_status"].tolist())
+        if len(observed_only["z"]):
+            assert limited["variant_index"][0] == observed_only["variant_index"][0]
+            assert limited["analysis_index"][0] == observed_only["analysis_index"][0]
+        q.close()
+
+    def test_variants_table_and_analyses_table(self, completed_store):
+        q = query_store(completed_store)
+        variants = q.variants_table()
+        analyses = q.analyses_table()
+        assert len(variants) > 0
+        assert len(analyses) > 0
+        assert all(
+            {"alid", "chromosome", "position", "effect_allele", "other_allele", "rsid"}
+            <= v.keys()
+            for v in variants.values()
+        )
+        assert all("analysis_id" in a for a in analyses.values())
+        q.close()
+
+    def test_context_manager(self, completed_store):
+        with query_store(completed_store) as q:
+            assert q.analyses_table()
+
     def test_analysis_returns_imputed_by_default(self, completed_store):
         q = query_store(completed_store)
         result = q.analysis("ENSG00000000001")
