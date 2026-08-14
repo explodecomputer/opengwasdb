@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from opengwasdb.layouts.dense.top_hits import threshold_key
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.query import query_store
@@ -526,41 +527,39 @@ class TestQuery:
         """The full-CSR-scan fallback and the precomputed-index fast path must
         return the identical result (same order, same rows) for the same
         call -- issue 051. Force the fallback by deleting the precomputed
-        top-hit group for a threshold the store already built."""
+        top-hit group for a threshold the store already built, and compare
+        both the default call and an observed_only+limit call, since the two
+        filters interact (limit must apply after observed_only) and that
+        interaction is exactly what previously diverged between the two
+        paths."""
+        threshold = 5e-4
+        path = f"top_hits/{threshold_key(threshold)}"
         q = query_store(completed_store)
-        indexed = q.top_hits(threshold=5e-4)
+        indexed_default = q.top_hits(threshold=threshold)
+        indexed_filtered = q.top_hits(threshold=threshold, observed_only=True, limit=1)
         q.close()
-        assert len(indexed["z"]) > 0
+        assert len(indexed_default["z"]) > 0
 
         root = open_store(completed_store).arrays(mode="r+")
-        del root["top_hits/p_5e_04"]
+        del root[path]
 
         q2 = query_store(completed_store)
-        assert "top_hits/p_5e_04" not in q2.store.arrays(mode="r")
-        fallback = q2.top_hits(threshold=5e-4)
+        assert path not in q2.store.arrays(mode="r")
+        fallback_default = q2.top_hits(threshold=threshold)
+        fallback_filtered = q2.top_hits(threshold=threshold, observed_only=True, limit=1)
         for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
-            np.testing.assert_array_equal(fallback[name], indexed[name])
+            np.testing.assert_array_equal(fallback_default[name], indexed_default[name])
+            np.testing.assert_array_equal(fallback_filtered[name], indexed_filtered[name])
         q2.close()
 
     def test_top_hits_fallback_filters_by_analysis_id(self, completed_store):
+        threshold = 5e-4
         root = open_store(completed_store).arrays(mode="r+")
-        del root["top_hits/p_5e_04"]
+        del root[f"top_hits/{threshold_key(threshold)}"]
         q = query_store(completed_store)
-        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=5e-4)
+        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=threshold)
         assert len(selected["z"]) > 0
         assert set(selected["analysis_index"].tolist()) == {0}
-        q.close()
-
-    def test_top_hits_fallback_applies_observed_only_before_limit(self, completed_store):
-        root = open_store(completed_store).arrays(mode="r+")
-        del root["top_hits/p_5e_04"]
-        q = query_store(completed_store)
-        observed_only = q.top_hits(threshold=5e-4, observed_only=True)
-        limited = q.top_hits(threshold=5e-4, observed_only=True, limit=1)
-        assert "imputed" not in set(limited["association_status"].tolist())
-        if len(observed_only["z"]):
-            assert limited["variant_index"][0] == observed_only["variant_index"][0]
-            assert limited["analysis_index"][0] == observed_only["analysis_index"][0]
         q.close()
 
     def test_variants_table_and_analyses_table(self, completed_store):

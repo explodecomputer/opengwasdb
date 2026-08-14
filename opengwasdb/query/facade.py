@@ -20,15 +20,30 @@ observed_only / limit -- both apply as filter-then-limit everywhere they are
 accepted, on every internal path: `observed_only` narrows the result set
 first, `limit` then caps the already-filtered rows.
 
-Finiteness vs "missing" -- `StoreQuery` only ever returns finite `(z, se)`
-cells; a non-finite Dense grid cell (untested, or an attempted-but-failed
-completion -- ADR-0013, ADR-0022) is silently absent from the result rather
-than returned with `association_status="missing"`. This keeps point queries
-against a mostly-empty Dense grid sparse (ADR-0020). `RaggedStoreQuery` and
-`HybridStoreQuery` never filter for finiteness: a CSR entry only exists for a
-variant x analysis pair someone attempted (observed, or a completion
-attempt), so a non-finite entry is already a small, deliberate set, and is
-returned with `association_status="missing"` via `_status_array`.
+Finiteness vs "missing" (point-query methods only -- `analysis()`,
+`phewas()`, `range_phewas()`, `lookup()`; `top_hits()` is a separate case,
+below) -- `StoreQuery` only ever returns finite `(z, se)` cells; a
+non-finite Dense grid cell (untested, or an attempted-but-failed completion
+-- ADR-0013, ADR-0022) is silently absent from the result rather than
+returned with `association_status="missing"`. This keeps point queries
+against a mostly-empty Dense grid sparse (ADR-0020). `RaggedStoreQuery`
+never filters for finiteness: a CSR entry only exists for a variant x
+analysis pair someone attempted (observed, or a completion attempt), so a
+non-finite entry is already a small, deliberate set, and is returned with
+`association_status="missing"` via `_status_array`. `HybridStoreQuery` is
+split by construction, not a third uniform behaviour: on-panel results are
+delegated to its Dense Component (`StoreQuery`) and inherit Dense's
+drop-non-finite behaviour; off-panel (Ragged Overflow) results are read the
+same unfiltered way as `RaggedStoreQuery`, though the Overflow Component is
+documented as always-observed (ADR-0026), so a non-finite overflow cell
+would be an anomaly rather than an expected outcome.
+
+`top_hits()` sits outside the point-query finiteness contract above, on
+every adapter: candidacy is decided at build time by
+`|z| >= z_critical(threshold)` (`layouts/*/top_hits.py`), which excludes NaN
+`z` (a NaN comparison is always false) but does not itself guarantee a
+finite paired `se` -- no separate `isfinite(se)` filter is applied at query
+time.
 
 Method availability -- `variants_table()`/`analyses_table()` and
 `__enter__`/`__exit__` are present on all three adapters, though
@@ -105,6 +120,25 @@ def _empty_rho_matrix_result() -> dict[str, np.ndarray]:
     }
 
 
+def _variants_table(variant_axis: VariantAxis) -> dict[int, dict]:
+    """Return all variants keyed by variant_index.
+
+    The Store Variant Table's shape is layout-independent, so all three
+    adapters share this projection rather than each repeating it.
+    """
+    return {
+        r.variant_index: {
+            "alid": r.alid,
+            "chromosome": r.chromosome,
+            "position": r.position,
+            "effect_allele": r.effect_allele,
+            "other_allele": r.other_allele,
+            "rsid": r.rsid,
+        }
+        for r in variant_axis.all()
+    }
+
+
 class StoreQuery:
     """Public query object that hides the physical store layout — Dense stores."""
 
@@ -165,17 +199,7 @@ class StoreQuery:
 
     def variants_table(self) -> dict[int, dict]:
         """Return all variants keyed by variant_index."""
-        return {
-            r.variant_index: {
-                "alid": r.alid,
-                "chromosome": r.chromosome,
-                "position": r.position,
-                "effect_allele": r.effect_allele,
-                "other_allele": r.other_allele,
-                "rsid": r.rsid,
-            }
-            for r in self._variant_axis.all()
-        }
+        return _variants_table(self._variant_axis)
 
     def analyses_table(self) -> dict[int, dict]:
         """Return all analyses keyed by analysis_index."""
@@ -497,17 +521,7 @@ class RaggedStoreQuery:
 
     def variants_table(self) -> dict[int, dict]:
         """Return all variants keyed by variant_index."""
-        return {
-            r.variant_index: {
-                "alid": r.alid,
-                "chromosome": r.chromosome,
-                "position": r.position,
-                "effect_allele": r.effect_allele,
-                "other_allele": r.other_allele,
-                "rsid": r.rsid,
-            }
-            for r in self._variant_axis.all()
-        }
+        return _variants_table(self._variant_axis)
 
     def analyses_table(self) -> dict[int, dict]:
         """Return all analyses keyed by analysis_index.
@@ -949,17 +963,7 @@ class HybridStoreQuery:
         return self._dense.rho_matrix(ids)
 
     def variants_table(self) -> dict[int, dict]:
-        return {
-            r.variant_index: {
-                "alid": r.alid,
-                "chromosome": r.chromosome,
-                "position": r.position,
-                "effect_allele": r.effect_allele,
-                "other_allele": r.other_allele,
-                "rsid": r.rsid,
-            }
-            for r in self._variant_axis.all()
-        }
+        return _variants_table(self._variant_axis)
 
     # ── dispatch helpers ─────────────────────────────────────────────────────
     def _remap_dense(self, result: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

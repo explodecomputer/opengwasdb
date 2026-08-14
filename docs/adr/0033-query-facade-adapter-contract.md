@@ -15,10 +15,11 @@ had drifted apart in ways the ADR never made explicit:
   ignored `analysis_id`, while the indexed fast path (and Dense/Hybrid
   `top_hits()`) return genomic order; the fallback also applied `limit`
   before `observed_only` where every other path applies it after.
-- Dense query methods (`analysis()`, `phewas()`, `range_phewas()`, `lookup()`)
-  silently drop non-finite `(z, se)` cells; Ragged/Hybrid never filter for
-  finiteness and instead label non-finite cells `association_status="missing"`.
-  Same result shape, undocumented difference in what counts as a result.
+- Dense's point-query methods (`analysis()`, `phewas()`, `range_phewas()`,
+  `lookup()`) silently drop non-finite `(z, se)` cells; Ragged never filters
+  for finiteness and instead labels non-finite cells
+  `association_status="missing"`. Same result shape, undocumented difference
+  in what counts as a result.
 
 Issue #51 asked whether the fix is to collapse the three classes into one
 adapter interface with capability detection pushed behind the boundary, or to
@@ -75,20 +76,35 @@ one implements explicit rather than implicit:
    position via `TraitsAxisReader`, which only Ragged/molecular-QTL releases
    populate. Dense and Hybrid releases have no probe/TSS axis to query by.
 
-7. **Finiteness handling stays intentionally different, and is now
-   documented in `facade.py`'s module docstring:** `StoreQuery` drops
+7. **Finiteness handling stays intentionally different for the point-query
+   methods (`analysis()`, `phewas()`, `range_phewas()`, `lookup()`), and is
+   now documented in `facade.py`'s module docstring:** `StoreQuery` drops
    non-finite `(z, se)` cells outright — they never appear in results, not
    even as `"missing"` — because the Dense grid is mostly-empty by
    construction (most variant×analysis cells were never tested) and
    returning every such cell would defeat the sparse-array contract
    (ADR-0020) that motivated the array API in the first place.
-   `RaggedStoreQuery`/`HybridStoreQuery` never filter for finiteness: a CSR
-   entry exists only for a pair someone attempted (observed, or a completion
-   attempt per ADR-0013/ADR-0022), so a non-finite entry is already a small,
-   deliberate set, and surfacing it as `association_status="missing"` costs
-   nothing extra. Callers who need Dense's aggregate missing counts already
-   have `completion_n_missing_total` (`analyses.tsv`, ADR-0011) without
-   paying for a full-grid scan.
+   `RaggedStoreQuery` never filters for finiteness: a CSR entry exists only
+   for a pair someone attempted (observed, or a completion attempt per
+   ADR-0013/ADR-0022), so a non-finite entry is already a small, deliberate
+   set, and surfacing it as `association_status="missing"` costs nothing
+   extra. Callers who need Dense's aggregate missing counts already have
+   `completion_n_missing_total` (`analyses.tsv`, ADR-0011) without paying for
+   a full-grid scan. `HybridStoreQuery` does not have one uniform behaviour
+   here: on-panel results are delegated to its Dense Component and inherit
+   Dense's drop-non-finite behaviour; off-panel (Ragged Overflow) results are
+   read the same unfiltered way `RaggedStoreQuery` reads its CSR, though the
+   Overflow Component is documented as always-observed (ADR-0026), so a
+   non-finite overflow cell would be an anomaly rather than an expected
+   outcome.
+
+8. **`top_hits()` is not covered by the point-query finiteness contract, on
+   any adapter.** Candidacy is decided at build time by
+   `|z| >= z_critical(threshold)` (`layouts/*/top_hits.py`), which excludes
+   NaN `z` (a NaN comparison is always false) but does not itself guarantee a
+   finite paired `se` — no `isfinite(se)` filter is applied at query time.
+   This was already true before this change; it is recorded here because the
+   point-query finiteness rule in (7) does not extend to it.
 
 ## Alternatives considered
 
