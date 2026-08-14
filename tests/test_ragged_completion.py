@@ -552,6 +552,42 @@ class TestQuery:
             np.testing.assert_array_equal(fallback_filtered[name], indexed_filtered[name])
         q2.close()
 
+    def test_top_hits_fallback_excludes_earliest_hit_when_forced_imputed(self, completed_store):
+        """Force the genomically-first significant hit in one analysis to
+        read as imputed, so observed_only must drop it and limit=1 must
+        still return the *next* (observed) hit rather than an empty result.
+        This is the exact scenario the original bug got wrong: applying
+        limit before observed_only would slice down to the now-imputed
+        first hit, then filter it away, leaving nothing -- the default-args
+        parity test above can't distinguish that because this fixture's
+        completion run happens to impute nothing (0 imputed, 3 missing), so
+        observed_only is otherwise a no-op on it."""
+        threshold = 5e-4
+        root = open_store(completed_store).arrays(mode="r+")
+        del root[f"top_hits/{threshold_key(threshold)}"]
+
+        ragged = root["ragged"]
+        offsets = ragged["offsets"][:]
+        start, end = int(offsets[0]), int(offsets[1])  # analysis_index 0 == ENSG00000000001
+        z_segment = ragged["z"][start:end].astype("float32")
+        finite = np.where(np.isfinite(z_segment))[0]
+        assert len(finite) >= 2, "fixture must have >=2 finite associations in analysis 0"
+        forced_offset = start + int(finite[0])
+        second_variant_index = int(ragged["variant_index"][start + int(finite[1])])
+
+        imputed = ragged["imputed"][:]
+        imputed[forced_offset] = 1
+        ragged["imputed"][:] = imputed
+
+        q = query_store(completed_store)
+        result = q.top_hits(
+            analysis_id="ENSG00000000001", threshold=threshold, observed_only=True, limit=1
+        )
+        assert len(result["z"]) == 1
+        assert result["association_status"][0] == "observed"
+        assert int(result["variant_index"][0]) == second_variant_index
+        q.close()
+
     def test_top_hits_fallback_filters_by_analysis_id(self, completed_store):
         threshold = 5e-4
         root = open_store(completed_store).arrays(mode="r+")

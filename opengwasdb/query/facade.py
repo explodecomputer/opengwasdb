@@ -88,10 +88,11 @@ def _empty_result() -> dict[str, np.ndarray]:
     }
 
 
-def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray) -> np.ndarray:
-    """Derive association_status strings from imputed mask and z values."""
+def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray, se_vals: np.ndarray) -> np.ndarray:
+    """Derive association_status strings from imputed mask, z, and se (ADR-0013:
+    finite Z and SE means observed/imputed; NaN Z *or* SE means missing)."""
     out = np.where(imputed_flags == 1, "imputed", "observed").astype(object)
-    out[~np.isfinite(z_vals)] = "missing"
+    out[~(np.isfinite(z_vals) & np.isfinite(se_vals))] = "missing"
     return out
 
 
@@ -238,7 +239,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def phewas(self, identifier: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
@@ -265,7 +266,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def range_phewas(
@@ -298,7 +299,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def lookup(
@@ -342,7 +343,7 @@ class StoreQuery:
             "analysis_index": cols,
             "z": z_vals,
             "se": se_vals,
-            "association_status": _status_array(imp, z_vals),
+            "association_status": _status_array(imp, z_vals, se_vals),
         }
 
     def top_hits(
@@ -399,7 +400,7 @@ class StoreQuery:
             "analysis_index": analysis_indices,
             "z": z_values,
             "se": se_values,
-            "association_status": _status_array(imp, z_values),
+            "association_status": _status_array(imp, z_values, se_values),
         }
 
     def rho(self, *ids: str) -> dict[str, np.ndarray]:
@@ -574,7 +575,7 @@ class RaggedStoreQuery:
         if observed_only:
             mask = imp == 0
             vi, z, se, imp = vi[mask], z[mask], se[mask], imp[mask]
-        status = _status_array(imp, z)
+        status = _status_array(imp, z, se)
         return {
             "variant_index": vi,
             "analysis_index": np.full(len(z), idx, dtype="int32"),
@@ -627,7 +628,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "association_status": _status_array(imp, z_out),
+            "association_status": _status_array(imp, z_out, se_out),
         }
 
     def range_by_analysis(
@@ -668,7 +669,7 @@ class RaggedStoreQuery:
             all_ai.append(np.full(len(z), ai, dtype="int32"))
             all_z.append(z)
             all_se.append(se)
-            all_status.append(_status_array(imp, z))
+            all_status.append(_status_array(imp, z, se))
 
         if not all_vi:
             return _empty_result()
@@ -719,7 +720,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "association_status": _status_array(imp, z_out),
+            "association_status": _status_array(imp, z_out, se_out),
         }
 
     def top_hits(
@@ -769,7 +770,7 @@ class RaggedStoreQuery:
                 imp = imp[:limit]
             return {
                 "variant_index": vi, "analysis_index": ai, "z": z, "se": se,
-                "association_status": _status_array(imp, z),
+                "association_status": _status_array(imp, z, se),
             }
 
         # Fallback: full CSR scan. analysis_id is resolved and applied here
@@ -838,7 +839,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "association_status": _status_array(imp_hits, z_out),
+            "association_status": _status_array(imp_hits, z_out, se_out),
         }
 
     def lookup(
@@ -885,7 +886,7 @@ class RaggedStoreQuery:
             all_ai.append(np.full(len(z), idx, dtype="int32"))
             all_z.append(z)
             all_se.append(se)
-            all_status.append(_status_array(imp, z))
+            all_status.append(_status_array(imp, z, se))
 
         if not all_vi:
             return _empty_result()
@@ -991,7 +992,7 @@ class HybridStoreQuery:
             "analysis_index": np.full(len(z), col, dtype="int32"),
             "z": z,
             "se": se,
-            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z),
+            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z, se),
         }
 
     def _overflow_by_variants(self, shared_indices: set[int]) -> dict[str, np.ndarray]:
@@ -1013,7 +1014,7 @@ class HybridStoreQuery:
             "analysis_index": analysis_indices,
             "z": z,
             "se": se,
-            "association_status": _status_array(np.zeros(len(hits), dtype=np.uint8), z),
+            "association_status": _status_array(np.zeros(len(hits), dtype=np.uint8), z, se),
         }
 
     # ── public query surface ─────────────────────────────────────────────────
@@ -1101,7 +1102,7 @@ class HybridStoreQuery:
             "analysis_index": ai,
             "z": z,
             "se": se,
-            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z),
+            "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z, se),
         }
 
     def top_hits(
