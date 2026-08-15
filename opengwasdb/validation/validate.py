@@ -253,6 +253,7 @@ def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
     index_path = store.index_path
     data_path = store.data_path
     ragged_path = data_path / "ragged"
+    analyses_path = store.analyses_path
 
     for label, p in [
         ("index.sqlite", index_path),
@@ -263,6 +264,7 @@ def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
         ("variant_alid_bytes.npy", variant_alid_bytes_path(store_path)),
         ("variant_alid_rows.npy", variant_alid_rows_path(store_path)),
         ("traits.tsv.gz", traits_table_path(store_path)),
+        ("analyses.tsv", analyses_path),
     ]:
         if not p.exists():
             errors.append(f"missing {label}")
@@ -289,20 +291,16 @@ def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
         if np.any(np.isfinite(se_vals) & (se_vals < 0)):
             errors.append("se contains negative finite values")
 
+        n_analyses_csr = len(offsets) - 1
+        n_analyses_tsv = _validate_analyses_tsv(analyses_path, errors)
+        if n_analyses_tsv != n_analyses_csr:
+            errors.append(
+                f"analyses.tsv has {n_analyses_tsv} rows but "
+                f"zarr CSR offsets imply {n_analyses_csr} analyses"
+            )
+
         with store.index_connection() as conn:
-            tables = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()}
-            if "analyses" not in tables:
-                errors.append("index.sqlite is missing the analyses table")
-            else:
-                n_analyses_db = conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
-                n_analyses_csr = len(offsets) - 1
-                if n_analyses_db != n_analyses_csr:
-                    errors.append(
-                        f"analyses table has {n_analyses_db} rows but "
-                        f"zarr CSR offsets imply {n_analyses_csr} analyses"
-                    )
+            _reject_stray_analyses_table(conn, errors)
 
         data_root = store.arrays(mode="r")
 
@@ -683,6 +681,14 @@ def _validate_sqlite(
         variant_index = int(row["variant_index"])
         if variant_index < 0 or variant_index >= n_variants:
             errors.append(f"alias {row['alias']!r} points to missing variant {variant_index}")
+    _reject_stray_analyses_table(connection, errors)
+
+
+def _reject_stray_analyses_table(connection: sqlite3.Connection, errors: list[str]) -> None:
+    """Every layout shares this rule (ADR 0034, issue #72): analyses.tsv is
+    the sole source of truth for Analytical Metadata, so a leftover SQL
+    ``analyses`` table -- Dense/Hybrid retired theirs in issue #68, Ragged in
+    issue #69 -- is a validation failure, not a harmless relic."""
     tables = {
         r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }

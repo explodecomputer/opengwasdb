@@ -20,9 +20,11 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.layouts.ragged.analyses_schema import create_analyses_table, insert_analysis_row
+from opengwasdb.layouts.dense.build import add_hit_counts
+from opengwasdb.layouts.ragged.analyses import molecular_analysis
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
+from opengwasdb.model.analyses import write_analysis_records
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -203,7 +205,10 @@ def build_ragged_from_ssf(
             for a in analytes
         ]
         write_traits_axis(staged.path, trait_records)
-        _write_index_sqlite(staged, analytes)
+        # No `analyses` table (ADR 0034, issue #69): analyses.tsv below is the sole
+        # source of truth for Analytical Metadata. The file is still created here,
+        # empty, so Reference Completion has somewhere to add completion_quality.
+        staged.index_connection().close()
 
         # ── Stream per-analysis associations into the CSR store ──────────────────
         csr = RaggedCSRWriter()
@@ -223,6 +228,22 @@ def build_ragged_from_ssf(
         csr.flush(staged.path)
 
         build_ragged_top_hit_indexes(staged.path)
+
+        print("Writing analyses.tsv...")
+        analyses = [
+            molecular_analysis(
+                a.analysis_id,
+                gene_id=a.gene_id, gene_name=a.gene_name,
+                tissue=a.tissue, context=a.context,
+                trait_chr=a.trait_chr, trait_bp=a.trait_bp, n=a.n,
+                stored_effect_scale=stored_effect_scale,
+                assigned_ancestry=a.assigned_ancestry,
+            )
+            for a in analytes
+        ]
+        write_analysis_records(
+            staged.path / "analyses.tsv", add_hit_counts(staged.path, analyses)
+        )
 
         _write_manifest(
             staged, store_id, release_id,
@@ -275,21 +296,3 @@ def _write_manifest(
         },
     )
     staged.write_manifest(manifest)
-
-
-def _write_index_sqlite(staged: StagedRelease, analytes: list[AnalyteInput]) -> None:
-    # assigned_ancestry (ADR 0028) comes from the manifest here (SSF sources
-    # carry per-analysis Catalogue metadata); build_besd has no equivalent
-    # per-analysis source, so its column is always empty.
-    conn = staged.index_connection()
-    create_analyses_table(conn)
-    for a in analytes:
-        insert_analysis_row(
-            conn,
-            analysis_index=a.analysis_index, analysis_id=a.analysis_id,
-            trait_id=a.trait_id, gene_id=a.gene_id, gene_name=a.gene_name,
-            tissue=a.tissue, context=a.context, trait_chr=a.trait_chr,
-            trait_bp=a.trait_bp, n=a.n, assigned_ancestry=a.assigned_ancestry,
-        )
-    conn.commit()
-    conn.close()

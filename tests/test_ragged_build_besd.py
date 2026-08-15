@@ -291,6 +291,93 @@ def test_validation_rejects_ragged_top_hit_offsets(tmp_path):
     assert any("invalid analysis offsets" in error for error in result.errors)
 
 
+def test_analyses_tsv_has_no_sql_table_and_carries_molecular_columns(tmp_path):
+    """Issue #69: analyses.tsv is the sole source of truth for Analytical
+    Metadata; the store's index.sqlite carries no `analyses` table, and the
+    molecular/context columns the BESD path already collects (gene, tissue,
+    genomic position) are carried into the shared schema."""
+    import sqlite3
+
+    from opengwasdb.model.analyses import read_analyses
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1", tissue="Blood")
+
+    conn = sqlite3.connect(str(out / "index.sqlite"))
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "analyses" not in tables
+
+    table = read_analyses(out / "analyses.tsv")
+    rows = {r["analysis_id"]: r for r in table.rows}
+    assert rows["ENSG00000000001::Blood"]["gene_name"] == "GENE1"
+    assert rows["ENSG00000000001::Blood"]["gene_id"] == "ENSG00000000001"
+    assert rows["ENSG00000000001::Blood"]["tissue"] == "Blood"
+    assert rows["ENSG00000000001::Blood"]["trait_chr"] == "1"
+    assert rows["ENSG00000000001::Blood"]["trait_bp"] == "1050000"
+
+
+def test_top_hit_counts_in_analyses_tsv_match_top_hit_index(tmp_path):
+    """Issue #73: Ragged builds persist per-Analysis Top-Hit Counts in
+    analyses.tsv, matching what the store's own top-hit index actually
+    contains -- not zero, not stale."""
+    from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
+    from opengwasdb.model.analyses import read_analyses
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    table = read_analyses(out / "analyses.tsv")
+    rows = sorted(table.rows, key=lambda r: int(r["analysis_index"]))
+    expected = read_top_hit_counts(out, len(rows))
+    for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+        assert [int(r[column]) for r in rows] == expected[column]
+    # All 5 associations clear the loosest threshold (test_top_hits_query_uses_index).
+    assert sum(int(r["n_hits_5e4"]) for r in rows) == 5
+
+
+def test_analyses_table_groups_by_gene(tmp_path):
+    """Issue #71: a caller who used to group Ragged Analyses via the
+    retired dual analysis_id-or-trait_id lookup can instead filter
+    analyses_table() (the same shape Dense/Hybrid return) on gene_id."""
+    from opengwasdb.query import query_store
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    q = query_store(out)
+    analyses = q.analyses_table()
+    q.close()
+
+    by_gene = {row["gene_id"]: idx for idx, row in analyses.items()}
+    assert by_gene["ENSG00000000002"] is not None
+    matched = [idx for idx, row in analyses.items() if row["gene_id"] == "ENSG00000000002"]
+    assert len(matched) == 1
+    assert analyses[matched[0]]["analysis_id"] == "ENSG00000000002"
+
+
+def test_range_by_analysis_matches_trait_position(tmp_path):
+    """Issue #69/#71: the tabix-indexed genomic-range-by-Trait-position
+    lookup is unaffected by retiring the SQL analyses table -- it now reads
+    positions that live only in analyses.tsv's trait_chr/trait_bp columns
+    (mirrored into traits.tsv.gz as a query-acceleration index)."""
+    from opengwasdb.query import query_store
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    q = query_store(out)
+    # Probes at chr1:1_050_000 and chr1:1_150_000; chr2 probe excluded by chromosome.
+    result = q.range_by_analysis("1", 1_000_000, 1_200_000)
+    q.close()
+
+    assert set(result["analysis_index"].tolist()) == {0, 1}
+
+
 def test_overwrite_flag(tmp_path):
     prefix = _make_besd_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"

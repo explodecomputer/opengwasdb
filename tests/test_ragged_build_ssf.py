@@ -135,6 +135,24 @@ def test_manifest_fields(tmp_path):
     assert data["provenance"]["stored_effect_scale"] == "sd"
 
 
+def test_stored_effect_scale_populated_per_analysis(tmp_path):
+    """Issue #69: stored_effect_scale is a real per-Analysis analyses.tsv
+    column, not only a store-wide value threaded through provenance."""
+    from opengwasdb.model.analyses import read_analyses
+
+    manifest, filtered_dir = _make_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_ssf(
+        manifest, filtered_dir, out, store_id="test", release_id="v1",
+        stored_effect_scale="log_or",
+    )
+
+    table = read_analyses(out / "analyses.tsv")
+    assert {r["analysis_id"]: r["stored_effect_scale"] for r in table.rows} == {
+        "trait_a": "log_or", "trait_b": "log_or",
+    }
+
+
 def test_traits_tsv_contents(tmp_path):
     manifest, filtered_dir = _make_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"

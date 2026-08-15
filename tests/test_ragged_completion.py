@@ -139,6 +139,45 @@ def completed_store(tmp_path, observed_store, ld_panel):
     return dst
 
 
+class TestTopHitCountsRefreshedByCompletion:
+    """Issue #73: completion recomputes Top-Hit Counts from the post-
+    completion top-hit index rather than carrying forward pre-completion
+    counts, which would go stale once imputation changes the association
+    list a threshold is evaluated against."""
+
+    def test_completed_top_hit_counts_match_completed_top_hit_index(self, completed_store):
+        from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
+        from opengwasdb.model.analyses import read_analyses
+
+        table = read_analyses(completed_store / "analyses.tsv")
+        rows = sorted(table.rows, key=lambda r: int(r["analysis_index"]))
+        expected = read_top_hit_counts(completed_store, len(rows))
+        for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+            assert [int(r[column]) for r in rows] == expected[column]
+
+    def test_completion_overwrites_stale_pre_completion_counts(
+        self, tmp_path, observed_store, ld_panel
+    ):
+        """A source analyses.tsv carrying an obviously wrong (stale)
+        pre-completion count must not survive into the completed store --
+        add_hit_counts recomputes it from the completed store's own
+        top-hit index rather than adding onto whatever the source said."""
+        from opengwasdb.model.analyses import read_analyses, write_analyses
+
+        analyses_path = observed_store / "analyses.tsv"
+        table = read_analyses(analyses_path)
+        rows = [{**row, "n_hits_5e4": "999"} for row in table.rows]
+        write_analyses(analyses_path, type(table)(fieldnames=table.fieldnames, rows=tuple(rows)))
+
+        dst = tmp_path / "comp_stale.opengwasdb"
+        complete_ragged_store(
+            observed_store, dst, ld_panel, ancestry="EUR", cis_window_bp=500_000, min_cor=0.0,
+        )
+
+        dst_rows = read_analyses(dst / "analyses.tsv").rows
+        assert all(int(r["n_hits_5e4"]) != 999 for r in dst_rows)
+
+
 class TestCompletionFiles:
     def test_creates_store_directory(self, completed_store):
         assert completed_store.exists()
@@ -273,7 +312,7 @@ class TestPanelAlidCanonicalisation:
         assert rec is not None, "new panel variant missing from the completed variant table"
 
         q = query_store(completed_store)
-        result = q.analysis("ENSG00000000099")
+        result = q.analysis("ENSG00000000099::Blood")
         q.close()
 
         idx = np.where(result["variant_index"] == rec.variant_index)[0]
@@ -324,6 +363,7 @@ class TestAncestryMatchedRaggedCompletion:
         import sqlite3
 
         from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
+        from opengwasdb.model.analyses import read_analyses
         from opengwasdb.variants import parse_canonical_alid
         from opengwasdb.variants.axis import VariantAxis
 
@@ -358,11 +398,8 @@ class TestAncestryMatchedRaggedCompletion:
             manifest, filtered_dir, observed_store, store_id="test", release_id="obs-v1"
         )
 
-        with sqlite3.connect(str(observed_store / "index.sqlite")) as conn:
-            rows = {
-                r[0]: r[1]
-                for r in conn.execute("SELECT analysis_id, assigned_ancestry FROM analyses")
-            }
+        obs_table = read_analyses(observed_store / "analyses.tsv")
+        rows = {r["analysis_id"]: r["assigned_ancestry"] for r in obs_table.rows}
         assert rows == {"eur_trait": "EUR", "afr_trait": "AFR"}
 
         panel_dir = tmp_path / "ld_panel_us" / "EUR" / "1"
@@ -377,11 +414,8 @@ class TestAncestryMatchedRaggedCompletion:
             ancestry="EUR", cis_window_bp=500_000, min_cor=0.0, release_id="comp-v1",
         )
 
-        with sqlite3.connect(str(completed_store / "index.sqlite")) as conn:
-            completed_against = {
-                r[0]: r[1]
-                for r in conn.execute("SELECT analysis_id, completed_against FROM analyses")
-            }
+        comp_table = read_analyses(completed_store / "analyses.tsv")
+        completed_against = {r["analysis_id"]: r["completed_against"] for r in comp_table.rows}
         assert completed_against == {"eur_trait": "EUR", "afr_trait": ""}
 
         comp_ax = VariantAxis(completed_store)
@@ -423,10 +457,12 @@ class TestAncestryMatchedRaggedCompletion:
         comp_ax2.close()
         assert afr_result_alids == afr_observed_alids
 
+        afr_index = next(
+            int(r["analysis_index"]) for r in comp_table.rows if r["analysis_id"] == "afr_trait"
+        )
         with sqlite3.connect(str(completed_store / "index.sqlite")) as conn:
             afr_quality_rows = conn.execute(
-                "SELECT COUNT(*) FROM completion_quality WHERE analysis_index = "
-                "(SELECT analysis_index FROM analyses WHERE analysis_id = 'afr_trait')"
+                "SELECT COUNT(*) FROM completion_quality WHERE analysis_index = ?", (afr_index,)
             ).fetchone()[0]
         assert afr_quality_rows == 0
 
@@ -513,9 +549,9 @@ class TestQuery:
     def test_selected_top_hits_match_global_and_filter_imputed(self, completed_store):
         q = query_store(completed_store)
         global_result = q.top_hits(threshold=5e-4)
-        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=5e-4)
+        selected = q.top_hits(analysis_id="ENSG00000000001::Blood", threshold=5e-4)
         observed = q.top_hits(
-            analysis_id="ENSG00000000001", threshold=5e-4, observed_only=True
+            analysis_id="ENSG00000000001::Blood", threshold=5e-4, observed_only=True
         )
         expected = global_result["analysis_index"] == 0
         for name in ("variant_index", "analysis_index", "z", "se", "association_status"):
@@ -568,7 +604,7 @@ class TestQuery:
 
         ragged = root["ragged"]
         offsets = ragged["offsets"][:]
-        start, end = int(offsets[0]), int(offsets[1])  # analysis_index 0 == ENSG00000000001
+        start, end = int(offsets[0]), int(offsets[1])  # analysis_index 0 == ENSG00000000001::Blood
         z_segment = ragged["z"][start:end].astype("float32")
         finite = np.where(np.isfinite(z_segment))[0]
         assert len(finite) >= 2, "fixture must have >=2 finite associations in analysis 0"
@@ -581,7 +617,7 @@ class TestQuery:
 
         q = query_store(completed_store)
         result = q.top_hits(
-            analysis_id="ENSG00000000001", threshold=threshold, observed_only=True, limit=1
+            analysis_id="ENSG00000000001::Blood", threshold=threshold, observed_only=True, limit=1
         )
         assert len(result["z"]) == 1
         assert result["association_status"][0] == "observed"
@@ -593,7 +629,7 @@ class TestQuery:
         root = open_store(completed_store).arrays(mode="r+")
         del root[f"top_hits/{threshold_key(threshold)}"]
         q = query_store(completed_store)
-        selected = q.top_hits(analysis_id="ENSG00000000001", threshold=threshold)
+        selected = q.top_hits(analysis_id="ENSG00000000001::Blood", threshold=threshold)
         assert len(selected["z"]) > 0
         assert set(selected["analysis_index"].tolist()) == {0}
         q.close()
@@ -618,7 +654,7 @@ class TestQuery:
 
     def test_analysis_returns_imputed_by_default(self, completed_store):
         q = query_store(completed_store)
-        result = q.analysis("ENSG00000000001")
+        result = q.analysis("ENSG00000000001::Blood")
         assert "association_status" in result
         statuses = set(result["association_status"].tolist())
         # Should have at least "observed"; may also have "imputed" or "missing"
@@ -627,8 +663,8 @@ class TestQuery:
 
     def test_analysis_observed_only_excludes_imputed(self, completed_store):
         q = query_store(completed_store)
-        all_result = q.analysis("ENSG00000000001")
-        obs_result = q.analysis("ENSG00000000001", observed_only=True)
+        all_result = q.analysis("ENSG00000000001::Blood")
+        obs_result = q.analysis("ENSG00000000001::Blood", observed_only=True)
         # observed-only must be a subset
         assert len(obs_result["z"]) <= len(all_result["z"])
         statuses = set(obs_result["association_status"].tolist())
@@ -637,14 +673,14 @@ class TestQuery:
 
     def test_association_status_field_always_present(self, completed_store):
         q = query_store(completed_store)
-        result = q.analysis("ENSG00000000001")
+        result = q.analysis("ENSG00000000001::Blood")
         assert "association_status" in result
         assert len(result["association_status"]) == len(result["z"])
         q.close()
 
     def test_observed_store_has_status_observed(self, observed_store):
         q = query_store(observed_store)
-        result = q.analysis("ENSG00000000001")
+        result = q.analysis("ENSG00000000001::Blood")
         assert "association_status" in result
         statuses = set(result["association_status"].tolist())
         assert statuses.issubset({"observed"})

@@ -1,11 +1,80 @@
 from __future__ import annotations
 
+import gzip
+
 import numpy as np
+import pytest
 
 from opengwasdb.layouts.dense.rho import build_dense_rho
+from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
+from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
 from opengwasdb.model.analyses import read_analyses, write_analyses
 from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
+
+
+@pytest.fixture
+def ragged_store_path(tmp_path):
+    """A minimal Ragged Observed-Only store (SSF ingestion path)."""
+    header = [
+        "chromosome", "base_pair_location", "effect_allele", "other_allele",
+        "beta", "standard_error", "rsid",
+    ]
+    rows = [
+        {"chromosome": "1", "base_pair_location": 100, "effect_allele": "A",
+         "other_allele": "G", "beta": 0.3, "standard_error": 0.1, "rsid": "rs1"},
+        {"chromosome": "1", "base_pair_location": 200, "effect_allele": "A",
+         "other_allele": "G", "beta": -0.2, "standard_error": 0.1, "rsid": "rs2"},
+    ]
+    filtered_dir = tmp_path / "filtered"
+    filtered_dir.mkdir()
+    with gzip.open(filtered_dir / "t1.tsv.gz", "wt", encoding="utf-8") as fh:
+        fh.write("\t".join(header) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row[c]) for c in header) + "\n")
+
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "analysis_index\tanalysis_id\ttrait_id\tgene_id\tgene_name\ttrait_chr\ttrait_bp\t"
+        "n\ttissue\tcontext\tmhc\tfiltered_file\n"
+        "0\tt1\tT1\tENSG1\tGENE1\t1\t150\t1000\tBlood\t\tFALSE\tt1.tsv.gz\n",
+        encoding="utf-8",
+    )
+    store_path = tmp_path / "ragged.opengwasdb"
+    build_ragged_from_ssf(manifest, filtered_dir, store_path, store_id="fixture", release_id="v1")
+    return store_path
+
+
+@pytest.fixture
+def hybrid_store_path(tmp_path):
+    """A minimal Hybrid store: two on-panel analyses, so its Dense Component
+    (dense_component_path) is where index.sqlite/analyses.tsv actually live."""
+    header = (
+        "##fileformat=VCFv4.2\n"
+        "##FORMAT=<ID=ES,Number=A,Type=Float,Description=\"Effect size\">\n"
+        "##FORMAT=<ID=SE,Number=A,Type=Float,Description=\"Standard error\">\n"
+        "##SAMPLE=<ID=S,StudyType=Continuous>\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n"
+    )
+    vcf_a = tmp_path / "trait_a.vcf"
+    vcf_a.write_text(header + "1\t100000\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n", encoding="utf-8")
+    vcf_b = tmp_path / "trait_b.vcf"
+    vcf_b.write_text(header + "1\t100000\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.4\n", encoding="utf-8")
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\n"
+        f"trait_a\t{vcf_a}\tTrait A\t1000\tsd\tdeclared_standardised\t\n"
+        f"trait_b\t{vcf_b}\tTrait B\t1000\tsd\tdeclared_standardised\t\n",
+        encoding="utf-8",
+    )
+    panel = tmp_path / "panel.txt"
+    panel.write_text("1:100000:A:G\n", encoding="utf-8")
+    store_path = tmp_path / "hybrid.opengwasdb"
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=panel, store_id="fixture", release_id="v1"
+    )
+    return store_path
 
 
 def test_validator_rejects_missing_required_array(dense_store_path):
@@ -114,6 +183,96 @@ def test_validator_rejects_leftover_sqlite_analyses_table(dense_store_path):
 
 
 def test_validator_accepts_store_without_sqlite_analyses_table(dense_store_path):
+    result = validate_store(dense_store_path)
+
+    assert result.ok, result.errors
+
+
+def test_validator_rejects_leftover_sqlite_analyses_table_ragged(ragged_store_path):
+    # Issue #69/#72: Ragged retired its SQLite `analyses` table onto
+    # analyses.tsv too -- the same rule Dense already enforces must catch a
+    # Ragged release that still carries one.
+    connection = open_store(ragged_store_path).index_connection()
+    try:
+        connection.execute("CREATE TABLE analyses (analysis_index INTEGER PRIMARY KEY)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = validate_store(ragged_store_path)
+
+    assert not result.ok
+    assert any("still contains an analyses table" in error for error in result.errors)
+
+
+def test_validator_accepts_migrated_ragged_store(ragged_store_path):
+    result = validate_store(ragged_store_path)
+
+    assert result.ok, result.errors
+
+
+def test_validator_accepts_migrated_hybrid_store(hybrid_store_path):
+    # Issue #72: "a correctly-migrated Dense, Hybrid, and Ragged release...
+    # succeeds" -- Hybrid's Dense Component reuses _validate_dense_store,
+    # so this covers the same two new rules via that shared path.
+    result = validate_store(hybrid_store_path)
+
+    assert result.ok, result.errors
+
+
+def test_validator_rejects_leftover_sqlite_analyses_table_hybrid(hybrid_store_path):
+    from opengwasdb.layouts.hybrid.layout import dense_component_path
+
+    connection = open_store(dense_component_path(hybrid_store_path)).index_connection()
+    try:
+        connection.execute("CREATE TABLE analyses (analysis_index INTEGER PRIMARY KEY)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = validate_store(hybrid_store_path)
+
+    assert not result.ok
+    assert any("still contains an analyses table" in error for error in result.errors)
+
+
+def test_validator_rejects_duplicate_analysis_id_hybrid(hybrid_store_path):
+    from opengwasdb.layouts.hybrid.layout import dense_component_path
+
+    analyses_path = dense_component_path(hybrid_store_path) / "analyses.tsv"
+    table = read_analyses(analyses_path)
+    rows = [{**row, "analysis_id": table.rows[0]["analysis_id"]} for row in table.rows]
+    write_analyses(analyses_path, type(table)(fieldnames=table.fieldnames, rows=tuple(rows)))
+
+    result = validate_store(hybrid_store_path)
+
+    assert not result.ok
+    assert any("more than one row for analysis_id" in error for error in result.errors)
+
+
+def test_validator_rejects_duplicate_analysis_id(dense_store_path):
+    # Issue #72: analysis_id uniqueness within analyses.tsv is enforced for
+    # every layout, not just documented (store-format spec §7a).
+    analyses_path = dense_store_path / "analyses.tsv"
+    table = read_analyses(analyses_path)
+    rows = list(table.rows)
+    rows[1] = {**rows[1], "analysis_id": rows[0]["analysis_id"]}
+    write_analyses(analyses_path, type(table)(fieldnames=table.fieldnames, rows=tuple(rows)))
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("more than one row for analysis_id" in error for error in result.errors)
+
+
+def test_validator_accepts_duplicate_trait_ontology_id(dense_store_path):
+    # Issue #72: duplicate trait_ontology_id is expected and valid (several
+    # Analyses of the same curated Trait) as long as analysis_id stays unique.
+    analyses_path = dense_store_path / "analyses.tsv"
+    table = read_analyses(analyses_path)
+    rows = [{**row, "trait_ontology_id": "EFO:0000001"} for row in table.rows]
+    write_analyses(analyses_path, type(table)(fieldnames=table.fieldnames, rows=tuple(rows)))
+
     result = validate_store(dense_store_path)
 
     assert result.ok, result.errors

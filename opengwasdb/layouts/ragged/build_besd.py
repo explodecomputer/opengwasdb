@@ -8,10 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.layouts.ragged.analyses_schema import create_analyses_table, insert_analysis_row
+from opengwasdb.layouts.dense.build import add_hit_counts
+from opengwasdb.layouts.ragged.analyses import molecular_analysis
 from opengwasdb.layouts.ragged.besd_reader import BESDReader, read_epi, read_esi
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
+from opengwasdb.model.analyses import write_analysis_records
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -180,9 +182,11 @@ def build_ragged_from_besd(
         print("Writing traits.tsv.gz ...")
         write_traits_axis(staged.path, trait_records)
 
-        # ── 5. Write index.sqlite ────────────────────────────────────────────────
-        print("Writing index.sqlite ...")
-        _write_index_sqlite(staged, trait_records)
+        # ── 5. Materialise index.sqlite ──────────────────────────────────────────
+        # No `analyses` table (ADR 0034, issue #69): analyses.tsv below is the sole
+        # source of truth for Analytical Metadata. The file is still created here,
+        # empty, so Reference Completion has somewhere to add completion_quality.
+        staged.index_connection().close()
 
         # ── 6. Stream BESD associations into zarr CSR ────────────────────────────
         print(f"Reading BESD: {prefix}.besd")
@@ -253,6 +257,24 @@ def build_ragged_from_besd(
         print("Building top-hit indexes ...")
         build_ragged_top_hit_indexes(staged.path)
 
+        # ── 7b. Write analyses.tsv ────────────────────────────────────────────────
+        print("Writing analyses.tsv ...")
+        # assigned_ancestry (ADR 0028): BESD/ESI/EPI bulk-QTL sources carry no
+        # per-analysis ancestry assignment, unlike build_ssf's manifest-driven
+        # sources, so it stays at molecular_analysis's blank default here.
+        analyses = [
+            molecular_analysis(
+                rec.analysis_id,
+                gene_id=rec.gene_id, gene_name=rec.gene_name,
+                tissue=rec.tissue, context=rec.context,
+                trait_chr=rec.trait_chr, trait_bp=rec.trait_bp, n=rec.n,
+            )
+            for rec in trait_records
+        ]
+        write_analysis_records(
+            staged.path / "analyses.tsv", add_hit_counts(staged.path, analyses)
+        )
+
         # ── 8. Write manifest.json ───────────────────────────────────────────────
         _write_manifest(
             staged, store_id, release_id,
@@ -319,22 +341,3 @@ def _write_manifest(
         },
     )
     staged.write_manifest(manifest)
-
-
-def _write_index_sqlite(staged: StagedRelease, trait_records: list[TraitRecord]) -> None:
-    # assigned_ancestry (ADR 0028): BESD/ESI/EPI bulk-QTL sources carry no
-    # per-analysis ancestry assignment, unlike build_ssf's manifest-driven
-    # sources, so the column exists (for schema parity with the completion
-    # pipeline's uniform ancestry-filter derivation) but is always empty here.
-    conn = staged.index_connection()
-    create_analyses_table(conn)
-    for rec in trait_records:
-        insert_analysis_row(
-            conn,
-            analysis_index=rec.analysis_index, analysis_id=rec.analysis_id,
-            trait_id=rec.trait_id, gene_id=rec.gene_id, gene_name=rec.gene_name,
-            tissue=rec.tissue, context=rec.context, trait_chr=rec.trait_chr,
-            trait_bp=rec.trait_bp, n=rec.n, assigned_ancestry=None,
-        )
-    conn.commit()
-    conn.close()
