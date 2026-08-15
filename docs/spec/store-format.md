@@ -53,7 +53,7 @@ Required fields:
 | `store_id` | Stable identity of the logical Store |
 | `release_id` | Identity of this immutable release |
 | `format_version` | Store format version |
-| `primary_layout` | `dense` or `ragged` |
+| `primary_layout` | `dense`, `ragged`, or `hybrid` |
 | `association_coverage` | `full` or `cis_and_signals` |
 | `completion_state` | `observed_only` or `reference_completed` |
 | `reference_assembly` | One genome assembly for all coordinates in the release |
