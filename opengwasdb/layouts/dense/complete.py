@@ -513,8 +513,8 @@ def _run_completion(
             replace(
                 a,
                 completed_against=ancestry if impute_mask is None or impute_mask[i] else "",
-                completion_median_pearson_r=quality_rollup[i][0],
-                completion_n_imputed_total=quality_rollup[i][1],
+                completion_median_pearson_r=quality_rollup[i].median_pearson_r,
+                completion_n_imputed_total=quality_rollup[i].n_imputed_total,
                 completion_n_missing_total=str(int(n_missing_off_panel[i])),
                 # Completion changes z/se via imputation, so the source's
                 # pre-completion Top-Hit Counts (carried forward from `a`) do

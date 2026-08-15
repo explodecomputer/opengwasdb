@@ -155,6 +155,14 @@ class TestTopHitCountsRefreshedByCompletion:
         for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
             assert [int(r[column]) for r in rows] == expected[column]
 
+    def test_completed_top_hit_counts_visible_via_query_facade(self, completed_store):
+        from opengwasdb.query import query_store
+
+        q = query_store(completed_store)
+        analyses = q.analyses_table()
+        q.close()
+        assert any(int(row["n_hits_5e4"]) > 0 for row in analyses.values())
+
     def test_completion_overwrites_stale_pre_completion_counts(
         self, tmp_path, observed_store, ld_panel
     ):
@@ -176,6 +184,62 @@ class TestTopHitCountsRefreshedByCompletion:
 
         dst_rows = read_analyses(dst / "analyses.tsv").rows
         assert all(int(r["n_hits_5e4"]) != 999 for r in dst_rows)
+
+
+class TestCompletionRollupColumns:
+    """Issue #70: analyses.tsv's completion-rollup columns
+    (completion_median_pearson_r, completion_n_imputed_total,
+    completion_n_missing_total) are populated per Analysis, cross-checked
+    against an independent read of the completion_quality SQLite table
+    (which stays SQLite-only per ADR 0030 -- only the rollup travels into
+    analyses.tsv)."""
+
+    def test_rollup_columns_match_completion_quality_table(self, completed_store):
+        import sqlite3
+
+        from opengwasdb.model.analyses import read_analyses
+
+        table = read_analyses(completed_store / "analyses.tsv")
+        rows = {int(r["analysis_index"]): r for r in table.rows}
+        for column in (
+            "completion_median_pearson_r", "completion_n_imputed_total",
+            "completion_n_missing_total",
+        ):
+            assert column in table.fieldnames
+
+        conn = sqlite3.connect(str(completed_store / "index.sqlite"))
+        conn.row_factory = sqlite3.Row
+        try:
+            for ai, row in rows.items():
+                quality_rows = conn.execute(
+                    "SELECT pearson_r, n_imputed, n_missing FROM completion_quality "
+                    "WHERE analysis_index = ?",
+                    (ai,),
+                ).fetchall()
+                expected_imputed = sum(int(r["n_imputed"]) for r in quality_rows)
+                expected_missing = sum(int(r["n_missing"]) for r in quality_rows)
+                assert int(row["completion_n_imputed_total"]) == expected_imputed
+                assert int(row["completion_n_missing_total"]) == expected_missing
+
+                r_values = [float(r["pearson_r"]) for r in quality_rows if r["pearson_r"] is not None]
+                if r_values:
+                    assert row["completion_median_pearson_r"] != ""
+                    assert float(row["completion_median_pearson_r"]) == pytest.approx(
+                        float(np.median(r_values))
+                    )
+                else:
+                    assert row["completion_median_pearson_r"] == ""
+        finally:
+            conn.close()
+
+    def test_completed_against_recorded_when_ancestry_matches(self, completed_store):
+        from opengwasdb.model.analyses import read_analyses
+
+        rows = read_analyses(completed_store / "analyses.tsv").rows
+        # This fixture's build carries no assigned_ancestry column, so
+        # derive_impute_analysis_ids() returns None (impute everything) and
+        # every Analysis is completed against the requested panel ancestry.
+        assert {r["completed_against"] for r in rows} == {"EUR"}
 
 
 class TestCompletionFiles:

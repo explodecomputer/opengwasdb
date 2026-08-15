@@ -370,12 +370,27 @@ def test_range_by_analysis_matches_trait_position(tmp_path):
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
 
+    from opengwasdb.model.analyses import read_analyses
+
+    # Independent oracle: compute the expected analysis_index set directly
+    # from analyses.tsv's own trait_chr/trait_bp columns, the source of
+    # truth the tabix index is now only a query-acceleration layer over
+    # (issue #69) -- not from the tabix-indexed traits.tsv.gz the query
+    # facade actually reads, so this genuinely cross-checks the two rather
+    # than trusting the same lookup path twice.
+    table = read_analyses(out / "analyses.tsv")
+    expected = {
+        int(r["analysis_index"])
+        for r in table.rows
+        if r["trait_chr"] == "1" and 1_000_000 <= int(r["trait_bp"]) <= 1_200_000
+    }
+    assert expected == {0, 1}  # chr1 probes at 1_050_000/1_150_000; chr2 probe excluded
+
     q = query_store(out)
-    # Probes at chr1:1_050_000 and chr1:1_150_000; chr2 probe excluded by chromosome.
     result = q.range_by_analysis("1", 1_000_000, 1_200_000)
     q.close()
 
-    assert set(result["analysis_index"].tolist()) == {0, 1}
+    assert set(result["analysis_index"].tolist()) == expected
 
 
 def test_overwrite_flag(tmp_path):

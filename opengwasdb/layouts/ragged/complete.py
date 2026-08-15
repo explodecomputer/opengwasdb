@@ -645,9 +645,9 @@ def _run_completion(
                     if impute_analysis_ids is None or a.analysis_id in impute_analysis_ids
                     else ""
                 ),
-                completion_median_pearson_r=quality_rollup[i][0],
-                completion_n_imputed_total=quality_rollup[i][1],
-                completion_n_missing_total=quality_rollup[i][2],
+                completion_median_pearson_r=quality_rollup[i].median_pearson_r,
+                completion_n_imputed_total=quality_rollup[i].n_imputed_total,
+                completion_n_missing_total=quality_rollup[i].n_missing_total,
                 # Completion changes z/se via imputation, so the source's
                 # pre-completion Top-Hit Counts (carried forward from `a`) do
                 # not apply here -- zero them so add_hit_counts below sets
