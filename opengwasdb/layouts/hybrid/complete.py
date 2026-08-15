@@ -22,12 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.layouts.dense.build import (
-    AnalysisMetadata,
-    add_hit_counts,
-    analysis_metadata_from_row,
-    write_analyses_tsv,
-)
+from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import _alid_sort_key, _write_index
 from opengwasdb.layouts.dense.complete import complete_dense_store
 from opengwasdb.layouts.dense.constants import DEFAULT_COMPRESSOR, DEFAULT_DTYPE
@@ -39,7 +34,7 @@ from opengwasdb.layouts.hybrid.layout import (
 )
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader, RaggedCSRWriter
-from opengwasdb.model.analyses import read_analyses
+from opengwasdb.model.analyses import Analysis, read_analysis_records
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -214,11 +209,10 @@ def _chunk_shape(manifest: StoreManifest) -> tuple[int, int]:
     return DEFAULT_CHUNK_SHAPE
 
 
-def _read_analyses(dense_dir: Path) -> list[AnalysisMetadata]:
-    rows = sorted(
-        read_analyses(dense_dir / "analyses.tsv").rows, key=lambda r: int(r["analysis_index"])
+def _read_analyses(dense_dir: Path) -> list[Analysis]:
+    return sorted(
+        read_analysis_records(dense_dir / "analyses.tsv"), key=lambda a: int(a.analysis_index)
     )
-    return [analysis_metadata_from_row(r) for r in rows]
 
 
 def _write_completed_manifest(

@@ -137,6 +137,27 @@ def test_hybrid_completion(tmp_path):
     assert np.array_equal(src_ovf["se"][:], dst_ovf["se"][:])
 
 
+def test_completed_analyses_tsv_has_no_phenotype_columns_and_carries_analysis_label(tmp_path):
+    """ADR 0034/issue #68: hybrid completion must carry the unified schema
+    forward (no phenotype_id/phenotype_label) at both the completed Dense
+    Component and the shared/top-level analyses.tsv."""
+    src = _build_source(tmp_path)
+    ld = _make_ld_panel(tmp_path)
+    dst = tmp_path / "dst.opengwasdb"
+    complete_hybrid_store(src, dst, ld, min_cor=0.0, thresh=0.9)
+
+    for path in (dst / "dense" / "analyses.tsv", dst / "analyses.tsv"):
+        table = read_analyses(path)
+        assert "phenotype_id" not in table.fieldnames
+        assert "phenotype_label" not in table.fieldnames
+        rows = {r["analysis_id"]: r for r in table.rows}
+        assert rows["trait_a"]["analysis_label"] == "Trait A"
+        assert rows["trait_c"]["analysis_label"] == "Trait C"
+        # Completion rollup columns are part of the same unified schema.
+        assert "completion_median_pearson_r" in table.fieldnames
+        assert "completion_n_missing_total" in table.fieldnames
+
+
 def test_hit_counts_sum_dense_and_overflow_after_completion(tmp_path):
     # The completed Dense Component's own analyses.tsv already carries
     # correct post-completion counts (test_dense_completion.py); the shared

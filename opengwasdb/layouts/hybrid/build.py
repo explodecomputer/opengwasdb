@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
-from opengwasdb.layouts.dense.build import AnalysisMetadata, add_hit_counts, write_analyses_tsv
+from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
     _alid_sort_key,
@@ -35,7 +35,7 @@ from opengwasdb.layouts.dense.build_vcf import (
     _encode_variant_keys,
     _fork_pool,
     _log_progress,
-    _manifest_row_to_analysis_metadata,
+    _manifest_row_to_analysis,
     _read_manifest,
     _write_dense_bands,
     _write_index,
@@ -53,6 +53,7 @@ from opengwasdb.layouts.hybrid.layout import (
 )
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
+from opengwasdb.model.analyses import Analysis
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -432,9 +433,7 @@ def build_hybrid_from_vcf_manifest(
         # stored_effect_scale comes from the manifest, not the VCF header (issue
         # #17 -- the ieu-a-7 fix: the source header is not authoritative for
         # effect scale).
-        analyses: list[AnalysisMetadata] = [
-            _manifest_row_to_analysis_metadata(row) for row in manifest_rows
-        ]
+        analyses: list[Analysis] = [_manifest_row_to_analysis(row) for row in manifest_rows]
 
         # ── Write the Dense Component skeleton (a valid dense store) ──────────────
         _write_index(dense_staged, panel_sorted, analyses, chunk_shape, dtype)

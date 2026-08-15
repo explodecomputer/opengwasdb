@@ -48,7 +48,7 @@ time.
 Method availability -- `variants_table()`/`analyses_table()` and
 `__enter__`/`__exit__` are present on all three adapters, though
 `analyses_table()`'s row shape differs by layout: Dense/Hybrid rows carry
-phenotype/effect-scale fields (`analyses.tsv`); Ragged rows carry
+Trait-identity/effect-scale fields (`analyses.tsv`); Ragged rows carry
 molecular-QTL fields -- probe/gene, tissue, context (the `analyses` SQLite
 table) -- since Ragged Analyses are QTL probes, not GWAS phenotypes.
 `analysis_id` is the one field both shapes share. `rho()`/
@@ -207,9 +207,9 @@ class StoreQuery:
         return {
             index: {
                 "analysis_id": row["analysis_id"],
-                "phenotype_id": row.get("phenotype_id") or None,
-                "phenotype_label": row.get("phenotype_label") or None,
                 "analysis_label": row.get("analysis_label") or None,
+                "trait_ontology_id": row.get("trait_ontology_id") or None,
+                "trait_ontology_label": row.get("trait_ontology_label") or None,
                 "stored_effect_scale": row["stored_effect_scale"],
             }
             for index, row in self._analyses.all().items()

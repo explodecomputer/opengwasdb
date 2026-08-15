@@ -293,11 +293,13 @@ def to_json_schema() -> dict[str, Any]:
 # under the unified schema every Primary Storage Layout shares (ADR 0034,
 # store-format spec §7a): no `phenotype_id`/`phenotype_label`/`trait_id`,
 # Trait identity carried instead by `analysis_label`/`trait_ontology_id`/
-# `trait_ontology_label`. It is additive alongside SHARED_CORE_COLUMNS/
-# STORE_ONLY_COLUMNS/REGISTRY_ONLY_COLUMNS above, which still describe the
-# pre-ADR-0034 schema `opengwasdb.layouts.dense.build.AnalysisMetadata`
-# writes against today -- migrating that builder (and Ragged's SQLite
-# `analyses` table) onto this model is issue #68 onward, not this module.
+# `trait_ontology_label`. Dense and Hybrid build/completion (issue #68) write
+# against this model directly. SHARED_CORE_COLUMNS/STORE_ONLY_COLUMNS/
+# REGISTRY_ONLY_COLUMNS above still describe the pre-ADR-0034 schema and are
+# retained for `opengwasdb-stores` manifest validation
+# (`classify_column`/`to_json_schema`) until that registry-side migration
+# (out of scope here) lands -- Ragged's SQLite `analyses` table migration onto
+# this model is issue #69 onward.
 
 ANALYSIS_COLUMNS: tuple[str, ...] = (
     "analysis_index",
