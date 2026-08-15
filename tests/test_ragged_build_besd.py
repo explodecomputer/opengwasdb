@@ -10,7 +10,6 @@ from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.store.open import open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 
 
 # ── Synthetic BESD fixture ────────────────────────────────────────────────────
@@ -117,7 +116,11 @@ def test_build_creates_store_files(tmp_path):
     assert out.exists()
     assert (out / "manifest.json").exists()
     assert (out / "variants.tsv.gz").exists()
-    assert (out / "traits.tsv.gz").exists()
+    assert (out / "analyses.tsv").exists()
+    # traits.tsv.gz (issue 034) is retired (issue #69): a Trait's genomic
+    # position lives in analyses.tsv's own trait_chr/trait_bp columns now,
+    # not a second, independently-shaped tabix-indexed position file.
+    assert not (out / "traits.tsv.gz").exists()
     assert (out / "index.sqlite").exists()
     assert (out / "data.zarr" / "ragged").exists()
 
@@ -137,21 +140,17 @@ def test_manifest_primary_layout(tmp_path):
     assert manifest["reference_assembly"] == "GRCh38"
 
 
-def test_traits_tsv_contents(tmp_path):
+def test_analyses_tsv_carries_probe_identities(tmp_path):
+    from opengwasdb.model.analyses import read_analyses
+
     prefix = _make_besd_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1", tissue="Whole_Blood")
 
-    reader = TraitsAxisReader(out)
-    all_traits = list(reader.all())
-    assert len(all_traits) == 3
-    probe_ids = {r.trait_id for r in all_traits}
-    assert probe_ids == {"ENSG00000000001", "ENSG00000000002", "ENSG00000000003"}
-
-    # regional query — chr1 probes
-    chr1_probes = reader.range("1", 1_000_000, 1_200_000)
-    assert len(chr1_probes) == 2
-    assert {r.trait_id for r in chr1_probes} == {"ENSG00000000001", "ENSG00000000002"}
+    table = read_analyses(out / "analyses.tsv")
+    assert len(table.rows) == 3
+    gene_ids = {r["gene_id"] for r in table.rows}
+    assert gene_ids == {"ENSG00000000001", "ENSG00000000002", "ENSG00000000003"}
 
 
 def test_zarr_csr_associations(tmp_path):
@@ -360,10 +359,11 @@ def test_analyses_table_groups_by_gene(tmp_path):
 
 
 def test_range_by_analysis_matches_trait_position(tmp_path):
-    """Issue #69/#71: the tabix-indexed genomic-range-by-Trait-position
-    lookup is unaffected by retiring the SQL analyses table -- it now reads
-    positions that live only in analyses.tsv's trait_chr/trait_bp columns
-    (mirrored into traits.tsv.gz as a query-acceleration index)."""
+    """Issue #69/#71: genomic-range-by-Trait-position lookup keeps working
+    after retiring both the SQL analyses table and the tabix-indexed
+    traits.tsv.gz sidecar (issue #69: not a second, independently-shaped
+    metadata file) -- analyses.tsv's own trait_chr/trait_bp columns are now
+    the sole source of truth `range_by_analysis()` scans."""
     from opengwasdb.query import query_store
 
     prefix = _make_besd_fixture(tmp_path)
@@ -372,12 +372,11 @@ def test_range_by_analysis_matches_trait_position(tmp_path):
 
     from opengwasdb.model.analyses import read_analyses
 
-    # Independent oracle: compute the expected analysis_index set directly
-    # from analyses.tsv's own trait_chr/trait_bp columns, the source of
-    # truth the tabix index is now only a query-acceleration layer over
-    # (issue #69) -- not from the tabix-indexed traits.tsv.gz the query
-    # facade actually reads, so this genuinely cross-checks the two rather
-    # than trusting the same lookup path twice.
+    # Independent oracle: compute the expected analysis_index set by hand
+    # from the same analyses.tsv rows the query facade reads, rather than
+    # hardcoding the expected indices, so a filtering-logic bug in
+    # range_by_analysis() (wrong comparison operator, wrong column) would
+    # be caught even though both sides ultimately read the same file.
     table = read_analyses(out / "analyses.tsv")
     expected = {
         int(r["analysis_index"])

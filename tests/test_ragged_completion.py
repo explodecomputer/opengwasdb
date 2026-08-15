@@ -221,7 +221,9 @@ class TestCompletionRollupColumns:
                 assert int(row["completion_n_imputed_total"]) == expected_imputed
                 assert int(row["completion_n_missing_total"]) == expected_missing
 
-                r_values = [float(r["pearson_r"]) for r in quality_rows if r["pearson_r"] is not None]
+                r_values = [
+                    float(r["pearson_r"]) for r in quality_rows if r["pearson_r"] is not None
+                ]
                 if r_values:
                     assert row["completion_median_pearson_r"] != ""
                     assert float(row["completion_median_pearson_r"]) == pytest.approx(
@@ -247,8 +249,14 @@ class TestCompletionFiles:
         assert completed_store.exists()
         assert (completed_store / "manifest.json").exists()
         assert (completed_store / "variants.tsv.gz").exists()
-        assert (completed_store / "traits.tsv.gz").exists()
+        assert (completed_store / "analyses.tsv").exists()
         assert (completed_store / "index.sqlite").exists()
+
+    def test_does_not_carry_forward_traits_tsv(self, completed_store):
+        # traits.tsv.gz (issue 034) is retired (issue #69): Reference
+        # Completion no longer copies it forward, since analyses.tsv is the
+        # sole source of truth for a completed Analysis's Trait position too.
+        assert not (completed_store / "traits.tsv.gz").exists()
 
     def test_manifest_completion_state(self, completed_store):
         import json

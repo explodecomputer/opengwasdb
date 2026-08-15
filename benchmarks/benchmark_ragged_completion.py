@@ -27,8 +27,8 @@ import numpy as np
 
 from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+from opengwasdb.model.analyses import read_analysis_records
 from opengwasdb.query import query_store
-from opengwasdb.traits.axis import TraitsAxisReader
 
 
 def _dir_size_mb(path: Path) -> float:
@@ -56,8 +56,10 @@ def _measure_n(fn, n_reps: int = 5) -> dict:
 def _choose_queries(completed_path: Path) -> dict:
     """Select representative query parameters from the completed store."""
     csr = RaggedCSRReader(completed_path)
-    traits = TraitsAxisReader(completed_path)
-    all_traits = list(traits.all())
+    analyses = sorted(
+        read_analysis_records(completed_path / "analyses.tsv"),
+        key=lambda a: int(a.analysis_index),
+    )
 
     # Find the analysis with the most associations
     best_ai, best_n = 0, 0
@@ -67,15 +69,15 @@ def _choose_queries(completed_path: Path) -> dict:
             best_n = len(assoc.z)
             best_ai = i
 
-    rec = all_traits[best_ai]
+    rec = analyses[best_ai]
     csr.close()
-    traits.close()
 
+    trait_bp = int(rec.trait_bp) if rec.trait_bp else 1_000_000
     return {
         "analysis_id": rec.analysis_id,
-        "cis_chrom": rec.trait_chr,
-        "cis_start": max(1, (rec.trait_bp or 1_000_000) - 1_000_000),
-        "cis_end": (rec.trait_bp or 1_000_000) + 1_000_000,
+        "cis_chrom": rec.trait_chr or None,
+        "cis_start": max(1, trait_bp - 1_000_000),
+        "cis_end": trait_bp + 1_000_000,
         "phewas_variant": None,  # will be set from the analysis result
     }
 

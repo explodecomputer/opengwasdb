@@ -57,7 +57,8 @@ on `gene_id`/`gene_name` rather than through a separate lookup. `rho()`/
 `rho_row()`/`rho_matrix()` (ADR-0025, a Dense storage artifact) are exposed
 on `StoreQuery` and on `HybridStoreQuery` (delegated to its Dense Component);
 `RaggedStoreQuery` has no Rho Matrix format. `range_by_analysis()` (query by
-probe/TSS position) is Ragged-only: it needs `TraitsAxisReader`, which only
+probe/TSS position) is Ragged-only: it scans `AnalysesIndex`'s already
+store-open-time-loaded rows for `trait_chr`/`trait_bp`, which only
 Ragged/molecular-QTL releases populate.
 """
 
@@ -75,7 +76,6 @@ from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shar
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
 from opengwasdb.store.open import OpenGWASDBStore, open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants import VariantAxis
 
 
@@ -478,7 +478,6 @@ class RaggedStoreQuery:
         self.store = store
         self._csr = RaggedCSRReader(store.path)
         self._variant_axis = VariantAxis(store.path)
-        self._traits_reader = TraitsAxisReader(store.path)
         self._analyses = AnalysesIndex(store.path)
         self._is_completed = (
             store.manifest.completion_state is CompletionState.REFERENCE_COMPLETED
@@ -496,7 +495,6 @@ class RaggedStoreQuery:
 
     def close(self) -> None:
         self._variant_axis.close()
-        self._traits_reader.close()
 
     def __enter__(self) -> RaggedStoreQuery:
         return self
@@ -600,6 +598,19 @@ class RaggedStoreQuery:
             "association_status": _status_array(imp, z_out, se_out),
         }
 
+    def _analysis_indices_in_range(self, chromosome: str, start: int, end: int) -> list[int]:
+        """Analysis indices whose Trait position falls in [start, end] --
+        analyses.tsv's own trait_chr/trait_bp columns are the sole source of
+        truth for this (ADR-0034, issue #69); this scans the already
+        store-open-time-loaded AnalysesIndex rather than a second,
+        independently-shaped tabix-indexed position file."""
+        matches = []
+        for index, row in self._analyses.all().items():
+            bp = row.get("trait_bp") or ""
+            if row.get("trait_chr") == chromosome and bp and start <= int(bp) <= end:
+                matches.append(index)
+        return matches
+
     def range_by_analysis(
         self,
         chromosome: str,
@@ -609,8 +620,8 @@ class RaggedStoreQuery:
         observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """All associations for analyses whose probe/TSS falls in [start, end]."""
-        trait_records = self._traits_reader.range(chromosome, start, end)
-        if not trait_records:
+        analysis_indices = self._analysis_indices_in_range(chromosome, start, end)
+        if not analysis_indices:
             return _empty_result()
 
         all_vi: list[np.ndarray] = []
@@ -619,8 +630,7 @@ class RaggedStoreQuery:
         all_se: list[np.ndarray] = []
         all_status: list[np.ndarray] = []
 
-        for rec in trait_records:
-            ai = rec.analysis_index
+        for ai in analysis_indices:
             offsets = self._csr._offsets[ai: ai + 2]
             s, e = int(offsets[0]), int(offsets[1])
             if s == e:

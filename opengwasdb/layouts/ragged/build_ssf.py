@@ -5,8 +5,8 @@ GWAS-SSF ``.tsv.gz`` per analysis (as produced by the opengwasdb-stores
 download+filter step) plus an analyses manifest carrying per-analysis metadata
 (trait id, gene, trait position, N, tissue/context, MHC flag).
 
-The ragged storage, axes, top-hit indexes and manifest are all reused unchanged;
-the only new code is the read + group + variant-index-mapping glue.
+The ragged storage, variant axis, top-hit indexes and manifest are all reused
+unchanged; the only new code is the read + group + variant-index-mapping glue.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from opengwasdb.model.enums import (
 )
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
-from opengwasdb.traits.axis import TraitRecord, write_traits_axis
 from opengwasdb.variants.axis import (
     VARIANT_AXIS_FORMAT,
     VARIANT_TABIX_FILENAME,
@@ -195,16 +194,6 @@ def build_ragged_from_ssf(
         print(f"Canonical variants: {len(variants):,}")
         write_variant_axis(staged.path, variants, rsid_by_alid)
 
-        # ── Traits axis + SQLite index (builder schema) ──────────────────────────
-        trait_records = [
-            TraitRecord(
-                analysis_index=a.analysis_index, analysis_id=a.analysis_id, trait_id=a.trait_id,
-                n=a.n, trait_chr=a.trait_chr, trait_bp=a.trait_bp,
-                gene_id=a.gene_id, gene_name=a.gene_name, tissue=a.tissue, context=a.context,
-            )
-            for a in analytes
-        ]
-        write_traits_axis(staged.path, trait_records)
         # No `analyses` table (ADR 0034, issue #69): analyses.tsv below is the sole
         # source of truth for Analytical Metadata. The file is still created here,
         # empty, so Reference Completion has somewhere to add completion_quality.
@@ -291,7 +280,6 @@ def _write_manifest(
                     "table": VARIANT_TABLE_FILENAME,
                     "tabix_index": VARIANT_TABIX_FILENAME,
                 },
-                "traits_axis": {"format": "tabix_tsv_v1"},
             },
         },
     )

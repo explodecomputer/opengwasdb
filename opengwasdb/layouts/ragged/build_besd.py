@@ -13,7 +13,7 @@ from opengwasdb.layouts.ragged.analyses import molecular_analysis
 from opengwasdb.layouts.ragged.besd_reader import BESDReader, read_epi, read_esi
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
-from opengwasdb.model.analyses import write_analysis_records
+from opengwasdb.model.analyses import Analysis, write_analysis_records
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -21,7 +21,6 @@ from opengwasdb.model.enums import (
 )
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
-from opengwasdb.traits.axis import TraitRecord, write_traits_axis
 from opengwasdb.variants.axis import (
     VARIANT_AXIS_FORMAT,
     VARIANT_TABLE_FILENAME,
@@ -154,8 +153,11 @@ def build_ragged_from_besd(
         print("Writing variants.tsv.gz ...")
         write_variant_axis(staged.path, variants, rsid_by_alid)
 
-        # ── 4. Build and write traits.tsv.gz ─────────────────────────────────────
-        trait_records: list[TraitRecord] = []
+        # ── 4. Build analyses.tsv records ────────────────────────────────────────
+        # assigned_ancestry (ADR 0028): BESD/ESI/EPI bulk-QTL sources carry no
+        # per-analysis ancestry assignment, unlike build_ssf's manifest-driven
+        # sources, so it stays at molecular_analysis's blank default here.
+        analyses: list[Analysis] = []
         for probe in probes:
             try:
                 probe_chr = normalise_chromosome(probe.chromosome)
@@ -166,21 +168,16 @@ def build_ragged_from_besd(
             if tissue:
                 analysis_id = f"{probe.probe_id}::{tissue}"
 
-            trait_records.append(TraitRecord(
-                analysis_index=probe.row_idx,
-                analysis_id=analysis_id,
-                trait_id=probe.probe_id,
-                n=None,
-                trait_chr=probe_chr,
-                trait_bp=probe.probe_bp if probe.probe_bp > 0 else None,
+            analyses.append(molecular_analysis(
+                analysis_id,
                 gene_id=probe.probe_id if probe.probe_id.startswith("ENSG") else None,
                 gene_name=probe.gene,
                 tissue=tissue,
                 context=None,
+                trait_chr=probe_chr,
+                trait_bp=probe.probe_bp if probe.probe_bp > 0 else None,
+                n=None,
             ))
-
-        print("Writing traits.tsv.gz ...")
-        write_traits_axis(staged.path, trait_records)
 
         # ── 5. Materialise index.sqlite ──────────────────────────────────────────
         # No `analyses` table (ADR 0034, issue #69): analyses.tsv below is the sole
@@ -259,18 +256,6 @@ def build_ragged_from_besd(
 
         # ── 7b. Write analyses.tsv ────────────────────────────────────────────────
         print("Writing analyses.tsv ...")
-        # assigned_ancestry (ADR 0028): BESD/ESI/EPI bulk-QTL sources carry no
-        # per-analysis ancestry assignment, unlike build_ssf's manifest-driven
-        # sources, so it stays at molecular_analysis's blank default here.
-        analyses = [
-            molecular_analysis(
-                rec.analysis_id,
-                gene_id=rec.gene_id, gene_name=rec.gene_name,
-                tissue=rec.tissue, context=rec.context,
-                trait_chr=rec.trait_chr, trait_bp=rec.trait_bp, n=rec.n,
-            )
-            for rec in trait_records
-        ]
         write_analysis_records(
             staged.path / "analyses.tsv", add_hit_counts(staged.path, analyses)
         )
@@ -333,9 +318,6 @@ def _write_manifest(
                     "format": VARIANT_AXIS_FORMAT,
                     "table": VARIANT_TABLE_FILENAME,
                     "tabix_index": VARIANT_TABIX_FILENAME,
-                },
-                "traits_axis": {
-                    "format": "tabix_tsv_v1",
                 },
             },
         },

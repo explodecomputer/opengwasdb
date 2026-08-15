@@ -59,7 +59,6 @@ from opengwasdb.model.analyses import read_analysis_records, write_analysis_reco
 from opengwasdb.model.enums import CompletionState
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import OpenGWASDBStore, open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants.axis import (
     VariantAxis,
     write_variant_axis,
@@ -314,10 +313,14 @@ def _run_completion(
         src_alids: list[str] = [v.alid for v in src_variants]
         alid_to_src_idx: dict[str, int] = {v.alid: v.variant_index for v in src_variants}
 
-        traits_reader = TraitsAxisReader(src)
-        trait_records = list(traits_reader.all())
-        traits_reader.close()
-        n_analyses = len(trait_records)
+        # analyses.tsv is the sole source of truth for Analytical Metadata
+        # (ADR 0034, issue #69) -- including each Analysis's Trait genomic
+        # position, so cis-window/LD-block scanning below reads it directly
+        # rather than through a second, independently-shaped position file.
+        src_analyses = sorted(
+            read_analysis_records(src / "analyses.tsv"), key=lambda a: int(a.analysis_index)
+        )
+        n_analyses = len(src_analyses)
 
         print(f"Source: {len(src_alids):,} variants, {n_analyses:,} analyses")
 
@@ -325,7 +328,7 @@ def _run_completion(
             impute_mask = None
         else:
             impute_mask = np.array(
-                [rec.analysis_id in impute_analysis_ids for rec in trait_records], dtype=bool
+                [a.analysis_id in impute_analysis_ids for a in src_analyses], dtype=bool
             )
             n_match = int(impute_mask.sum())
             print(f"Ancestry-match filter: imputing {n_match:,}/{n_analyses:,} analyses")
@@ -337,7 +340,7 @@ def _run_completion(
         block_canonical_alids: dict[str, list[str | None]] = {}
         analysis_to_blocks: dict[int, list[str]] = {}
 
-        for i, rec in enumerate(trait_records):
+        for i, a in enumerate(src_analyses):
             # Ancestry-mismatched Analyses are left observed-only (ADR 0028):
             # not assigned to any block, not touched by Phase 2, no
             # completion_quality rows -- Phase 3's pass-through path below
@@ -346,12 +349,12 @@ def _run_completion(
             if impute_mask is not None and not impute_mask[i]:
                 analysis_to_blocks[i] = []
                 continue
-            if rec.trait_chr is None or rec.trait_bp is None:
+            if not a.trait_chr or not a.trait_bp:
                 analysis_to_blocks[i] = []
                 continue
-            chrom = rec.trait_chr
-            start = max(1, rec.trait_bp - cis_window_bp)
-            end = rec.trait_bp + cis_window_bp
+            chrom = a.trait_chr
+            start = max(1, int(a.trait_bp) - cis_window_bp)
+            end = int(a.trait_bp) + cis_window_bp
 
             blocks = find_blocks(ld_dir, ancestry, chrom, start, end)
             analysis_to_blocks[i] = [b.block_id for b in blocks]
@@ -407,11 +410,6 @@ def _run_completion(
 
         print("Writing variants.tsv.gz...")
         write_variant_axis(staged.path, merged_variants, {})
-
-        shutil.copy2(src / "traits.tsv.gz", staged.traits_table_path)
-        tbi_src = src / "traits.tsv.gz.tbi"
-        if tbi_src.exists():
-            shutil.copy2(tbi_src, staged.path / "traits.tsv.gz.tbi")
 
         print("Writing index.sqlite...")
         dst_db = staged.index_connection()
@@ -632,9 +630,6 @@ def _run_completion(
         build_ragged_top_hit_indexes(staged.path)
 
         print("Writing analyses.tsv...")
-        src_analyses = sorted(
-            read_analysis_records(src / "analyses.tsv"), key=lambda a: int(a.analysis_index)
-        )
         with staged.index_connection() as quality_db:
             quality_rollup = completion_quality_rollup(quality_db, n_analyses)
         dst_analyses = [

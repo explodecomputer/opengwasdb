@@ -14,7 +14,6 @@ import pytest
 from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.store.open import open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants.axis import VariantAxis
 
 _SSF_HEADER = [
@@ -111,7 +110,7 @@ def test_build_creates_store_files(tmp_path):
     assert out.exists()
     assert (out / "manifest.json").exists()
     assert (out / "variants.tsv.gz").exists()
-    assert (out / "traits.tsv.gz").exists()
+    assert (out / "analyses.tsv").exists()
     assert (out / "index.sqlite").exists()
     assert (out / "data.zarr" / "ragged").exists()
 
@@ -153,20 +152,25 @@ def test_stored_effect_scale_populated_per_analysis(tmp_path):
     }
 
 
-def test_traits_tsv_contents(tmp_path):
+def test_analyses_tsv_carries_trait_positions(tmp_path):
+    # traits.tsv.gz (issue 034) is retired (issue #69): trait_chr/trait_bp
+    # live only in analyses.tsv now, and range_by_analysis() reads them
+    # directly rather than through a second, independently-shaped file.
+    from opengwasdb.model.analyses import read_analyses
+    from opengwasdb.query import query_store
+
     manifest, filtered_dir = _make_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_ssf(manifest, filtered_dir, out, store_id="test", release_id="v1")
+    assert not (out / "traits.tsv.gz").exists()
 
-    reader = TraitsAxisReader(out)
-    all_traits = list(reader.all())
-    assert len(all_traits) == 2
-    trait_ids = {r.trait_id for r in all_traits}
-    assert trait_ids == {"T1", "T2"}
+    table = read_analyses(out / "analyses.tsv")
+    assert {r["analysis_id"] for r in table.rows} == {"trait_a", "trait_b"}
 
-    chr1_traits = reader.range("1", 100_000, 200_000)
-    assert len(chr1_traits) == 1
-    assert chr1_traits[0].trait_id == "T1"
+    q = query_store(out)
+    result = q.range_by_analysis("1", 100_000, 200_000)
+    q.close()
+    assert set(result["analysis_index"].tolist()) == {0}  # trait_a only (chr1:150_000)
 
 
 def test_zarr_csr_associations_and_z_values(tmp_path):

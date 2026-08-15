@@ -25,7 +25,6 @@ from opengwasdb.model.enums import (
 )
 from opengwasdb.stats import p_value_from_z
 from opengwasdb.store.open import OpenGWASDBStore, UnsupportedFormatVersion, open_store
-from opengwasdb.traits.axis import traits_table_path
 from opengwasdb.variants import (
     VariantAxis,
     variant_alid_bytes_path,
@@ -263,7 +262,6 @@ def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
         ("variants.tsv.gz.tbi", variant_tabix_path(store_path)),
         ("variant_alid_bytes.npy", variant_alid_bytes_path(store_path)),
         ("variant_alid_rows.npy", variant_alid_rows_path(store_path)),
-        ("traits.tsv.gz", traits_table_path(store_path)),
         ("analyses.tsv", analyses_path),
     ]:
         if not p.exists():
