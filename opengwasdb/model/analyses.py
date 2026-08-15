@@ -347,12 +347,22 @@ class Analysis:
     build paths genuinely have no source for ontology mapping, sample size,
     ancestry, or attribution -- writing "" for an unresolved column is
     honest, not a fabrication, matching this module's existing tolerance for
-    blank shared-core columns. `analysis_index` is not a field here: like
-    the pre-ADR-0034 `AnalysisMetadata`, it is assigned from each record's
-    position in the list passed to the writer below.
+    blank shared-core columns.
+
+    `analysis_index` is captured on read so a caller inspecting an existing
+    table can see it, but `analyses_table_from_records` always reassigns it
+    from each record's position when writing -- never from this field. An
+    Analysis's position in the list *is* its `analysis_index`, which is also
+    the column index a Dense/Hybrid store's z/se arrays are keyed by
+    (`opengwasdb.layouts.dense.build`); honouring a caller-supplied value
+    that had drifted from list order would silently desynchronise
+    `analyses.tsv` from those arrays, which is worse than the writer being
+    authoritative here the way it already is for `analysis_index` on every
+    fresh build.
     """
 
     analysis_id: str
+    analysis_index: str = ""
     analysis_label: str = ""
     trait_ontology_id: str = ""
     trait_ontology_label: str = ""
@@ -388,6 +398,10 @@ class Analysis:
     n_hits_5e6: str = ""
     n_hits_5e4: str = ""
 
+    def __post_init__(self) -> None:
+        if not self.analysis_id:
+            raise ValueError("Analysis.analysis_id must not be blank")
+
 
 def _analysis_fieldnames(analyses: list[Analysis]) -> tuple[str, ...]:
     prop_populations = sorted({pop for a in analyses for pop in a.ancestry_prop})
@@ -399,6 +413,9 @@ def _analysis_fieldnames(analyses: list[Analysis]) -> tuple[str, ...]:
 
 
 def _analysis_row(index: int, a: Analysis, fieldnames: tuple[str, ...]) -> dict[str, str]:
+    # `index`, not `a.analysis_index`: the writer is authoritative on
+    # position (see Analysis's docstring for why honouring a caller-supplied
+    # value would be unsafe).
     row = {
         "analysis_index": str(index),
         "analysis_id": a.analysis_id,
@@ -445,6 +462,7 @@ def _analysis_row(index: int, a: Analysis, fieldnames: tuple[str, ...]) -> dict[
 def _analysis_from_row(row: dict[str, str], fieldnames: tuple[str, ...]) -> Analysis:
     return Analysis(
         analysis_id=row["analysis_id"],
+        analysis_index=row.get("analysis_index", ""),
         analysis_label=row.get("analysis_label", ""),
         trait_ontology_id=row.get("trait_ontology_id", ""),
         trait_ontology_label=row.get("trait_ontology_label", ""),

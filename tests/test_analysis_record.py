@@ -8,6 +8,8 @@ issue #68 onward), so these tests never go through a builder entrypoint.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from opengwasdb.model.analyses import (
@@ -125,7 +127,10 @@ def test_write_then_read_round_trips_every_populated_column(tmp_path):
     write_analysis_records(path, [_FULL_ANALYSIS])
     reread = read_analysis_records(path)
 
-    assert reread == [_FULL_ANALYSIS]
+    # analysis_index isn't a field the caller sets on _FULL_ANALYSIS -- the
+    # writer assigns it from list position (index 0 here), and read
+    # populates it back from the row, so the only expected diff is that.
+    assert reread == [dataclasses.replace(_FULL_ANALYSIS, analysis_index="0")]
 
 
 def test_write_then_read_round_trips_every_blank_column(tmp_path):
@@ -134,7 +139,7 @@ def test_write_then_read_round_trips_every_blank_column(tmp_path):
     write_analysis_records(path, [_MINIMAL_ANALYSIS])
     reread = read_analysis_records(path)
 
-    assert reread == [_MINIMAL_ANALYSIS]
+    assert reread == [dataclasses.replace(_MINIMAL_ANALYSIS, analysis_index="0")]
 
 
 def test_ancestry_prop_reads_back_blank_for_a_population_the_row_has_none_for(tmp_path):
@@ -196,3 +201,29 @@ def test_duplicate_analysis_id_is_rejected_when_writing_to_disk(tmp_path):
 
     with pytest.raises(ValueError, match=_MINIMAL_ANALYSIS.analysis_id):
         write_analysis_records(tmp_path / "analyses.tsv", [_MINIMAL_ANALYSIS, duplicate])
+
+
+def test_blank_analysis_id_is_rejected():
+    with pytest.raises(ValueError, match="analysis_id"):
+        Analysis(analysis_id="")
+
+
+def test_read_analysis_records_populates_analysis_index_field(tmp_path):
+    path = tmp_path / "analyses.tsv"
+
+    write_analysis_records(path, [_FULL_ANALYSIS, _MINIMAL_ANALYSIS])
+    reread = read_analysis_records(path)
+
+    assert reread[0].analysis_index == "0"
+    assert reread[1].analysis_index == "1"
+
+
+def test_writer_ignores_a_caller_supplied_analysis_index():
+    # analysis_index must equal list position (it's also the column index a
+    # Dense/Hybrid store's z/se arrays are keyed by), so the writer is
+    # authoritative regardless of what a caller passes in.
+    stale = Analysis(analysis_id="ieu-a-9", analysis_index="99")
+
+    table = analyses_table_from_records([stale])
+
+    assert table.rows[0]["analysis_index"] == "0"
