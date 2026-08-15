@@ -2,26 +2,26 @@
 
 The Top-Hit Index format itself -- write/read/counts/validation -- lives in
 ``opengwasdb.top_hits``. This module owns only what is genuinely Ragged-specific:
-deriving each association's Analysis from the CSR offsets, and (unlike Dense
-and Hybrid, whose per-Analysis metadata lives in ``analyses.tsv``) persisting
-Top-Hit Counts onto Ragged's own SQLite ``analyses`` table (ADR 0030).
+deriving each association's Analysis from the CSR offsets.
+
+Ragged stores do not yet persist Top-Hit Counts (unlike Dense/Hybrid's
+``opengwasdb.layouts.dense.build.add_hit_counts``, which writes them to
+``analyses.tsv``): Ragged has no ``analyses.tsv`` of its own yet, still relying
+on a divergent SQLite ``analyses`` table (issue #63, a gap ADR-0030 flagged but
+never resolved for Ragged). Adding Top-Hit Count columns to that SQLite table
+was tried and reverted (issues #53/#61 discussion) -- it would have deepened a
+schema the project has already decided to retire. Revisit once #63 lands.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
-from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS
 from opengwasdb.top_hits.format import TOP_HIT_THRESHOLDS, threshold_key, z_critical
-from opengwasdb.top_hits.reader import counts
 from opengwasdb.top_hits.writer import write
-
-if TYPE_CHECKING:
-    from opengwasdb.store.open import OpenGWASDBStore, StagedRelease
 
 
 def build_ragged_top_hit_indexes(
@@ -62,26 +62,3 @@ def build_ragged_top_hit_indexes(
     for threshold in thresholds:
         n_hits = int(np.count_nonzero(abs_z >= z_critical(threshold)))
         print(f"  {threshold_key(threshold)}: {n_hits:,} hits")
-
-
-def apply_hit_counts(store: OpenGWASDBStore | StagedRelease, n_analyses: int) -> None:
-    """Write per-Analysis Top-Hit Counts from ``store``'s already-built
-    top-hit index onto its SQLite ``analyses`` table (ADR 0032).
-
-    The Ragged counterpart of ``opengwasdb.layouts.dense.build.add_hit_counts``:
-    Ragged Analytical Metadata lives in SQLite, not ``analyses.tsv``
-    (ADR 0030), so counts land in a column ``UPDATE`` rather than a rebuilt
-    ``AnalysisMetadata`` list. Call after ``build_ragged_top_hit_indexes()``.
-    """
-    hit_counts = counts(store.path, n_analyses)
-    conn = store.index_connection()
-    try:
-        set_clause = ", ".join(f"{column} = ?" for column in TOP_HIT_COUNT_COLUMNS)
-        for i in range(n_analyses):
-            conn.execute(
-                f"UPDATE analyses SET {set_clause} WHERE analysis_index = ?",
-                (*(hit_counts[column][i] for column in TOP_HIT_COUNT_COLUMNS), i),
-            )
-        conn.commit()
-    finally:
-        conn.close()
