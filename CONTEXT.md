@@ -8,7 +8,10 @@ OpenGWASDB stores, validates, and queries large collections of GWAS and QTL summ
 A particular statistical analysis of one **Trait**, producing associations between that trait and variants. One Trait may have many Analyses that differ by cohort, ancestry, model, sample subset, or meta-analysis.
 
 **Trait**:
-A measured or derived outcome, such as disease status, LDL cholesterol, gene expression, methylation, or protein abundance. _Avoid_: Phenotype, except as a synonym in user-facing explanatory text.
+A measured or derived outcome, such as disease status, LDL cholesterol, gene expression, methylation, or protein abundance. One Trait may have many Analyses (differing by cohort, ancestry, model, sample subset, or meta-analysis); a Store Release has no store-schema identifier for a Trait on its own, only for one of its Analyses (`analysis_id`) — see **Trait Ontology** for the one supported way to relate a Trait across Analyses or across Store Releases. _Avoid_: Phenotype, except as a synonym in user-facing explanatory text.
+
+**Trait Ontology**:
+The cross-Analysis, cross-Store-Release identity of a Trait, recorded as an ontology CURIE (e.g. `EFO:0001073`) plus its human-readable label. It is deliberately the *only* Trait-matching identifier in the store schema (ADR 0034 rejected keeping a raw, source-native `trait_id` alongside it, precisely because a second identifier of ambiguous authority is what made `phenotype_id` misleading in the first place). Optional per row — not every Trait has a clean ontology mapping, and when it's blank there is no store-schema-level way to match that Analysis's Trait against another — but the columns are always present in `analyses.tsv` (ADR 0034) so a downloaded store can be matched against another store's Analyses, when curated, without a catalogue service.
 
 **OpenGWASDB Store**:
 A self-contained logical distribution unit containing one or more Analyses and everything required to interpret and query them. A Store has a stable identity and one **Primary Storage Layout**.
@@ -23,7 +26,10 @@ A Store Release under construction, held at a `.{name}.tmp` sibling of its event
 The one narrow, explicit exception to a Store Release's immutability: folding additional facts into an existing release's `provenance` dict in place (e.g. Catalogue subset facts recorded after a build, or a format migration updating its own record of itself). Everything else that changes association data or Analytical Metadata derives a new Store Release — a new **Staged Release** committed under a new release identity — rather than mutating one in place.
 
 **Analytical Metadata**:
-Metadata that affects the interpretation of association statistics in a Store Release — Assigned Ancestry, Ancestry Composition, sample-size kind/scope/counts, Original Effect Scale and its derivation method and dispersion diagnostic, a Reference Completion Quality rollup, and per-Analysis Top-Hit Counts (a signal for study power and test-statistic inflation risk, ADR 0032). Lives entirely in `analyses.tsv` (ADR 0030), one row per Analysis; never duplicated into `index.sqlite`. Distinct from a Trait Annotation (descriptive metadata curated after release) or build provenance (checksums, generator versions) — those stay registry-scoped, not store-scoped.
+Metadata that affects the interpretation of association statistics in a Store Release — Assigned Ancestry, Ancestry Composition, sample-size kind/scope/counts, Original Effect Scale and its derivation method and dispersion diagnostic, a Reference Completion Quality rollup, and per-Analysis Top-Hit Counts (a signal for study power and test-statistic inflation risk, ADR 0032). Lives entirely in `analyses.tsv` (ADR 0030), one row per Analysis, identically across every Primary Storage Layout (ADR 0034); never duplicated into `index.sqlite`. Distinct from Attribution Metadata (usability/citation, a different self-containment failure mode), a Trait Annotation (descriptive metadata curated after release), or build provenance (checksums, generator versions) — the latter two stay registry-scoped, not store-scoped.
+
+**Attribution Metadata**:
+Metadata establishing how an Analysis may be cited, licensed, and attributed — license, publication DOI/PMID, consortium, first author. Lives in `analyses.tsv` alongside Analytical Metadata (ADR 0034), one row per Analysis since a single Store Release may combine Analyses from different source papers or consortia under different licenses. Distinct from Analytical Metadata: it does not affect how any association statistic is interpreted, but a store nobody can legally use or properly cite has still failed the same self-containment goal ADR 0030 states for Analytical Metadata, just via a different failure mode.
 
 **Top-Hit Count**:
 The number of an Analysis's associations at or below a p-value threshold, one count per `TOP_HIT_THRESHOLDS` tier (genome-wide-significant `5e-8`, suggestive `5e-6`, nominal `5e-4`). Derived from the store's existing top-hit index at build time and persisted as Analytical Metadata columns in `analyses.tsv`, rather than recomputed at query or render time.
@@ -129,7 +135,7 @@ The Store-wide union of canonical variants referenced by its Analyses. Each vari
 A compact Store-local reference to a row in the Store Variant Table. It has no identity or stability guarantee outside its Store Release.
 
 **Reference Assembly**:
-The genome assembly to which every variant coordinate in a Store Release refers, such as GRCh37 or GRCh38. Each Store Release declares exactly one Reference Assembly.
+The genome assembly to which every genomic coordinate in a Store Release refers — every variant coordinate, and a Trait's own position (`trait_chr`/`trait_bp`) when it has one — such as GRCh37 or GRCh38. Each Store Release declares exactly one Reference Assembly.
 
 **Stored Effect Scale**:
 The controlled scale in which an Analysis stores beta and SE: SD Units for continuous traits, Log Odds for binary traits, or Log Hazard for survival traits.
