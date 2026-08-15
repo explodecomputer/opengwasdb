@@ -26,7 +26,6 @@ from numcodecs import Blosc
 from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
 from opengwasdb.index import initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import (
-    AnalysisMetadata,
     DenseBuildResult,
     add_hit_counts,
     write_analyses_tsv,
@@ -38,7 +37,7 @@ from opengwasdb.layouts.dense.constants import (
     TOP_HIT_THRESHOLDS,
 )
 from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
-from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX
+from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX, Analysis
 from opengwasdb.model.enums import (
     AncestryAssignmentMethod,
     AssociationCoverage,
@@ -77,11 +76,21 @@ class _ManifestRow:
     ancestry_prop: dict[str, str]  # {population: proportion}, from any ancestry_prop_<pop>
     # column(s) the manifest carries -- a Catalogue subset's kept rows already have these
     # (the Catalogue writes one per reference super-population); empty for a bare manifest.
+    # Trait-ontology and Attribution columns (ADR 0034, issue #68): optional manifest columns,
+    # resolved directly rather than via a phenotype_id/phenotype_label intermediary. "" when
+    # the manifest omits them -- never fabricated.
+    trait_ontology_id: str = ""
+    trait_ontology_label: str = ""
+    license: str = ""
+    publication_doi: str = ""
+    publication_pmid: str = ""
+    consortium: str = ""
+    first_author: str = ""
 
 
-def _manifest_row_to_analysis_metadata(row: _ManifestRow) -> AnalysisMetadata:
-    """A manifest row's Analytical Metadata (issue #22), shared by the dense
-    and hybrid manifest builders.
+def _manifest_row_to_analysis(row: _ManifestRow) -> Analysis:
+    """A manifest row's Analytical + Attribution Metadata (issue #22, ADR
+    0034), shared by the dense and hybrid manifest builders.
 
     ``ancestry_assignment_method`` is derived, not guessed: every
     ``assigned_ancestry`` this builder ever sees comes from a Catalogue's
@@ -91,11 +100,16 @@ def _manifest_row_to_analysis_metadata(row: _ManifestRow) -> AnalysisMetadata:
     either -- ancestry was never attempted for it, which is a different state
     from ``AncestryAssignmentMethod.UNASSIGNED`` (attempted, gates failed).
     """
-    return AnalysisMetadata(
+    return Analysis(
         analysis_id=row.trait_id,
-        phenotype_id=row.trait_id,
-        phenotype_label=row.trait_name,
-        analysis_label=row.trait_id,
+        analysis_label=row.trait_name,
+        trait_ontology_id=row.trait_ontology_id,
+        trait_ontology_label=row.trait_ontology_label,
+        license=row.license,
+        publication_doi=row.publication_doi,
+        publication_pmid=row.publication_pmid,
+        consortium=row.consortium,
+        first_author=row.first_author,
         stored_effect_scale=row.stored_effect_scale,
         assigned_ancestry=row.assigned_ancestry,
         ancestry_assignment_method=(
@@ -485,9 +499,7 @@ def build_dense_from_vcf_manifest(
         # the VCF header (issue #17 -- the ieu-a-7 fix: the source header is not
         # authoritative for effect scale).
         # ------------------------------------------------------------------
-        analyses: list[AnalysisMetadata] = [
-            _manifest_row_to_analysis_metadata(row) for row in manifest_rows
-        ]
+        analyses: list[Analysis] = [_manifest_row_to_analysis(row) for row in manifest_rows]
 
         # ------------------------------------------------------------------
         # Write SQLite index + analyses.tsv + tabix variant axis
@@ -660,6 +672,12 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     is a superset of the build manifest), so ``opengwasdb.ancestry.subset``
     no longer needs a separate post-build sidecar write to record it. Blank
     or absent for a manifest with no ancestry annotation.
+
+    Optional ``trait_ontology_id``/``trait_ontology_label`` and Attribution
+    (``license``/``publication_doi``/``publication_pmid``/``consortium``/
+    ``first_author``) columns (ADR 0034, issue #68) flow straight into
+    ``analyses.tsv`` when the manifest supplies them; blank or absent
+    otherwise -- never fabricated.
     """
     with open(manifest_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -732,6 +750,15 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                     for key, value in row.items()
                     if key.startswith(ANCESTRY_PROP_PREFIX) and value
                 },
+                trait_ontology_id=row.get("trait_ontology_id") or "",
+                trait_ontology_label=(
+                    row.get("trait_ontology_label") or row.get("trait_ontology_name") or ""
+                ),
+                license=row.get("license") or "",
+                publication_doi=row.get("publication_doi") or "",
+                publication_pmid=row.get("publication_pmid") or "",
+                consortium=row.get("consortium") or "",
+                first_author=row.get("first_author") or "",
             )
         )
     return result
@@ -745,7 +772,7 @@ def _alid_sort_key(alid: str) -> tuple:
 def _write_index(
     staged: StagedRelease,
     hg38_alids: list[str],
-    analyses: list[AnalysisMetadata],
+    analyses: list[Analysis],
     chunk_shape: tuple[int, int],
     dtype: str,
 ) -> None:

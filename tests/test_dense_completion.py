@@ -221,6 +221,21 @@ class TestCompletionFiles:
         conn.close()
         assert "completion_quality" in tables
 
+    def test_analyses_tsv_carries_forward_analysis_label_with_no_phenotype_columns(
+        self, completed_store
+    ):
+        # ADR 0034/issue #68: completion must carry the unified schema
+        # forward (no phenotype_id/phenotype_label), refreshing only the
+        # completion-rollup and Top-Hit Count columns.
+        from opengwasdb.model.analyses import read_analyses
+
+        table = read_analyses(completed_store / "analyses.tsv")
+        assert "phenotype_id" not in table.fieldnames
+        assert "phenotype_label" not in table.fieldnames
+        rows = {r["analysis_id"]: r for r in table.rows}
+        assert rows["a1"]["analysis_label"] == "Height primary"
+        assert rows["a2"]["analysis_label"] == "Disease primary"
+
     def test_analyses_tsv_has_completion_n_missing_total(self, completed_store):
         from opengwasdb.model.analyses import read_analyses
 

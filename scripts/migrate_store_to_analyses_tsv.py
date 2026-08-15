@@ -46,7 +46,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-from opengwasdb.layouts.dense.build import AnalysisMetadata, add_hit_counts, write_analyses_tsv
+from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
+from opengwasdb.model.analyses import Analysis
 from opengwasdb.model.enums import OriginalSdMethod
 from opengwasdb.store.open import open_store
 
@@ -122,18 +123,22 @@ def migrate_store(store_path: str | Path) -> list[str]:
     old_rows = _read_old_analyses(index_path)
     ancestry_by_id = _read_ancestry_sidecar(store_path)
 
-    analyses: list[AnalysisMetadata] = []
+    analyses: list[Analysis] = []
     for row in old_rows:
         analysis_id = str(row["analysis_id"])
         ancestry_row = ancestry_by_id.get(analysis_id, {})
         assigned_ancestry = ancestry_row.get("assigned_ancestry", "")
         old_scale = str(row["stored_effect_scale"])
+        # The old layout's analysis_label and phenotype_label were separate
+        # columns; phenotype_label is retired with no replacement (ADR 0034),
+        # so fall back to it here only when analysis_label itself is blank --
+        # preserving whichever of the two actually carried a human label
+        # rather than losing it.
+        analysis_label = row.get("analysis_label") or row.get("phenotype_label") or ""
         analyses.append(
-            AnalysisMetadata(
+            Analysis(
                 analysis_id=analysis_id,
-                phenotype_id=row.get("phenotype_id") or None,  # type: ignore[arg-type]
-                phenotype_label=row.get("phenotype_label") or None,  # type: ignore[arg-type]
-                analysis_label=row.get("analysis_label") or None,  # type: ignore[arg-type]
+                analysis_label=str(analysis_label),
                 stored_effect_scale=_LEGACY_STORED_EFFECT_SCALE.get(old_scale, old_scale),
                 assigned_ancestry=assigned_ancestry,
                 ancestry_assignment_method="af_assigned" if assigned_ancestry else "",
