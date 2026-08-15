@@ -125,6 +125,18 @@ def test_manifest_is_hybrid(hybrid_store):
     assert manifest.association_coverage.value == "full"
 
 
+def test_analyses_tsv_has_no_phenotype_columns_and_carries_analysis_label(hybrid_store):
+    """ADR 0034/issue #68: the Hybrid builder writes the unified schema at
+    both the Dense Component and shared/top-level analyses.tsv."""
+    for path in (hybrid_store / "dense" / "analyses.tsv", hybrid_store / "analyses.tsv"):
+        table = read_analyses(path)
+        assert "phenotype_id" not in table.fieldnames
+        assert "phenotype_label" not in table.fieldnames
+        rows = {r["analysis_id"]: r for r in table.rows}
+        assert rows["trait_a"]["analysis_label"] == "Trait A"
+        assert rows["trait_b"]["analysis_label"] == "Trait B"
+
+
 def test_stored_effect_scale_comes_from_manifest_not_header(tmp_path):
     """The ieu-a-7 fix (issue #17), hybrid path: a VCF header says
     ``StudyType=Continuous`` but the manifest declares ``log_or`` -- the

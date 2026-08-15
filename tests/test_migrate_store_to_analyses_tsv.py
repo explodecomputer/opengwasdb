@@ -52,13 +52,18 @@ def _revert_to_old_layout(store_path: Path, ancestry: dict[str, str] | None = No
             )
             """
         )
+        # phenotype_id/phenotype_label aren't columns of a current build's
+        # analyses.tsv (retired, ADR 0034) -- synthesise plausible pre-#22
+        # values here rather than sourcing them from `table.rows`, since the
+        # point of this fixture is a historical layout the current builder no
+        # longer produces.
         connection.executemany(
             "INSERT INTO analyses(analysis_index, analysis_id, phenotype_id, "
             "phenotype_label, analysis_label, stored_effect_scale) VALUES (?, ?, ?, ?, ?, ?)",
             [
                 (
                     int(row["analysis_index"]), row["analysis_id"],
-                    row["phenotype_id"] or None, row["phenotype_label"] or None,
+                    f"p_{row['analysis_id']}", row["analysis_label"] or None,
                     row["analysis_label"] or None, row["stored_effect_scale"],
                 )
                 for row in table.rows
@@ -113,11 +118,16 @@ def test_migrate_preserves_analyses_and_ancestry(dense_store_path):
     after = migrate_module.migrate_store(dense_store_path)
     assert before == after == ["a1", "a2"]
 
-    rows = {r["analysis_id"]: r for r in read_analyses(dense_store_path / "analyses.tsv").rows}
+    table = read_analyses(dense_store_path / "analyses.tsv")
+    rows = {r["analysis_id"]: r for r in table.rows}
     assert rows["a1"]["assigned_ancestry"] == "EUR"
     assert rows["a2"]["assigned_ancestry"] == "AFR"
     assert rows["a1"]["ancestry_assignment_method"] == "af_assigned"
-    assert rows["a1"]["phenotype_id"] == "p1"
+    # phenotype_id/phenotype_label are retired (ADR 0034) -- migrate_store no
+    # longer writes them, and the old layout's analysis_label carries through.
+    assert "phenotype_id" not in table.fieldnames
+    assert "phenotype_label" not in table.fieldnames
+    assert rows["a1"]["analysis_label"] == "Height primary"
 
     # Top-Hit Counts (ADR 0032) are recovered for real from the pre-existing
     # top-hit index (fixture z-values: a1=2.0,-3.0 -- no hits at any

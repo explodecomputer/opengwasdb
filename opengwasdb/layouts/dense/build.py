@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,13 +18,7 @@ from opengwasdb.layouts.dense.constants import (
 )
 from opengwasdb.layouts.dense.overview import write_overview_html
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes, read_top_hit_counts
-from opengwasdb.model.analyses import (
-    ANCESTRY_PROP_PREFIX,
-    SHARED_CORE_COLUMNS,
-    STORE_ONLY_COLUMNS,
-    AnalysesTable,
-    write_analyses,
-)
+from opengwasdb.model.analyses import Analysis, analyses_table_from_records, write_analyses
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
@@ -48,136 +42,9 @@ class DenseBuildResult:
     n_analyses: int
 
 
-@dataclass(frozen=True)
-class AnalysisMetadata:
-    """One Analysis's Analytical Metadata (store-format spec §7a, ADR 0030).
-
-    Every field beyond the original five is optional and blank by default:
-    this dataclass is shared by every build path, and most of them (the
-    manifest-free tiny builder, a bare VCF manifest with none of the optional
-    columns) genuinely have no source for sample size, ancestry, or SD
-    provenance -- writing "" for an unresolved column is honest, not a
-    fabrication, and matches ``opengwasdb.model.analyses``'s own tolerance for
-    blank shared-core columns.
-    """
-
-    analysis_id: str
-    phenotype_id: str | None
-    phenotype_label: str | None
-    analysis_label: str | None
-    stored_effect_scale: str
-    assigned_ancestry: str = ""
-    ancestry_assignment_method: str = ""
-    ancestry_prop: dict[str, str] = field(default_factory=dict)  # {population: proportion}
-    sample_size: str = ""
-    original_sd_method: str = ""
-    original_sd: str = ""
-    completed_against: str = ""
-    completion_median_pearson_r: str = ""
-    completion_n_imputed_total: str = ""
-    completion_n_missing_total: str = ""
-    n_hits_5e8: str = ""
-    n_hits_5e6: str = ""
-    n_hits_5e4: str = ""
-
-
-# SHARED_CORE_COLUMNS/STORE_ONLY_COLUMNS come from opengwasdb.model.analyses
-# (issue #16) rather than being retyped here, so the two never drift.
-# ancestry_prop_<population> is a dynamic column set, not part of either fixed
-# tuple (opengwasdb.model.analyses.classify_column matches it by prefix) --
-# _fieldnames_for below splices in whichever populations the analyses being
-# written actually carry, at the position store-format spec §7a declares.
-_SAMPLE_SIZE_KIND_INDEX = SHARED_CORE_COLUMNS.index("sample_size_kind")
-
-
-def _fieldnames_for(analyses: list[AnalysisMetadata]) -> tuple[str, ...]:
-    prop_populations = sorted({pop for a in analyses for pop in a.ancestry_prop})
-    return (
-        *SHARED_CORE_COLUMNS[:_SAMPLE_SIZE_KIND_INDEX],
-        *(f"{ANCESTRY_PROP_PREFIX}{pop}" for pop in prop_populations),
-        *SHARED_CORE_COLUMNS[_SAMPLE_SIZE_KIND_INDEX:],
-        *STORE_ONLY_COLUMNS,
-    )
-
-
-def _analysis_metadata_row(
-    index: int, a: AnalysisMetadata, fieldnames: tuple[str, ...]
-) -> dict[str, str]:
-    row = {
-        "analysis_index": str(index),
-        "analysis_id": a.analysis_id,
-        "phenotype_id": a.phenotype_id or "",
-        "phenotype_label": a.phenotype_label or "",
-        "analysis_label": a.analysis_label or "",
-        "stored_effect_scale": a.stored_effect_scale,
-        "assigned_ancestry": a.assigned_ancestry,
-        "ancestry_assignment_method": a.ancestry_assignment_method,
-        "sample_size_kind": "",
-        "sample_size_scope": "analysis_level" if a.sample_size else "",
-        "sample_size": a.sample_size,
-        "n_cases": "",
-        "n_controls": "",
-        "original_effect_scale": "",
-        "original_sd": a.original_sd,
-        "original_sd_method": a.original_sd_method,
-        "original_sd_dispersion": "",
-        "completed_against": a.completed_against,
-        "completion_median_pearson_r": a.completion_median_pearson_r,
-        "completion_n_imputed_total": a.completion_n_imputed_total,
-        "completion_n_missing_total": a.completion_n_missing_total,
-        "n_hits_5e8": a.n_hits_5e8,
-        "n_hits_5e6": a.n_hits_5e6,
-        "n_hits_5e4": a.n_hits_5e4,
-    }
-    for column in fieldnames:
-        if column.startswith(ANCESTRY_PROP_PREFIX):
-            row[column] = a.ancestry_prop.get(column[len(ANCESTRY_PROP_PREFIX):], "")
-    return row
-
-
-def analysis_metadata_from_row(row: dict[str, str]) -> AnalysisMetadata:
-    """The inverse of :func:`_analysis_metadata_row`: reconstruct an
-    ``AnalysisMetadata`` from one already-written ``analyses.tsv`` row.
-
-    Shared by the dense and hybrid completion pipelines (issue #22), which
-    both need to carry a source store's Analytical Metadata forward into a
-    freshly written destination ``analyses.tsv`` -- callers that only need to
-    override a few completion-specific fields (``completed_against``, the
-    ``completion_*`` rollups) do so with :func:`dataclasses.replace` on the
-    result rather than reconstructing the whole row by hand.
-    """
-    return AnalysisMetadata(
-        analysis_id=row["analysis_id"],
-        phenotype_id=row.get("phenotype_id") or None,
-        phenotype_label=row.get("phenotype_label") or None,
-        analysis_label=row.get("analysis_label") or None,
-        stored_effect_scale=row["stored_effect_scale"],
-        assigned_ancestry=row.get("assigned_ancestry", ""),
-        ancestry_assignment_method=row.get("ancestry_assignment_method", ""),
-        ancestry_prop={
-            key[len(ANCESTRY_PROP_PREFIX):]: value
-            for key, value in row.items()
-            if key.startswith(ANCESTRY_PROP_PREFIX) and value
-        },
-        sample_size=row.get("sample_size", ""),
-        original_sd_method=row.get("original_sd_method", ""),
-        original_sd=row.get("original_sd", ""),
-        completed_against=row.get("completed_against", ""),
-        completion_median_pearson_r=row.get("completion_median_pearson_r", ""),
-        completion_n_imputed_total=row.get("completion_n_imputed_total", ""),
-        completion_n_missing_total=row.get("completion_n_missing_total", ""),
-        n_hits_5e8=row.get("n_hits_5e8", ""),
-        n_hits_5e6=row.get("n_hits_5e6", ""),
-        n_hits_5e4=row.get("n_hits_5e4", ""),
-    )
-
-
-def add_hit_counts(
-    store_path: str | Path, analyses: list[AnalysisMetadata]
-) -> list[AnalysisMetadata]:
+def add_hit_counts(store_path: str | Path, analyses: list[Analysis]) -> list[Analysis]:
     """Add per-Analysis Top-Hit Counts from ``store_path``'s already-built
-    top-hit index onto whatever each ``AnalysisMetadata`` already carries
-    (ADR 0032).
+    top-hit index onto whatever each ``Analysis`` already carries (ADR 0032).
 
     Blank ``n_hits_*`` fields act as zero, so this both sets counts from
     scratch (a fresh build's analyses start blank) and accumulates a Hybrid
@@ -197,21 +64,14 @@ def add_hit_counts(
     ]
 
 
-def build_analyses_table(analyses: list[AnalysisMetadata]) -> AnalysesTable:
-    fieldnames = _fieldnames_for(analyses)
-    return AnalysesTable(
-        fieldnames=fieldnames,
-        rows=tuple(_analysis_metadata_row(i, a, fieldnames) for i, a in enumerate(analyses)),
-    )
-
-
-def write_analyses_tsv(output_path: Path, analyses: list[AnalysisMetadata]) -> Path:
+def write_analyses_tsv(output_path: Path, analyses: list[Analysis]) -> Path:
     """Write ``analyses.tsv`` + ``overview.html`` -- the sole source of truth
-    for Analytical Metadata (ADR 0030, issue #22), replacing the old SQLite
-    ``analyses`` table and its own generated human-browsable rendering.
+    for Analytical Metadata (ADR 0030, issue #22; unified schema, ADR 0034),
+    replacing the old SQLite ``analyses`` table and its own generated
+    human-browsable rendering.
     """
     output_path = Path(output_path)
-    table = build_analyses_table(analyses)
+    table = analyses_table_from_records(analyses)
     path = write_analyses(output_path / "analyses.tsv", table)
     write_overview_html(output_path, table)
     return path
@@ -280,15 +140,20 @@ def _collect_variants(records: list[NormalisedAssociation]) -> list[CanonicalVar
     )
 
 
-def _collect_analyses(records: list[NormalisedAssociation]) -> list[AnalysisMetadata]:
-    by_id: dict[str, AnalysisMetadata] = {}
+def _collect_analyses(records: list[NormalisedAssociation]) -> list[Analysis]:
+    by_id: dict[str, Analysis] = {}
     for record in records:
         existing = by_id.get(record.analysis_id)
-        current = AnalysisMetadata(
+        current = Analysis(
             analysis_id=record.analysis_id,
-            phenotype_id=record.phenotype_id,
-            phenotype_label=record.phenotype_label,
-            analysis_label=record.analysis_label,
+            analysis_label=record.analysis_label or "",
+            trait_ontology_id=record.trait_ontology_id or "",
+            trait_ontology_label=record.trait_ontology_label or "",
+            license=record.license or "",
+            publication_doi=record.publication_doi or "",
+            publication_pmid=record.publication_pmid or "",
+            consortium=record.consortium or "",
+            first_author=record.first_author or "",
             stored_effect_scale=record.stored_effect_scale.value,
         )
         if existing is None:
@@ -341,7 +206,7 @@ def _write_manifest(
 def _write_index(
     staged: StagedRelease,
     variants: list[CanonicalVariant],
-    analyses: list[AnalysisMetadata],
+    analyses: list[Analysis],
     records: list[NormalisedAssociation],
     chunk_shape: tuple[int, int],
     dtype: str,

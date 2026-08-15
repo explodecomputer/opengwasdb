@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
+from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
 from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
@@ -203,6 +204,64 @@ def test_stored_effect_scale_comes_from_manifest_not_header(two_trait_store):
     by_id = {v["analysis_id"]: v for v in analyses.values()}
     assert by_id["trait_a"]["stored_effect_scale"] == "sd"
     assert by_id["trait_b"]["stored_effect_scale"] == "log_or"
+
+
+def test_analyses_tsv_has_no_phenotype_columns(two_trait_store):
+    """ADR 0034/issue #68: phenotype_id/phenotype_label are retired with no
+    replacement raw-identifier column."""
+    table = read_analyses(two_trait_store / "analyses.tsv")
+    assert "phenotype_id" not in table.fieldnames
+    assert "phenotype_label" not in table.fieldnames
+    assert "trait_id" not in table.fieldnames
+
+
+def test_ontology_and_attribution_columns_blank_when_manifest_omits_them(two_trait_store):
+    """A bare manifest supplies no ontology/attribution columns -- those
+    fields must be blank, never fabricated (ADR 0034/issue #68)."""
+    table = read_analyses(two_trait_store / "analyses.tsv")
+    for row in table.rows:
+        for column in (
+            "trait_ontology_id",
+            "trait_ontology_label",
+            "license",
+            "publication_doi",
+            "publication_pmid",
+            "consortium",
+            "first_author",
+        ):
+            assert row[column] == ""
+
+
+def test_ontology_and_attribution_columns_populated_from_manifest(tmp_path):
+    """When a manifest supplies trait-ontology/Attribution columns, they flow
+    straight into analyses.tsv (ADR 0034/issue #68)."""
+    vcf = _make_vcf(
+        tmp_path,
+        "trait_a",
+        [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"],
+    )
+    manifest_path = tmp_path / "manifest.tsv"
+    manifest_path.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale\toriginal_sd_method"
+        "\toriginal_sd\ttrait_ontology_id\ttrait_ontology_label\tlicense"
+        "\tpublication_doi\tpublication_pmid\tconsortium\tfirst_author\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\tsd\tdeclared_standardised\t\t"
+        "EFO:0001073\tbody height\tCC0\t10.1000/xyz\t12345678\tGIANT\tJ. Smith\n",
+        encoding="utf-8",
+    )
+    store_path = tmp_path / "store.opengwasdb"
+    build_dense_from_vcf_manifest(manifest_path, store_path, store_id="test-store", release_id="v1")
+
+    table = read_analyses(store_path / "analyses.tsv")
+    row = table.rows[0]
+    assert row["trait_ontology_id"] == "EFO:0001073"
+    assert row["trait_ontology_label"] == "body height"
+    assert row["license"] == "CC0"
+    assert row["publication_doi"] == "10.1000/xyz"
+    assert row["publication_pmid"] == "12345678"
+    assert row["consortium"] == "GIANT"
+    assert row["first_author"] == "J. Smith"
+    assert row["analysis_label"] == "Trait A"
 
 
 def test_missing_required_manifest_field_fails_the_build_loudly(tmp_path):

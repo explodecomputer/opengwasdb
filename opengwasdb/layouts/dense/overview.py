@@ -450,7 +450,7 @@ _RHO_TOP_PAIRS = 30
 
 def _analysis_label(row: dict[str, str]) -> str:
     """Best-available human label, matching the query facade's `analyses_table()`."""
-    return row.get("phenotype_label") or row.get("analysis_label") or row.get("analysis_id", "")
+    return row.get("analysis_label") or row.get("analysis_id", "")
 
 
 def _load_rho_group(output_path: Path) -> Any | None:

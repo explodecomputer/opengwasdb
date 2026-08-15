@@ -50,18 +50,14 @@ from opengwasdb.completion.manifest import build_completion_provenance
 from opengwasdb.completion.parallel import init_block_worker
 from opengwasdb.completion.schema import create_completion_quality_table
 from opengwasdb.index import initialise_schema, set_metadata
-from opengwasdb.layouts.dense.build import (
-    add_hit_counts,
-    analysis_metadata_from_row,
-    write_analyses_tsv,
-)
+from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
     DEFAULT_COMPRESSOR,
     DEFAULT_DTYPE,
 )
 from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes
-from opengwasdb.model.analyses import read_analyses
+from opengwasdb.model.analyses import read_analyses, read_analysis_records
 from opengwasdb.model.enums import AssociationCoverage, CompletionState, PrimaryStorageLayout
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import OpenGWASDBStore, StagedRelease, open_store
@@ -332,7 +328,7 @@ def _run_completion(
         src_alid_to_idx = {v.alid: v.variant_index for v in src_variants}
 
         src_analyses = sorted(
-            read_analyses(src / "analyses.tsv").rows, key=lambda r: int(r["analysis_index"])
+            read_analysis_records(src / "analyses.tsv"), key=lambda a: int(a.analysis_index)
         )
         n_analyses = len(src_analyses)
         print(f"Source: {len(src_variants):,} variants, {n_analyses:,} analyses")
@@ -343,7 +339,7 @@ def _run_completion(
             impute_mask = None
         else:
             impute_mask = np.array(
-                [row["analysis_id"] in impute_analysis_ids for row in src_analyses], dtype=bool
+                [a.analysis_id in impute_analysis_ids for a in src_analyses], dtype=bool
             )
             n_match = int(impute_mask.sum())
             print(f"Ancestry-match filter: imputing {n_match:,}/{n_analyses:,} analyses")
@@ -540,21 +536,21 @@ def _run_completion(
             quality_rollup = _completion_quality_rollup(dst_db, n_analyses)
         dst_analyses = [
             replace(
-                analysis_metadata_from_row(row),
+                a,
                 completed_against=ancestry if impute_mask is None or impute_mask[i] else "",
                 completion_median_pearson_r=quality_rollup[i][0],
                 completion_n_imputed_total=quality_rollup[i][1],
                 completion_n_missing_total=str(int(n_missing_off_panel[i])),
                 # Completion changes z/se via imputation, so the source's
-                # pre-completion Top-Hit Counts (carried forward by
-                # analysis_metadata_from_row) do not apply here -- zero them
-                # so add_hit_counts below sets fresh post-completion counts
-                # rather than adding onto stale ones.
+                # pre-completion Top-Hit Counts (carried forward from `a`) do
+                # not apply here -- zero them so add_hit_counts below sets
+                # fresh post-completion counts rather than adding onto stale
+                # ones.
                 n_hits_5e8="",
                 n_hits_5e6="",
                 n_hits_5e4="",
             )
-            for i, row in enumerate(src_analyses)
+            for i, a in enumerate(src_analyses)
         ]
 
         print("Building top-hit indexes...")

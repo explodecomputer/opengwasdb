@@ -26,9 +26,14 @@ class NormalisedAssociation:
     z: float
     se: float
     rsid: str | None = None
-    phenotype_id: str | None = None
-    phenotype_label: str | None = None
     analysis_label: str | None = None
+    trait_ontology_id: str | None = None
+    trait_ontology_label: str | None = None
+    license: str | None = None
+    publication_doi: str | None = None
+    publication_pmid: str | None = None
+    consortium: str | None = None
+    first_author: str | None = None
     stored_effect_scale: StoredEffectScale = StoredEffectScale.SD
     eaf: float | None = None
 
@@ -131,9 +136,16 @@ def _normalise_row(row: dict[str, str], row_number: int) -> NormalisedAssociatio
         z=z,
         se=se,
         rsid=field("rsid", "variant_id", required=False),
-        phenotype_id=field("phenotype_id", "trait_id", required=False),
-        phenotype_label=field("phenotype_label", "trait_label", "trait", required=False),
-        analysis_label=field("analysis_label", required=False),
+        analysis_label=field(
+            "analysis_label", "phenotype_label", "trait_label", "trait", required=False
+        ),
+        trait_ontology_id=field("trait_ontology_id", required=False),
+        trait_ontology_label=field("trait_ontology_label", "trait_ontology_name", required=False),
+        license=field("license", required=False),
+        publication_doi=field("publication_doi", required=False),
+        publication_pmid=field("publication_pmid", required=False),
+        consortium=field("consortium", required=False),
+        first_author=field("first_author", required=False),
         stored_effect_scale=scale,
         eaf=eaf,
     )
