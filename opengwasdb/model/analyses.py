@@ -25,7 +25,7 @@ draft spelling -- see `opengwasdb.model.enums`.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -285,3 +285,252 @@ def to_json_schema() -> dict[str, Any]:
         "required": list(REQUIRED_COLUMNS),
         "additionalProperties": True,
     }
+
+
+# --- Shared Analysis Metadata model (ADR 0034, issue #67) -----------------
+#
+# `Analysis` is the single in-repo representation of one analyses.tsv row
+# under the unified schema every Primary Storage Layout shares (ADR 0034,
+# store-format spec §7a): no `phenotype_id`/`phenotype_label`/`trait_id`,
+# Trait identity carried instead by `analysis_label`/`trait_ontology_id`/
+# `trait_ontology_label`. It is additive alongside SHARED_CORE_COLUMNS/
+# STORE_ONLY_COLUMNS/REGISTRY_ONLY_COLUMNS above, which still describe the
+# pre-ADR-0034 schema `opengwasdb.layouts.dense.build.AnalysisMetadata`
+# writes against today -- migrating that builder (and Ragged's SQLite
+# `analyses` table) onto this model is issue #68 onward, not this module.
+
+ANALYSIS_COLUMNS: tuple[str, ...] = (
+    "analysis_index",
+    "analysis_id",
+    "analysis_label",
+    "trait_ontology_id",
+    "trait_ontology_label",
+    "gene_id",
+    "gene_name",
+    "tissue",
+    "context",
+    "trait_chr",
+    "trait_bp",
+    "stored_effect_scale",
+    "assigned_ancestry",
+    "ancestry_assignment_method",
+    "sample_size_kind",
+    "sample_size_scope",
+    "sample_size",
+    "n_cases",
+    "n_controls",
+    "original_effect_scale",
+    "original_sd",
+    "original_sd_method",
+    "original_sd_dispersion",
+    "license",
+    "publication_doi",
+    "publication_pmid",
+    "consortium",
+    "first_author",
+    "completed_against",
+    "completion_median_pearson_r",
+    "completion_n_imputed_total",
+    "completion_n_missing_total",
+    *TOP_HIT_COUNT_COLUMNS,
+)
+
+_ANALYSIS_SAMPLE_SIZE_KIND_INDEX = ANALYSIS_COLUMNS.index("sample_size_kind")
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """One Analysis's Analytical + Attribution Metadata (store-format spec
+    §7a, ADR 0034) -- the schema every layout's `analyses.tsv` shares.
+
+    Every field beyond `analysis_id` is optional and blank by default: most
+    build paths genuinely have no source for ontology mapping, sample size,
+    ancestry, or attribution -- writing "" for an unresolved column is
+    honest, not a fabrication, matching this module's existing tolerance for
+    blank shared-core columns.
+
+    `analysis_index` is captured on read so a caller inspecting an existing
+    table can see it, but `analyses_table_from_records` always reassigns it
+    from each record's position when writing -- never from this field. An
+    Analysis's position in the list *is* its `analysis_index`, which is also
+    the column index a Dense/Hybrid store's z/se arrays are keyed by
+    (`opengwasdb.layouts.dense.build`); honouring a caller-supplied value
+    that had drifted from list order would silently desynchronise
+    `analyses.tsv` from those arrays, which is worse than the writer being
+    authoritative here the way it already is for `analysis_index` on every
+    fresh build.
+    """
+
+    analysis_id: str
+    analysis_index: str = ""
+    analysis_label: str = ""
+    trait_ontology_id: str = ""
+    trait_ontology_label: str = ""
+    gene_id: str = ""
+    gene_name: str = ""
+    tissue: str = ""
+    context: str = ""
+    trait_chr: str = ""
+    trait_bp: str = ""
+    stored_effect_scale: str = ""
+    assigned_ancestry: str = ""
+    ancestry_assignment_method: str = ""
+    ancestry_prop: dict[str, str] = field(default_factory=dict)  # {population: proportion}
+    sample_size_kind: str = ""
+    sample_size_scope: str = ""
+    sample_size: str = ""
+    n_cases: str = ""
+    n_controls: str = ""
+    original_effect_scale: str = ""
+    original_sd: str = ""
+    original_sd_method: str = ""
+    original_sd_dispersion: str = ""
+    license: str = ""
+    publication_doi: str = ""
+    publication_pmid: str = ""
+    consortium: str = ""
+    first_author: str = ""
+    completed_against: str = ""
+    completion_median_pearson_r: str = ""
+    completion_n_imputed_total: str = ""
+    completion_n_missing_total: str = ""
+    n_hits_5e8: str = ""
+    n_hits_5e6: str = ""
+    n_hits_5e4: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.analysis_id:
+            raise ValueError("Analysis.analysis_id must not be blank")
+
+
+def _analysis_fieldnames(analyses: list[Analysis]) -> tuple[str, ...]:
+    prop_populations = sorted({pop for a in analyses for pop in a.ancestry_prop})
+    return (
+        *ANALYSIS_COLUMNS[:_ANALYSIS_SAMPLE_SIZE_KIND_INDEX],
+        *(f"{ANCESTRY_PROP_PREFIX}{pop}" for pop in prop_populations),
+        *ANALYSIS_COLUMNS[_ANALYSIS_SAMPLE_SIZE_KIND_INDEX:],
+    )
+
+
+def _analysis_row(index: int, a: Analysis, fieldnames: tuple[str, ...]) -> dict[str, str]:
+    # `index`, not `a.analysis_index`: the writer is authoritative on
+    # position (see Analysis's docstring for why honouring a caller-supplied
+    # value would be unsafe).
+    row = {
+        "analysis_index": str(index),
+        "analysis_id": a.analysis_id,
+        "analysis_label": a.analysis_label,
+        "trait_ontology_id": a.trait_ontology_id,
+        "trait_ontology_label": a.trait_ontology_label,
+        "gene_id": a.gene_id,
+        "gene_name": a.gene_name,
+        "tissue": a.tissue,
+        "context": a.context,
+        "trait_chr": a.trait_chr,
+        "trait_bp": a.trait_bp,
+        "stored_effect_scale": a.stored_effect_scale,
+        "assigned_ancestry": a.assigned_ancestry,
+        "ancestry_assignment_method": a.ancestry_assignment_method,
+        "sample_size_kind": a.sample_size_kind,
+        "sample_size_scope": a.sample_size_scope,
+        "sample_size": a.sample_size,
+        "n_cases": a.n_cases,
+        "n_controls": a.n_controls,
+        "original_effect_scale": a.original_effect_scale,
+        "original_sd": a.original_sd,
+        "original_sd_method": a.original_sd_method,
+        "original_sd_dispersion": a.original_sd_dispersion,
+        "license": a.license,
+        "publication_doi": a.publication_doi,
+        "publication_pmid": a.publication_pmid,
+        "consortium": a.consortium,
+        "first_author": a.first_author,
+        "completed_against": a.completed_against,
+        "completion_median_pearson_r": a.completion_median_pearson_r,
+        "completion_n_imputed_total": a.completion_n_imputed_total,
+        "completion_n_missing_total": a.completion_n_missing_total,
+        "n_hits_5e8": a.n_hits_5e8,
+        "n_hits_5e6": a.n_hits_5e6,
+        "n_hits_5e4": a.n_hits_5e4,
+    }
+    for column in fieldnames:
+        if column.startswith(ANCESTRY_PROP_PREFIX):
+            row[column] = a.ancestry_prop.get(column[len(ANCESTRY_PROP_PREFIX):], "")
+    return row
+
+
+def _analysis_from_row(row: dict[str, str], fieldnames: tuple[str, ...]) -> Analysis:
+    return Analysis(
+        analysis_id=row["analysis_id"],
+        analysis_index=row.get("analysis_index", ""),
+        analysis_label=row.get("analysis_label", ""),
+        trait_ontology_id=row.get("trait_ontology_id", ""),
+        trait_ontology_label=row.get("trait_ontology_label", ""),
+        gene_id=row.get("gene_id", ""),
+        gene_name=row.get("gene_name", ""),
+        tissue=row.get("tissue", ""),
+        context=row.get("context", ""),
+        trait_chr=row.get("trait_chr", ""),
+        trait_bp=row.get("trait_bp", ""),
+        stored_effect_scale=row.get("stored_effect_scale", ""),
+        assigned_ancestry=row.get("assigned_ancestry", ""),
+        ancestry_assignment_method=row.get("ancestry_assignment_method", ""),
+        ancestry_prop={
+            key[len(ANCESTRY_PROP_PREFIX):]: row.get(key, "")
+            for key in fieldnames
+            if key.startswith(ANCESTRY_PROP_PREFIX)
+        },
+        sample_size_kind=row.get("sample_size_kind", ""),
+        sample_size_scope=row.get("sample_size_scope", ""),
+        sample_size=row.get("sample_size", ""),
+        n_cases=row.get("n_cases", ""),
+        n_controls=row.get("n_controls", ""),
+        original_effect_scale=row.get("original_effect_scale", ""),
+        original_sd=row.get("original_sd", ""),
+        original_sd_method=row.get("original_sd_method", ""),
+        original_sd_dispersion=row.get("original_sd_dispersion", ""),
+        license=row.get("license", ""),
+        publication_doi=row.get("publication_doi", ""),
+        publication_pmid=row.get("publication_pmid", ""),
+        consortium=row.get("consortium", ""),
+        first_author=row.get("first_author", ""),
+        completed_against=row.get("completed_against", ""),
+        completion_median_pearson_r=row.get("completion_median_pearson_r", ""),
+        completion_n_imputed_total=row.get("completion_n_imputed_total", ""),
+        completion_n_missing_total=row.get("completion_n_missing_total", ""),
+        n_hits_5e8=row.get("n_hits_5e8", ""),
+        n_hits_5e6=row.get("n_hits_5e6", ""),
+        n_hits_5e4=row.get("n_hits_5e4", ""),
+    )
+
+
+def analyses_table_from_records(analyses: list[Analysis]) -> AnalysesTable:
+    """Build an `AnalysesTable` from `Analysis` records, assigning
+    `analysis_index` by each record's position in `analyses`.
+
+    Rejects a duplicate `analysis_id` here rather than leaving every caller
+    to enforce store-format spec §7a's "`analysis_id` MUST be unique within
+    a Store Release" independently.
+    """
+    seen: set[str] = set()
+    for a in analyses:
+        if a.analysis_id in seen:
+            raise ValueError(f"duplicate analysis_id: {a.analysis_id!r}")
+        seen.add(a.analysis_id)
+
+    fieldnames = _analysis_fieldnames(analyses)
+    return AnalysesTable(
+        fieldnames=fieldnames,
+        rows=tuple(_analysis_row(i, a, fieldnames) for i, a in enumerate(analyses)),
+    )
+
+
+def write_analysis_records(path: str | Path, analyses: list[Analysis]) -> Path:
+    """Write `analyses` to `path` as an `analyses.tsv` file."""
+    return write_analyses(path, analyses_table_from_records(analyses))
+
+
+def read_analysis_records(path: str | Path) -> list[Analysis]:
+    """Read `analyses.tsv` at `path` back into `Analysis` records, in file order."""
+    table = read_analyses(path)
+    return [_analysis_from_row(row, table.fieldnames) for row in table.rows]
