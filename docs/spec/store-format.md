@@ -53,7 +53,7 @@ Required fields:
 | `store_id` | Stable identity of the logical Store |
 | `release_id` | Identity of this immutable release |
 | `format_version` | Store format version |
-| `primary_layout` | `dense` or `ragged` |
+| `primary_layout` | `dense`, `ragged`, or `hybrid` |
 | `association_coverage` | `full` or `cis_and_signals` |
 | `completion_state` | `observed_only` or `reference_completed` |
 | `reference_assembly` | One genome assembly for all coordinates in the release |
@@ -183,20 +183,33 @@ There is no `other`, `unknown`, or original-units Stored Effect Scale in v0.1. U
 
 Original Effect Scale MAY be recorded as free-text provenance. For continuous traits, builders SHOULD store effects in SD Units when phenotype standard deviation is available or can be derived with acceptable provenance, by rescaling the source statistics with a per-study phenotype SD rather than reconstructing them from Z, N, and allele frequency (ADR 0029). The method used to obtain that SD (`original_sd_method`) and a dispersion diagnostic over its supporting evidence MUST be recorded as Analytical Metadata (§7a).
 
-## 7a. Analytical Metadata and `analyses.tsv`
+## 7a. Analytical Metadata, Attribution Metadata, and `analyses.tsv`
 
 A Store Release MUST carry its own Analytical Metadata — metadata affecting the
-interpretation of association statistics — so a downloaded or mirrored copy
-remains interpretable without a catalogue service (ADR 0030). Analytical Metadata
-lives entirely in `analyses.tsv`, one row per Analysis, keyed by `analysis_index`
-matching the release's `index.sqlite` positional indexing:
+interpretation of association statistics — and its own Attribution Metadata —
+metadata establishing how an Analysis may be cited, licensed, and attributed —
+so a downloaded or mirrored copy remains usable and interpretable without a
+catalogue service (ADR 0030, ADR 0034). Both live entirely in `analyses.tsv`,
+one row per Analysis, keyed by `analysis_index`, **identically across every
+Primary Storage Layout** (ADR 0034) — Ragged is not exempt, and `index.sqlite`
+MUST NOT hold a second, layout-specific per-Analysis metadata table. This
+column list is a **breaking revision** of the one ADR 0030 originally
+specified (ADR 0034): a Store Release built against the prior column list is
+not a valid Store Release against this one, and no reader is required to
+accept both.
 
 ```text
 analysis_index
 analysis_id
-phenotype_id
-phenotype_label
 analysis_label
+trait_ontology_id            (CURIE, e.g. EFO:0001073; blank when unmapped)
+trait_ontology_label
+gene_id
+gene_name
+tissue
+context
+trait_chr                    (blank for Analyses with no single genomic position)
+trait_bp
 stored_effect_scale
 assigned_ancestry
 ancestry_assignment_method
@@ -210,6 +223,11 @@ original_effect_scale
 original_sd
 original_sd_method
 original_sd_dispersion
+license
+publication_doi
+publication_pmid
+consortium
+first_author
 completed_against   (Reference-Completed releases only; null when unimputed)
 completion_median_pearson_r   (Reference-Completed releases only)
 completion_n_imputed_total
@@ -219,14 +237,28 @@ n_hits_5e6   (count of associations at p <= 5e-6, suggestive)
 n_hits_5e4   (count of associations at p <= 5e-4, nominal)
 ```
 
+Every column beyond `analysis_index`/`analysis_id` MAY be blank for an
+individual row when genuinely unknown or not applicable — a phenotype-level
+Analysis leaves `gene_id`/`trait_chr`/`trait_bp` blank; a Trait with no clean
+ontology mapping yet leaves `trait_ontology_id`/`trait_ontology_label` blank
+rather than fabricating one. `trait_ontology_id` is not required to be unique
+— one Trait MAY have several Analyses (differing by cohort, ancestry, model,
+sample subset, or meta-analysis) that share it, and it MAY be blank on some or
+all of them. There is deliberately no other Trait-identifying column: a raw,
+source-native trait identifier alongside `trait_ontology_id` was considered
+and rejected (ADR 0034) as recreating the same "which column is authoritative"
+ambiguity `phenotype_id` had. `analysis_id` MUST be unique within a Store
+Release.
+
 `analyses.tsv` MUST be sufficient on its own to interpret every Analysis's stored
-effect scale, sample-size semantics, and ancestry — this supersedes the general
-requirement in §3 that "Analysis metadata MUST be sufficient to interpret stored
-effect scales, sample-size semantics, and source provenance," which this section
-makes concrete. `index.sqlite` MUST NOT duplicate any column of `analyses.tsv`;
-large, fine-grained, tooling-only evidence (such as Reference Completion Quality
-at LD-block-by-Analysis granularity, §12) stays SQLite-only, with only its
-per-Analysis rollup appearing in `analyses.tsv`.
+effect scale, sample-size semantics, ancestry, and licensing/citation terms —
+this supersedes the general requirement in §3 that "Analysis metadata MUST be
+sufficient to interpret stored effect scales, sample-size semantics, and source
+provenance," which this section makes concrete. `index.sqlite` MUST NOT
+duplicate any column of `analyses.tsv`; large, fine-grained, tooling-only
+evidence (such as Reference Completion Quality at LD-block-by-Analysis
+granularity, §12) stays SQLite-only, with only its per-Analysis rollup
+appearing in `analyses.tsv`.
 
 `n_hits_5e8`/`n_hits_5e6`/`n_hits_5e4` are Analytical Metadata too (ADR 0032): a
 signal of study power and test-statistic-inflation risk, derived at build time
@@ -321,6 +353,8 @@ se
 Ragged layout is used when Analyses do not share one dense source variant axis or when Association Coverage is Cis-and-Signals.
 
 For Observed-Only Ragged stores, absence from an Analysis sequence means the association is not retained by that Store Release.
+
+A Ragged store's Analytical and Attribution Metadata lives in `analyses.tsv`, the same schema §7a defines for every layout (ADR 0034) — not a layout-specific `index.sqlite` table. A genomic-range lookup by Trait position (e.g. finding Analyses whose Trait falls in a region) MAY be served by a tabix-indexed positional side-file over `analyses.tsv`'s `trait_chr`/`trait_bp` columns; that side-file is a query-acceleration structure, not a second copy of Analytical Metadata with its own column set.
 
 ## 12. Reference completion model
 
