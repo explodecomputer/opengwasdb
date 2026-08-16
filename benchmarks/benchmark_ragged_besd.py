@@ -32,7 +32,6 @@ import zarr
 from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.query import query_store
-from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.validation import validate_store
 from opengwasdb.variants import VariantAxis
 

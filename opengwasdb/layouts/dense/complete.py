@@ -48,7 +48,7 @@ from opengwasdb.completion.ld_panel import (
 )
 from opengwasdb.completion.manifest import build_completion_provenance
 from opengwasdb.completion.parallel import init_block_worker
-from opengwasdb.completion.schema import create_completion_quality_table
+from opengwasdb.completion.schema import completion_quality_rollup, create_completion_quality_table
 from opengwasdb.index import initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.constants import (
@@ -260,31 +260,6 @@ def resume_dense_completion(
 
 
 # ── Shared pipeline core ────────────────────────────────────────────────────
-
-
-def _completion_quality_rollup(
-    connection: Any, n_analyses: int
-) -> dict[int, tuple[str, str]]:
-    """Per-Analysis ``(completion_median_pearson_r, completion_n_imputed_total)``
-    strings, rolled up from the LD-block-by-Analysis ``completion_quality``
-    table (issue #22) -- the large, fine-grained table stays SQLite-only per
-    ADR 0030; only this rollup travels into ``analyses.tsv``.
-    """
-    per_analysis_r: dict[int, list[float]] = {}
-    per_analysis_imputed: dict[int, int] = {}
-    for row in connection.execute(
-        "SELECT analysis_index, pearson_r, n_imputed FROM completion_quality"
-    ):
-        idx = int(row["analysis_index"])
-        if row["pearson_r"] is not None:
-            per_analysis_r.setdefault(idx, []).append(float(row["pearson_r"]))
-        per_analysis_imputed[idx] = per_analysis_imputed.get(idx, 0) + int(row["n_imputed"])
-    rollup: dict[int, tuple[str, str]] = {}
-    for idx in range(n_analyses):
-        r_values = per_analysis_r.get(idx, [])
-        median_r = f"{float(np.median(r_values)):.6g}" if r_values else ""
-        rollup[idx] = (median_r, str(per_analysis_imputed.get(idx, 0)))
-    return rollup
 
 
 def _run_completion(
@@ -533,13 +508,13 @@ def _run_completion(
 
         print("Writing analyses.tsv...")
         with staged.index_connection() as dst_db:
-            quality_rollup = _completion_quality_rollup(dst_db, n_analyses)
+            quality_rollup = completion_quality_rollup(dst_db, n_analyses)
         dst_analyses = [
             replace(
                 a,
                 completed_against=ancestry if impute_mask is None or impute_mask[i] else "",
-                completion_median_pearson_r=quality_rollup[i][0],
-                completion_n_imputed_total=quality_rollup[i][1],
+                completion_median_pearson_r=quality_rollup[i].median_pearson_r,
+                completion_n_imputed_total=quality_rollup[i].n_imputed_total,
                 completion_n_missing_total=str(int(n_missing_off_panel[i])),
                 # Completion changes z/se via imputation, so the source's
                 # pre-completion Top-Hit Counts (carried forward from `a`) do

@@ -46,22 +46,24 @@ finite paired `se` -- no separate `isfinite(se)` filter is applied at query
 time.
 
 Method availability -- `variants_table()`/`analyses_table()` and
-`__enter__`/`__exit__` are present on all three adapters, though
-`analyses_table()`'s row shape differs by layout: Dense/Hybrid rows carry
-Trait-identity/effect-scale fields (`analyses.tsv`); Ragged rows carry
-molecular-QTL fields -- probe/gene, tissue, context (the `analyses` SQLite
-table) -- since Ragged Analyses are QTL probes, not GWAS phenotypes.
-`analysis_id` is the one field both shapes share. `rho()`/
+`__enter__`/`__exit__` are present on all three adapters.
+`analyses_table()` returns the same shape on every adapter -- every column
+of `analyses.tsv` (ADR-0034's unified schema every layout shares), keyed by
+`analysis_index`. Ragged rows populate the molecular-QTL columns (gene_id/
+gene_name, tissue, context) that Dense/Hybrid rows mostly leave blank, and
+leave Dense/Hybrid's Trait-identity/effect-scale columns mostly blank in
+turn; a caller grouping Ragged Analyses by a shared gene filters this table
+on `gene_id`/`gene_name` rather than through a separate lookup. `rho()`/
 `rho_row()`/`rho_matrix()` (ADR-0025, a Dense storage artifact) are exposed
 on `StoreQuery` and on `HybridStoreQuery` (delegated to its Dense Component);
 `RaggedStoreQuery` has no Rho Matrix format. `range_by_analysis()` (query by
-probe/TSS position) is Ragged-only: it needs `TraitsAxisReader`, which only
+probe/TSS position) is Ragged-only: it scans `AnalysesIndex`'s already
+store-open-time-loaded rows for `trait_chr`/`trait_bp`, which only
 Ragged/molecular-QTL releases populate.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -74,7 +76,6 @@ from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shar
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
 from opengwasdb.store.open import OpenGWASDBStore, open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants import VariantAxis
 
 
@@ -203,17 +204,8 @@ class StoreQuery:
         return _variants_table(self._variant_axis)
 
     def analyses_table(self) -> dict[int, dict]:
-        """Return all analyses keyed by analysis_index."""
-        return {
-            index: {
-                "analysis_id": row["analysis_id"],
-                "analysis_label": row.get("analysis_label") or None,
-                "trait_ontology_id": row.get("trait_ontology_id") or None,
-                "trait_ontology_label": row.get("trait_ontology_label") or None,
-                "stored_effect_scale": row["stored_effect_scale"],
-            }
-            for index, row in self._analyses.all().items()
-        }
+        """Return all analyses keyed by analysis_index -- every analyses.tsv column."""
+        return self._analyses.all()
 
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """Return all finite associations for one analysis."""
@@ -486,8 +478,7 @@ class RaggedStoreQuery:
         self.store = store
         self._csr = RaggedCSRReader(store.path)
         self._variant_axis = VariantAxis(store.path)
-        self._traits_reader = TraitsAxisReader(store.path)
-        self._db: sqlite3.Connection = store.index_connection()
+        self._analyses = AnalysesIndex(store.path)
         self._is_completed = (
             store.manifest.completion_state is CompletionState.REFERENCE_COMPLETED
         )
@@ -504,8 +495,6 @@ class RaggedStoreQuery:
 
     def close(self) -> None:
         self._variant_axis.close()
-        self._traits_reader.close()
-        self._db.close()
 
     def __enter__(self) -> RaggedStoreQuery:
         return self
@@ -514,10 +503,7 @@ class RaggedStoreQuery:
         self.close()
 
     def _resolve_analysis_id(self, analysis_id: str) -> int | None:
-        row = self._db.execute(
-            "SELECT analysis_index FROM analyses WHERE trait_id = ? OR analysis_id = ? LIMIT 1",
-            (analysis_id, analysis_id),
-        ).fetchone()
+        row = self._analyses.by_id(analysis_id)
         return None if row is None else int(row["analysis_index"])
 
     def variants_table(self) -> dict[int, dict]:
@@ -525,33 +511,14 @@ class RaggedStoreQuery:
         return _variants_table(self._variant_axis)
 
     def analyses_table(self) -> dict[int, dict]:
-        """Return all analyses keyed by analysis_index.
+        """Return all analyses keyed by analysis_index -- every analyses.tsv column.
 
-        Ragged Analyses carry molecular-QTL metadata (probe/gene, tissue,
-        context) rather than Dense's phenotype/effect-scale fields -- the
-        ``analyses`` SQLite table (``layouts/ragged/analyses_schema.py``),
-        not ``analyses.tsv``, is this layout's source of truth. ``analysis_id``
-        is the one field both layouts' tables share.
+        Same shape StoreQuery/HybridStoreQuery return (ADR-0034's unified
+        schema). A caller grouping Ragged Analyses by a shared gene filters
+        this table on gene_id/gene_name rather than through a separate
+        lookup.
         """
-        rows = self._db.execute(
-            "SELECT analysis_index, analysis_id, trait_id, gene_id, gene_name, "
-            "tissue, context, trait_chr, trait_bp, n, assigned_ancestry FROM analyses"
-        ).fetchall()
-        return {
-            int(row["analysis_index"]): {
-                "analysis_id": row["analysis_id"],
-                "trait_id": row["trait_id"],
-                "gene_id": row["gene_id"],
-                "gene_name": row["gene_name"],
-                "tissue": row["tissue"],
-                "context": row["context"],
-                "trait_chr": row["trait_chr"],
-                "trait_bp": row["trait_bp"],
-                "n": row["n"],
-                "assigned_ancestry": row["assigned_ancestry"],
-            }
-            for row in rows
-        }
+        return self._analyses.all()
 
     def _get_imputed_slice(self, start: int, end: int) -> np.ndarray:
         """Return imputed mask slice [start:end]; all-zeros if not a completed store."""
@@ -560,7 +527,7 @@ class RaggedStoreQuery:
         return np.zeros(end - start, dtype=np.uint8)
 
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
-        """All associations for one analysis (probe_id or analysis_id lookup)."""
+        """All associations for one analysis (analysis_id lookup)."""
         idx = self._resolve_analysis_id(analysis_id)
         if idx is None:
             return _empty_result()
@@ -631,6 +598,19 @@ class RaggedStoreQuery:
             "association_status": _status_array(imp, z_out, se_out),
         }
 
+    def _analysis_indices_in_range(self, chromosome: str, start: int, end: int) -> list[int]:
+        """Analysis indices whose Trait position falls in [start, end] --
+        analyses.tsv's own trait_chr/trait_bp columns are the sole source of
+        truth for this (ADR-0034, issue #69); this scans the already
+        store-open-time-loaded AnalysesIndex rather than a second,
+        independently-shaped tabix-indexed position file."""
+        matches = []
+        for index, row in self._analyses.items():
+            bp = row.get("trait_bp") or ""
+            if row.get("trait_chr") == chromosome and bp and start <= int(bp) <= end:
+                matches.append(index)
+        return matches
+
     def range_by_analysis(
         self,
         chromosome: str,
@@ -640,8 +620,8 @@ class RaggedStoreQuery:
         observed_only: bool = False,
     ) -> dict[str, np.ndarray]:
         """All associations for analyses whose probe/TSS falls in [start, end]."""
-        trait_records = self._traits_reader.range(chromosome, start, end)
-        if not trait_records:
+        analysis_indices = self._analysis_indices_in_range(chromosome, start, end)
+        if not analysis_indices:
             return _empty_result()
 
         all_vi: list[np.ndarray] = []
@@ -650,8 +630,7 @@ class RaggedStoreQuery:
         all_se: list[np.ndarray] = []
         all_status: list[np.ndarray] = []
 
-        for rec in trait_records:
-            ai = rec.analysis_index
+        for ai in analysis_indices:
             offsets = self._csr._offsets[ai: ai + 2]
             s, e = int(offsets[0]), int(offsets[1])
             if s == e:

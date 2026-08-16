@@ -10,7 +10,6 @@ from opengwasdb.layouts.ragged.build_besd import build_ragged_from_besd
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.store.open import open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 
 
 # ── Synthetic BESD fixture ────────────────────────────────────────────────────
@@ -117,7 +116,11 @@ def test_build_creates_store_files(tmp_path):
     assert out.exists()
     assert (out / "manifest.json").exists()
     assert (out / "variants.tsv.gz").exists()
-    assert (out / "traits.tsv.gz").exists()
+    assert (out / "analyses.tsv").exists()
+    # traits.tsv.gz (issue 034) is retired (issue #69): a Trait's genomic
+    # position lives in analyses.tsv's own trait_chr/trait_bp columns now,
+    # not a second, independently-shaped tabix-indexed position file.
+    assert not (out / "traits.tsv.gz").exists()
     assert (out / "index.sqlite").exists()
     assert (out / "data.zarr" / "ragged").exists()
 
@@ -137,21 +140,17 @@ def test_manifest_primary_layout(tmp_path):
     assert manifest["reference_assembly"] == "GRCh38"
 
 
-def test_traits_tsv_contents(tmp_path):
+def test_analyses_tsv_carries_probe_identities(tmp_path):
+    from opengwasdb.model.analyses import read_analyses
+
     prefix = _make_besd_fixture(tmp_path)
     out = tmp_path / "out.opengwasdb"
     build_ragged_from_besd(prefix, out, store_id="test", release_id="v1", tissue="Whole_Blood")
 
-    reader = TraitsAxisReader(out)
-    all_traits = list(reader.all())
-    assert len(all_traits) == 3
-    probe_ids = {r.trait_id for r in all_traits}
-    assert probe_ids == {"ENSG00000000001", "ENSG00000000002", "ENSG00000000003"}
-
-    # regional query — chr1 probes
-    chr1_probes = reader.range("1", 1_000_000, 1_200_000)
-    assert len(chr1_probes) == 2
-    assert {r.trait_id for r in chr1_probes} == {"ENSG00000000001", "ENSG00000000002"}
+    table = read_analyses(out / "analyses.tsv")
+    assert len(table.rows) == 3
+    gene_ids = {r["gene_id"] for r in table.rows}
+    assert gene_ids == {"ENSG00000000001", "ENSG00000000002", "ENSG00000000003"}
 
 
 def test_zarr_csr_associations(tmp_path):
@@ -289,6 +288,108 @@ def test_validation_rejects_ragged_top_hit_offsets(tmp_path):
     result = validate_store(out)
     assert not result.ok
     assert any("invalid analysis offsets" in error for error in result.errors)
+
+
+def test_analyses_tsv_has_no_sql_table_and_carries_molecular_columns(tmp_path):
+    """Issue #69: analyses.tsv is the sole source of truth for Analytical
+    Metadata; the store's index.sqlite carries no `analyses` table, and the
+    molecular/context columns the BESD path already collects (gene, tissue,
+    genomic position) are carried into the shared schema."""
+    import sqlite3
+
+    from opengwasdb.model.analyses import read_analyses
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1", tissue="Blood")
+
+    conn = sqlite3.connect(str(out / "index.sqlite"))
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "analyses" not in tables
+
+    table = read_analyses(out / "analyses.tsv")
+    rows = {r["analysis_id"]: r for r in table.rows}
+    assert rows["ENSG00000000001::Blood"]["gene_name"] == "GENE1"
+    assert rows["ENSG00000000001::Blood"]["gene_id"] == "ENSG00000000001"
+    assert rows["ENSG00000000001::Blood"]["tissue"] == "Blood"
+    assert rows["ENSG00000000001::Blood"]["trait_chr"] == "1"
+    assert rows["ENSG00000000001::Blood"]["trait_bp"] == "1050000"
+
+
+def test_top_hit_counts_in_analyses_tsv_match_top_hit_index(tmp_path):
+    """Issue #73: Ragged builds persist per-Analysis Top-Hit Counts in
+    analyses.tsv, matching what the store's own top-hit index actually
+    contains -- not zero, not stale."""
+    from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
+    from opengwasdb.model.analyses import read_analyses
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    table = read_analyses(out / "analyses.tsv")
+    rows = sorted(table.rows, key=lambda r: int(r["analysis_index"]))
+    expected = read_top_hit_counts(out, len(rows))
+    for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+        assert [int(r[column]) for r in rows] == expected[column]
+    # All 5 associations clear the loosest threshold (test_top_hits_query_uses_index).
+    assert sum(int(r["n_hits_5e4"]) for r in rows) == 5
+
+
+def test_analyses_table_groups_by_gene(tmp_path):
+    """Issue #71: a caller who used to group Ragged Analyses via the
+    retired dual analysis_id-or-trait_id lookup can instead filter
+    analyses_table() (the same shape Dense/Hybrid return) on gene_id."""
+    from opengwasdb.query import query_store
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    q = query_store(out)
+    analyses = q.analyses_table()
+    q.close()
+
+    by_gene = {row["gene_id"]: idx for idx, row in analyses.items()}
+    assert by_gene["ENSG00000000002"] is not None
+    matched = [idx for idx, row in analyses.items() if row["gene_id"] == "ENSG00000000002"]
+    assert len(matched) == 1
+    assert analyses[matched[0]]["analysis_id"] == "ENSG00000000002"
+
+
+def test_range_by_analysis_matches_trait_position(tmp_path):
+    """Issue #69/#71: genomic-range-by-Trait-position lookup keeps working
+    after retiring both the SQL analyses table and the tabix-indexed
+    traits.tsv.gz sidecar (issue #69: not a second, independently-shaped
+    metadata file) -- analyses.tsv's own trait_chr/trait_bp columns are now
+    the sole source of truth `range_by_analysis()` scans."""
+    from opengwasdb.query import query_store
+
+    prefix = _make_besd_fixture(tmp_path)
+    out = tmp_path / "out.opengwasdb"
+    build_ragged_from_besd(prefix, out, store_id="test", release_id="v1")
+
+    from opengwasdb.model.analyses import read_analyses
+
+    # Independent oracle: compute the expected analysis_index set by hand
+    # from the same analyses.tsv rows the query facade reads, rather than
+    # hardcoding the expected indices, so a filtering-logic bug in
+    # range_by_analysis() (wrong comparison operator, wrong column) would
+    # be caught even though both sides ultimately read the same file.
+    table = read_analyses(out / "analyses.tsv")
+    expected = {
+        int(r["analysis_index"])
+        for r in table.rows
+        if r["trait_chr"] == "1" and 1_000_000 <= int(r["trait_bp"]) <= 1_200_000
+    }
+    assert expected == {0, 1}  # chr1 probes at 1_050_000/1_150_000; chr2 probe excluded
+
+    q = query_store(out)
+    result = q.range_by_analysis("1", 1_000_000, 1_200_000)
+    q.close()
+
+    assert set(result["analysis_index"].tolist()) == expected
 
 
 def test_overwrite_flag(tmp_path):

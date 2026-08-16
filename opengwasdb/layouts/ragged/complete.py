@@ -27,7 +27,7 @@ import json
 import logging
 import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,13 +51,14 @@ from opengwasdb.completion.ld_panel import (
 )
 from opengwasdb.completion.manifest import build_completion_provenance
 from opengwasdb.completion.parallel import init_block_worker
-from opengwasdb.completion.schema import create_completion_quality_table
+from opengwasdb.completion.schema import completion_quality_rollup, create_completion_quality_table
+from opengwasdb.layouts.dense.build import add_hit_counts
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RAGGED_ZARR_PATH, RaggedCSRReader
+from opengwasdb.model.analyses import read_analysis_records, write_analysis_records
 from opengwasdb.model.enums import CompletionState
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.store.open import OpenGWASDBStore, open_store
-from opengwasdb.traits.axis import TraitsAxisReader
 from opengwasdb.variants.axis import (
     VariantAxis,
     write_variant_axis,
@@ -271,8 +272,10 @@ def resume_ragged_completion(
 
 
 def _read_analyses_rows(store_path: Path) -> list[dict]:
-    with open_store(store_path).index_connection() as conn:
-        return [dict(row) for row in conn.execute("SELECT * FROM analyses ORDER BY analysis_index")]
+    return [
+        {"analysis_id": a.analysis_id, "assigned_ancestry": a.assigned_ancestry}
+        for a in read_analysis_records(store_path / "analyses.tsv")
+    ]
 
 
 # ── Shared pipeline core ────────────────────────────────────────────────────
@@ -310,10 +313,14 @@ def _run_completion(
         src_alids: list[str] = [v.alid for v in src_variants]
         alid_to_src_idx: dict[str, int] = {v.alid: v.variant_index for v in src_variants}
 
-        traits_reader = TraitsAxisReader(src)
-        trait_records = list(traits_reader.all())
-        traits_reader.close()
-        n_analyses = len(trait_records)
+        # analyses.tsv is the sole source of truth for Analytical Metadata
+        # (ADR 0034, issue #69) -- including each Analysis's Trait genomic
+        # position, so cis-window/LD-block scanning below reads it directly
+        # rather than through a second, independently-shaped position file.
+        src_analyses = sorted(
+            read_analysis_records(src / "analyses.tsv"), key=lambda a: int(a.analysis_index)
+        )
+        n_analyses = len(src_analyses)
 
         print(f"Source: {len(src_alids):,} variants, {n_analyses:,} analyses")
 
@@ -321,7 +328,7 @@ def _run_completion(
             impute_mask = None
         else:
             impute_mask = np.array(
-                [rec.analysis_id in impute_analysis_ids for rec in trait_records], dtype=bool
+                [a.analysis_id in impute_analysis_ids for a in src_analyses], dtype=bool
             )
             n_match = int(impute_mask.sum())
             print(f"Ancestry-match filter: imputing {n_match:,}/{n_analyses:,} analyses")
@@ -333,7 +340,7 @@ def _run_completion(
         block_canonical_alids: dict[str, list[str | None]] = {}
         analysis_to_blocks: dict[int, list[str]] = {}
 
-        for i, rec in enumerate(trait_records):
+        for i, a in enumerate(src_analyses):
             # Ancestry-mismatched Analyses are left observed-only (ADR 0028):
             # not assigned to any block, not touched by Phase 2, no
             # completion_quality rows -- Phase 3's pass-through path below
@@ -342,12 +349,12 @@ def _run_completion(
             if impute_mask is not None and not impute_mask[i]:
                 analysis_to_blocks[i] = []
                 continue
-            if rec.trait_chr is None or rec.trait_bp is None:
+            if not a.trait_chr or not a.trait_bp:
                 analysis_to_blocks[i] = []
                 continue
-            chrom = rec.trait_chr
-            start = max(1, rec.trait_bp - cis_window_bp)
-            end = rec.trait_bp + cis_window_bp
+            chrom = a.trait_chr
+            start = max(1, int(a.trait_bp) - cis_window_bp)
+            end = int(a.trait_bp) + cis_window_bp
 
             blocks = find_blocks(ld_dir, ancestry, chrom, start, end)
             analysis_to_blocks[i] = [b.block_id for b in blocks]
@@ -404,43 +411,10 @@ def _run_completion(
         print("Writing variants.tsv.gz...")
         write_variant_axis(staged.path, merged_variants, {})
 
-        shutil.copy2(src / "traits.tsv.gz", staged.traits_table_path)
-        tbi_src = src / "traits.tsv.gz.tbi"
-        if tbi_src.exists():
-            shutil.copy2(tbi_src, staged.path / "traits.tsv.gz.tbi")
-
         print("Writing index.sqlite...")
-        src_db = source.index_connection()
         dst_db = staged.index_connection()
-        try:
-            src_schema = src_db.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='analyses'"
-            ).fetchone()
-            if src_schema:
-                dst_db.execute(src_schema["sql"])
-            # completed_against (ADR 0028): "" for an Analysis that was
-            # imputed against ancestry, "" otherwise -- the completion-time
-            # counterpart to build's assigned_ancestry, mirroring dense's
-            # analyses.tsv field of the same name and meaning.
-            dst_db.execute("ALTER TABLE analyses ADD COLUMN completed_against TEXT")
-            for row in src_db.execute("SELECT * FROM analyses ORDER BY analysis_index"):
-                ai = int(row["analysis_index"])
-                cols = [*row.keys(), "completed_against"]
-                placeholders = ",".join("?" * len(cols))
-                completed_against = ancestry if impute_mask is None or bool(impute_mask[ai]) else ""
-                dst_db.execute(
-                    f"INSERT INTO analyses ({','.join(cols)}) VALUES ({placeholders})",
-                    [*row, completed_against],
-                )
-            dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_trait_id ON analyses(trait_id)")
-            dst_db.execute("CREATE INDEX IF NOT EXISTS idx_analyses_gene_id ON analyses(gene_id)")
-            dst_db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_analyses_trait_loc ON analyses(trait_chr, trait_bp)"
-            )
-            create_completion_quality_table(dst_db)
-            dst_db.commit()
-        finally:
-            src_db.close()
+        create_completion_quality_table(dst_db)
+        dst_db.commit()
 
         # ── Phase 2: parallel LD-block completion ───────────────────────────
         print(f"Running reference completion across {len(block_to_tsv):,} LD blocks "
@@ -654,6 +628,35 @@ def _run_completion(
 
         print("Building top-hit indexes...")
         build_ragged_top_hit_indexes(staged.path)
+
+        print("Writing analyses.tsv...")
+        with staged.index_connection() as quality_db:
+            quality_rollup = completion_quality_rollup(quality_db, n_analyses)
+        dst_analyses = [
+            replace(
+                a,
+                completed_against=(
+                    ancestry
+                    if impute_analysis_ids is None or a.analysis_id in impute_analysis_ids
+                    else ""
+                ),
+                completion_median_pearson_r=quality_rollup[i].median_pearson_r,
+                completion_n_imputed_total=quality_rollup[i].n_imputed_total,
+                completion_n_missing_total=quality_rollup[i].n_missing_total,
+                # Completion changes z/se via imputation, so the source's
+                # pre-completion Top-Hit Counts (carried forward from `a`) do
+                # not apply here -- zero them so add_hit_counts below sets
+                # fresh post-completion counts rather than adding onto stale
+                # ones.
+                n_hits_5e8="",
+                n_hits_5e6="",
+                n_hits_5e4="",
+            )
+            for i, a in enumerate(src_analyses)
+        ]
+        write_analysis_records(
+            staged.path / "analyses.tsv", add_hit_counts(staged.path, dst_analyses)
+        )
 
         new_release_id = release_id or f"{manifest.release_id}-completed"
         completed_manifest = StoreManifest(

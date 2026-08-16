@@ -45,7 +45,6 @@ def _release_paths(path: Path) -> dict[str, Path]:
         "variant_table": path / "variants.tsv.gz",
         "variant_tabix": path / "variants.tsv.gz.tbi",
         "variant_offsets": path / "variant_offsets.npy",
-        "traits_table": path / "traits.tsv.gz",
     }
 
 
@@ -86,10 +85,6 @@ class _ReleasePaths:
     @property
     def variant_offsets_path(self) -> Path:
         return self._paths["variant_offsets"]
-
-    @property
-    def traits_table_path(self) -> Path:
-        return self._paths["traits_table"]
 
 
 @dataclass(frozen=True)
