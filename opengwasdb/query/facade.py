@@ -527,7 +527,7 @@ class RaggedStoreQuery:
         return np.zeros(end - start, dtype=np.uint8)
 
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
-        """All associations for one analysis (probe_id or analysis_id lookup)."""
+        """All associations for one analysis (analysis_id lookup)."""
         idx = self._resolve_analysis_id(analysis_id)
         if idx is None:
             return _empty_result()
@@ -605,7 +605,7 @@ class RaggedStoreQuery:
         store-open-time-loaded AnalysesIndex rather than a second,
         independently-shaped tabix-indexed position file."""
         matches = []
-        for index, row in self._analyses.all().items():
+        for index, row in self._analyses.items():
             bp = row.get("trait_bp") or ""
             if row.get("trait_chr") == chromosome and bp and start <= int(bp) <= end:
                 matches.append(index)

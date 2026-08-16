@@ -8,6 +8,7 @@ scan) translate directly to reading the file into a dict once at store-open.
 
 from __future__ import annotations
 
+from collections.abc import ItemsView
 from pathlib import Path
 
 from opengwasdb.model.analyses import read_analyses
@@ -29,3 +30,9 @@ class AnalysesIndex:
 
     def all(self) -> dict[int, dict[str, str]]:
         return dict(self._by_index)
+
+    def items(self) -> ItemsView[int, dict[str, str]]:
+        """A live view over (analysis_index, row) pairs for internal iteration
+        -- unlike `all()`, this doesn't copy, so it's for callers that only
+        read (a caller wanting an owned dict to mutate should use `all()`)."""
+        return self._by_index.items()
