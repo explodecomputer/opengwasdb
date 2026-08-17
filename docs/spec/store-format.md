@@ -251,8 +251,12 @@ ambiguity `phenotype_id` had. This extends to gene identity for gene-centric
 kind, so an Ensembl gene ID (e.g. `ENSEMBL:ENSG00000152256`) belongs there and
 in `trait_ontology_label` (`"Ensembl"`) rather than in dedicated `gene_id`/
 `gene_name` columns, with the gene symbol carried as free text in
-`analysis_label` (ADR 0035). `analysis_id` MUST be unique within a Store
-Release.
+`analysis_label` (ADR 0035). `trait_ontology_label`'s meaning is therefore
+polymorphic along with `trait_ontology_id`'s: for an EFO/MONDO CURIE it MUST
+be that specific term's human-readable name; for a gene-centric CURIE, whose
+human-readable name is already `analysis_label`, it instead names the
+identifying vocabulary (`"Ensembl"`) rather than repeating the gene name.
+`analysis_id` MUST be unique within a Store Release.
 
 `analyses.tsv` MUST be sufficient on its own to interpret every Analysis's stored
 effect scale, sample-size semantics, ancestry, and licensing/citation terms —

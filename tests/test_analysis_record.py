@@ -14,6 +14,7 @@ import pytest
 
 from opengwasdb.model.analyses import (
     ANALYSIS_COLUMNS,
+    RETIRED_ANALYSIS_COLUMNS,
     Analysis,
     analyses_table_from_records,
     read_analyses,
@@ -21,7 +22,7 @@ from opengwasdb.model.analyses import (
     write_analysis_records,
 )
 
-_RETIRED_COLUMNS = {"phenotype_id", "phenotype_label", "trait_id", "gene_id", "gene_name"}
+_RETIRED_COLUMNS = set(RETIRED_ANALYSIS_COLUMNS)
 
 _FULL_ANALYSIS = Analysis(
     analysis_id="ieu-a-7",

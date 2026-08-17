@@ -338,6 +338,22 @@ ANALYSIS_COLUMNS: tuple[str, ...] = (
     *TOP_HIT_COUNT_COLUMNS,
 )
 
+# Columns a prior `analyses.tsv` schema carried that this one deliberately
+# drops -- `phenotype_id`/`phenotype_label`/`trait_id` (ADR 0034) and
+# `gene_id`/`gene_name` (ADR 0035, both superseded by `analysis_label`/
+# `trait_ontology_id`/`trait_ontology_label`). A built store's analyses.tsv
+# carrying any of these is a validation failure (store-format spec §7a: "a
+# Store Release built against a prior column list is not a valid Store
+# Release against this one"), checked by
+# `opengwasdb.validation.validate._validate_analyses_tsv`.
+RETIRED_ANALYSIS_COLUMNS: tuple[str, ...] = (
+    "phenotype_id",
+    "phenotype_label",
+    "trait_id",
+    "gene_id",
+    "gene_name",
+)
+
 _ANALYSIS_SAMPLE_SIZE_KIND_INDEX = ANALYSIS_COLUMNS.index("sample_size_kind")
 
 
