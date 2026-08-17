@@ -11,6 +11,7 @@ Known positions:
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 from opengwasdb.layouts.dense.build_vcf import build_dense_from_vcf_manifest
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
+from opengwasdb.readers import GWAS_SSF_CAPABILITY
 from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
@@ -744,3 +746,74 @@ def test_build_honours_source_reader_capability_column(tmp_path, monkeypatch):
     result = query.analysis("fake_trait")
     assert len(result["z"]) == 1
     assert result["z"][0] == pytest.approx(-2.0, rel=5e-3)
+
+
+_SSF_HEADER = [
+    "chromosome",
+    "base_pair_location",
+    "effect_allele",
+    "other_allele",
+    "beta",
+    "standard_error",
+]
+
+
+def _write_ssf(path: Path, rows: list[dict]) -> None:
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write("\t".join(_SSF_HEADER) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row.get(col, "")) for col in _SSF_HEADER) + "\n")
+
+
+def test_gwas_ssf_capability_builds_a_dense_store(tmp_path):
+    """issue #84: build_dense_from_vcf_manifest resolves the registered
+    GWAS-SSF capability the same way build_hybrid_from_vcf_manifest does
+    (test_hybrid_build.py's equivalent test) -- same dense builder, no
+    source-format branching, just a manifest row naming GWAS_SSF_CAPABILITY.
+    Same z pattern (-4.0, -5.0, 3.0) as `two_trait_store`'s trait_a, sourced
+    from a filtered/harmonised GWAS-SSF file instead of a VCF.
+    """
+    ssf_path = tmp_path / "trait_ssf.tsv.gz"
+    _write_ssf(
+        ssf_path,
+        [
+            # effect_allele=G, other_allele=A -> A1=A, effect != A1 -> flip -> z=-4.0
+            {
+                "chromosome": "1", "base_pair_location": HG19_POS_1,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 2.0, "standard_error": 0.5,
+            },
+            # effect_allele=T, other_allele=C -> A1=C, effect != A1 -> flip -> z=-5.0
+            {
+                "chromosome": "1", "base_pair_location": HG19_POS_2,
+                "effect_allele": "T", "other_allele": "C",
+                "beta": 1.5, "standard_error": 0.3,
+            },
+            # effect_allele=A, other_allele=G -> A1=A, effect == A1 -> no flip -> z=3.0
+            {
+                "chromosome": "1", "base_pair_location": HG19_POS_3,
+                "effect_allele": "A", "other_allele": "G",
+                "beta": 0.6, "standard_error": 0.2,
+            },
+        ],
+    )
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_reader_capability\n"
+        f"trait_ssf\t{ssf_path}\tTrait SSF\t1000\tsd\tdeclared_standardised\t\t{GWAS_SSF_CAPABILITY}\n",
+        encoding="utf-8",
+    )
+    store_path = tmp_path / "store_ssf.opengwasdb"
+    build_dense_from_vcf_manifest(
+        manifest, store_path, store_id="dense-ssf-test", release_id="v1"
+    )
+
+    result = validate_store(store_path)
+    assert result.ok, result.errors
+
+    query = query_store(store_path)
+    r = query.analysis("trait_ssf")
+    query.close()
+
+    assert set(np.round(r["z"], 1).tolist()) == {-4.0, -5.0, 3.0}

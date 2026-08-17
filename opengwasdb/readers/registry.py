@@ -13,11 +13,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from opengwasdb.model.enums import StoredEffectScale
+from opengwasdb.readers.gwas_ssf import GWAS_SSF_CAPABILITY, GwasSsfReader
 from opengwasdb.readers.gwas_vcf import GWAS_VCF_CAPABILITY, GwasVcfReader
 from opengwasdb.readers.interface import SourceReader
 
 _READERS: dict[str, Callable[[str | Path, StoredEffectScale], SourceReader]] = {
     GWAS_VCF_CAPABILITY: GwasVcfReader,
+    GWAS_SSF_CAPABILITY: GwasSsfReader,
 }
 
 

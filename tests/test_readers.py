@@ -1,10 +1,11 @@
-"""Tests for opengwasdb.readers (issue #19; extended by #20, #21): capability
-resolution, the GWAS-VCF reader, the in-memory fake, and the conformance
-suite the two share.
+"""Tests for opengwasdb.readers (issue #19; extended by #20, #21, #84):
+capability resolution, the GWAS-VCF and GWAS-SSF readers, the in-memory
+fake, and the conformance suite all three share.
 """
 
 from __future__ import annotations
 
+import gzip
 import subprocess
 from pathlib import Path
 
@@ -14,8 +15,10 @@ import pytest
 from opengwasdb.build.phenotype_sd import estimate_phenotype_sd
 from opengwasdb.model.enums import OriginalSdMethod, StoredEffectScale
 from opengwasdb.readers import (
+    GWAS_SSF_CAPABILITY,
     GWAS_VCF_CAPABILITY,
     FakeReader,
+    GwasSsfReader,
     GwasVcfReader,
     ReaderAssociation,
     SiteMetrics,
@@ -68,6 +71,43 @@ def test_resolve_reader_returns_gwas_vcf_reader_for_its_capability(tmp_path):
     assert isinstance(reader, GwasVcfReader)
 
 
+_SSF_HEADER = [
+    "chromosome",
+    "base_pair_location",
+    "effect_allele",
+    "other_allele",
+    "beta",
+    "standard_error",
+    "effect_allele_frequency",
+]
+
+
+def _write_ssf(path: Path, rows: list[dict]) -> None:
+    """Write a filtered/harmonised GWAS-SSF ``.tsv.gz`` fixture."""
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write("\t".join(_SSF_HEADER) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row.get(col, "")) for col in _SSF_HEADER) + "\n")
+
+
+def test_resolve_reader_returns_gwas_ssf_reader_for_its_capability(tmp_path):
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5,
+            }
+        ],
+    )
+
+    reader = resolve_reader(GWAS_SSF_CAPABILITY, path, StoredEffectScale.SD)
+
+    assert isinstance(reader, GwasSsfReader)
+
+
 def test_resolve_reader_rejects_unknown_capability(tmp_path):
     with pytest.raises(ValueError, match="unknown source reader capability"):
         resolve_reader(
@@ -90,6 +130,29 @@ def _gwas_vcf_reader(tmp_path: Path) -> GwasVcfReader:
     # Bgzip+index: stream_associations works on a plain VCF, but
     # extract_at_sites's bcftools -R region lookup requires an index.
     return GwasVcfReader(_bgzip_index(vcf), StoredEffectScale.SD)
+
+
+def _gwas_ssf_reader(tmp_path: Path) -> GwasSsfReader:
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            # effect_allele=G, other_allele=A -> A1=A, effect (G) is A2 ->
+            # z negated, af flipped -- same fixture shape as _gwas_vcf_reader.
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5, "effect_allele_frequency": 0.30,
+            },
+            # effect_allele=A, other_allele=G -> A1=A -> no flip.
+            {
+                "chromosome": "1", "base_pair_location": 200,
+                "effect_allele": "A", "other_allele": "G",
+                "beta": 1.0, "standard_error": 0.5, "effect_allele_frequency": 0.70,
+            },
+        ],
+    )
+    return GwasSsfReader(path, StoredEffectScale.SD)
 
 
 def _fake_reader() -> FakeReader:
@@ -121,10 +184,12 @@ def _fake_reader() -> FakeReader:
     )
 
 
-@pytest.fixture(params=["gwas_vcf", "fake"])
+@pytest.fixture(params=["gwas_vcf", "fake", "gwas_ssf"])
 def reader(request, tmp_path):
     if request.param == "gwas_vcf":
         return _gwas_vcf_reader(tmp_path)
+    if request.param == "gwas_ssf":
+        return _gwas_ssf_reader(tmp_path)
     return _fake_reader()
 
 
@@ -248,6 +313,144 @@ def test_gwas_vcf_reader_stream_variants_includes_rows_dropped_from_associations
 
     assert assoc_positions == {("1", 100)}
     assert variant_positions == {("1", 100), ("1", 200)}
+
+
+# --- GWAS-SSF reader (issue #84) ---
+
+
+def test_gwas_ssf_reader_extract_at_sites_with_no_sites_returns_empty(tmp_path):
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5, "effect_allele_frequency": 0.30,
+            }
+        ],
+    )
+
+    assert GwasSsfReader(path, StoredEffectScale.SD).extract_at_sites([]) == {}
+
+
+def test_gwas_ssf_reader_extract_at_sites_returns_nothing_when_file_has_no_af_column(tmp_path):
+    """SiteMetrics never fabricates an AF: a filtered file with no
+    `effect_allele_frequency` column yields no site metrics at all, rather
+    than guessing one."""
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5,
+            }
+        ],
+    )
+
+    assert GwasSsfReader(path, StoredEffectScale.SD).extract_at_sites(["1:100:A:G"]) == {}
+
+
+def test_gwas_ssf_reader_stream_variants_includes_rows_dropped_from_associations(tmp_path):
+    """A row with a non-positive SE is skipped by stream_associations but
+    still belongs on a builder's union-variant axis (issue #20), mirroring
+    GwasVcfReader's identical contract."""
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5,
+            },
+            {
+                "chromosome": "1", "base_pair_location": 200,
+                "effect_allele": "A", "other_allele": "G",
+                "beta": 1.0, "standard_error": 0.0,  # non-positive -> dropped
+            },
+        ],
+    )
+    reader = GwasSsfReader(path, StoredEffectScale.SD)
+
+    assoc_positions = {(a.chromosome, a.position) for a in reader.stream_associations()}
+    variant_positions = {(chrom, pos) for chrom, pos, _ref, _alt in reader.stream_variants()}
+
+    assert assoc_positions == {("1", 100)}
+    assert variant_positions == {("1", 100), ("1", 200)}
+
+
+def test_gwas_ssf_reader_drops_rows_with_unparseable_alleles(tmp_path):
+    """Malformed rows -- here a non-ACGT allele -- can't be represented as a
+    variant at all, so they are dropped from every stream, not fabricated."""
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5,
+            },
+            {
+                "chromosome": "1", "base_pair_location": 200,
+                "effect_allele": "N", "other_allele": "A",  # unparseable allele
+                "beta": 1.0, "standard_error": 0.5,
+            },
+        ],
+    )
+    reader = GwasSsfReader(path, StoredEffectScale.SD)
+
+    assert {a.position for a in reader.stream_associations()} == {100}
+    assert {pos for _chrom, pos, _ref, _alt in reader.stream_variants()} == {100}
+
+
+def test_gwas_ssf_reader_extract_at_sites_excludes_palindromic(tmp_path):
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            # A/T is palindromic -- excluded, like GwasVcfReader.extract_at_sites.
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "A", "other_allele": "T",
+                "beta": 1.0, "standard_error": 0.5, "effect_allele_frequency": 0.30,
+            },
+            {
+                "chromosome": "1", "base_pair_location": 200,
+                "effect_allele": "A", "other_allele": "G",
+                "beta": 1.0, "standard_error": 0.5, "effect_allele_frequency": 0.30,
+            },
+        ],
+    )
+
+    sites = GwasSsfReader(path, StoredEffectScale.SD).extract_at_sites(
+        ["1:100:A:T", "1:200:A:G"]
+    )
+
+    assert set(sites) == {"1:200:A:G"}
+
+
+def test_gwas_ssf_reader_uses_constructor_scale(tmp_path):
+    path = tmp_path / "study.tsv.gz"
+    _write_ssf(
+        path,
+        [
+            {
+                "chromosome": "1", "base_pair_location": 100,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 1.0, "standard_error": 0.5,
+            }
+        ],
+    )
+
+    reader = GwasSsfReader(path, StoredEffectScale.LOG_OR)
+    associations = list(reader.stream_associations())
+
+    assert len(associations) == 1
+    assert associations[0].stored_effect_scale is StoredEffectScale.LOG_OR
 
 
 # --- Site extraction: orientation, palindromes, liftover (issue #21) ---

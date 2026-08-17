@@ -12,6 +12,7 @@ Off-panel (→ Ragged Overflow):
 
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
+from opengwasdb.readers import GWAS_SSF_CAPABILITY
 from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
 
@@ -412,3 +414,91 @@ def test_validate_catches_overflow_top_hit_offsets(hybrid_store):
     result = validate_store(hybrid_store)
     assert not result.ok
     assert any("invalid analysis offsets" in error for error in result.errors)
+
+
+# --- GWAS-SSF source_reader_capability (issue #84) ---
+
+_SSF_HEADER = [
+    "chromosome",
+    "base_pair_location",
+    "effect_allele",
+    "other_allele",
+    "beta",
+    "standard_error",
+]
+
+
+def _write_ssf(path: Path, rows: list[dict]) -> None:
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write("\t".join(_SSF_HEADER) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row.get(col, "")) for col in _SSF_HEADER) + "\n")
+
+
+def test_gwas_ssf_capability_builds_a_hybrid_store_alongside_gwas_vcf(tmp_path):
+    """issue #84: a manifest row whose source_reader_capability names the new
+    GWAS-SSF reader builds through the same Hybrid pipeline as a GWAS-VCF row,
+    with no source-format branching in build_hybrid_from_vcf_manifest itself
+    -- trait_ssf (GWAS-SSF) and trait_b (GWAS-VCF, default capability) are
+    built from the same manifest. Same dense/overflow/dense z pattern as
+    `hybrid_store`'s trait_a, sourced from a filtered/harmonised GWAS-SSF
+    file instead of a VCF.
+    """
+    ssf_path = tmp_path / "trait_ssf.tsv.gz"
+    _write_ssf(
+        ssf_path,
+        [
+            # effect_allele=G, other_allele=A -> A1=A, effect != A1 -> flip -> z=-4.0, dense
+            {
+                "chromosome": "1", "base_pair_location": HG19_POS_1,
+                "effect_allele": "G", "other_allele": "A",
+                "beta": 2.0, "standard_error": 0.5,
+            },
+            # effect_allele=T, other_allele=C -> A1=C, effect != A1 -> flip -> z=-5.0, overflow
+            {
+                "chromosome": "1", "base_pair_location": HG19_POS_2,
+                "effect_allele": "T", "other_allele": "C",
+                "beta": 1.5, "standard_error": 0.3,
+            },
+            # effect_allele=A, other_allele=G -> A1=A, effect == A1 -> no flip -> z=3.0, dense
+            {
+                "chromosome": "1", "base_pair_location": HG19_POS_3,
+                "effect_allele": "A", "other_allele": "G",
+                "beta": 0.6, "standard_error": 0.2,
+            },
+        ],
+    )
+    vcf_b = _make_vcf(
+        tmp_path,
+        "trait_b",
+        [
+            f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t6.0:0.5\n",
+            f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t1.2:0.3\n",
+        ],
+    )
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_reader_capability\n"
+        f"trait_ssf\t{ssf_path}\tTrait SSF\t1000\tsd\tdeclared_standardised\t\t{GWAS_SSF_CAPABILITY}\n"
+        f"trait_b\t{vcf_b}\tTrait B\t1000\tsd\tdeclared_standardised\t\t\n",
+        encoding="utf-8",
+    )
+    store_path = tmp_path / "store_ssf.opengwasdb"
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=_panel(tmp_path),
+        store_id="hybrid-ssf-test", release_id="v1",
+    )
+
+    result = validate_store(store_path)
+    assert result.ok, result.errors
+
+    q = query_store(store_path)
+    on_panel = q.lookup([HG38_ALID_1], ["trait_ssf"])
+    off_panel = q.lookup([HG38_ALID_2], ["trait_ssf"])
+    analysis = q.analysis("trait_ssf")
+    q.close()
+
+    assert on_panel["z"][0] == pytest.approx(-4.0, rel=5e-3)
+    assert off_panel["z"][0] == pytest.approx(-5.0, rel=5e-3)
+    assert set(np.round(analysis["z"], 1).tolist()) == {-4.0, -5.0, 3.0}

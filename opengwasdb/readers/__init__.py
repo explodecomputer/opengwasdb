@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from opengwasdb.readers.fake import FakeReader
+from opengwasdb.readers.gwas_ssf import GWAS_SSF_CAPABILITY, GwasSsfReader
 from opengwasdb.readers.gwas_vcf import (
     GWAS_VCF_CAPABILITY,
     GwasVcfReader,
@@ -22,8 +23,10 @@ from opengwasdb.readers.interface import (
 from opengwasdb.readers.registry import resolve_reader
 
 __all__ = [
+    "GWAS_SSF_CAPABILITY",
     "GWAS_VCF_CAPABILITY",
     "FakeReader",
+    "GwasSsfReader",
     "GwasVcfReader",
     "ReaderAssociation",
     "SiteMetrics",
