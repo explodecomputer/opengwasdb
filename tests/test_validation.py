@@ -35,9 +35,10 @@ def ragged_store_path(tmp_path):
 
     manifest = tmp_path / "manifest.tsv"
     manifest.write_text(
-        "analysis_index\tanalysis_id\ttrait_id\tgene_id\tgene_name\ttrait_chr\ttrait_bp\t"
+        "analysis_index\tanalysis_id\ttrait_id\t"
+        "analysis_label\ttrait_ontology_id\ttrait_ontology_label\ttrait_chr\ttrait_bp\t"
         "n\ttissue\tcontext\tmhc\tfiltered_file\n"
-        "0\tt1\tT1\tENSG1\tGENE1\t1\t150\t1000\tBlood\t\tFALSE\tt1.tsv.gz\n",
+        "0\tt1\tT1\tGENE1\tENSEMBL:ENSG1\tEnsembl\t1\t150\t1000\tBlood\t\tFALSE\tt1.tsv.gz\n",
         encoding="utf-8",
     )
     store_path = tmp_path / "ragged.opengwasdb"
@@ -263,6 +264,24 @@ def test_validator_rejects_duplicate_analysis_id(dense_store_path):
 
     assert not result.ok
     assert any("more than one row for analysis_id" in error for error in result.errors)
+
+
+def test_validator_rejects_retired_gene_id_column(dense_store_path):
+    # Issue #81/ADR 0035: a built store's analyses.tsv carrying the retired
+    # gene_id/gene_name columns (superseded by analysis_label/
+    # trait_ontology_id/trait_ontology_label) is invalid against the current
+    # schema, the same way ADR 0034's phenotype_id/phenotype_label/trait_id
+    # retirement already is.
+    analyses_path = dense_store_path / "analyses.tsv"
+    table = read_analyses(analyses_path)
+    fieldnames = (*table.fieldnames, "gene_id")
+    rows = tuple({**row, "gene_id": "ENSG00000000001"} for row in table.rows)
+    write_analyses(analyses_path, type(table)(fieldnames=fieldnames, rows=rows))
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any("retired column" in error and "gene_id" in error for error in result.errors)
 
 
 def test_validator_accepts_duplicate_trait_ontology_id(dense_store_path):

@@ -15,7 +15,11 @@ from opengwasdb.completion.schema import COMPLETION_QUALITY_COLUMNS
 from opengwasdb.layouts.dense.top_hits import threshold_key, z_critical
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
-from opengwasdb.model.analyses import TOP_HIT_COUNT_COLUMNS, read_analyses
+from opengwasdb.model.analyses import (
+    RETIRED_ANALYSIS_COLUMNS,
+    TOP_HIT_COUNT_COLUMNS,
+    read_analyses,
+)
 from opengwasdb.model.enums import (
     AncestryAssignmentMethod,
     CompletionState,
@@ -716,6 +720,14 @@ def _validate_analyses_tsv(analyses_path: Path, errors: list[str]) -> int:
     """
     table = read_analyses(analyses_path)
     n = len(table.rows)
+    retired_present = [c for c in RETIRED_ANALYSIS_COLUMNS if c in table.fieldnames]
+    if retired_present:
+        errors.append(
+            "analyses.tsv carries retired column(s) "
+            f"{', '.join(retired_present)} -- a Store Release built against a "
+            "prior column list is not valid against the current schema "
+            "(store-format spec §7a, ADR 0034/0035)"
+        )
     seen_index: set[int] = set()
     seen_id: set[str] = set()
     for row in table.rows:

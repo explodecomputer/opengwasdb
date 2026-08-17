@@ -63,8 +63,9 @@ class AnalyteInput:
     analysis_index: int
     analysis_id: str
     trait_id: str
-    gene_id: str | None
-    gene_name: str | None
+    analysis_label: str | None
+    trait_ontology_id: str | None
+    trait_ontology_label: str | None
     trait_chr: str | None
     trait_bp: int | None
     n: int | None
@@ -91,8 +92,9 @@ def _read_manifest(manifest_path: str | Path, filtered_dir: str | Path) -> list[
                 analysis_index=int(r["analysis_index"]),
                 analysis_id=r["analysis_id"],
                 trait_id=r["trait_id"],
-                gene_id=_opt(r.get("gene_id")),
-                gene_name=_opt(r.get("gene_name")),
+                analysis_label=_opt(r.get("analysis_label")),
+                trait_ontology_id=_opt(r.get("trait_ontology_id")),
+                trait_ontology_label=_opt(r.get("trait_ontology_label")),
                 trait_chr=_opt(r.get("trait_chr")),
                 trait_bp=int(bp) if bp else None,
                 n=int(n) if n else None,
@@ -183,7 +185,7 @@ def build_ragged_from_ssf(
                     if rsid and rsid.startswith("rs"):
                         rsid_by_alid[alid] = rsid
             per_analysis.append(recs)
-            print(f"  {a.gene_name or a.analysis_id}: {len(recs):,} associations")
+            print(f"  {a.analysis_label or a.analysis_id}: {len(recs):,} associations")
 
         # ── Variant axis: sort unique variants by (chr,pos), assign variant_index ─
         variants = sorted(
@@ -222,7 +224,9 @@ def build_ragged_from_ssf(
         analyses = [
             molecular_analysis(
                 a.analysis_id,
-                gene_id=a.gene_id, gene_name=a.gene_name,
+                analysis_label=a.analysis_label,
+                trait_ontology_id=a.trait_ontology_id,
+                trait_ontology_label=a.trait_ontology_label,
                 tissue=a.tissue, context=a.context,
                 trait_chr=a.trait_chr, trait_bp=a.trait_bp, n=a.n,
                 stored_effect_scale=stored_effect_scale,

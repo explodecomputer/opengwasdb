@@ -37,7 +37,8 @@ def _write_filtered(path: Path, rows: list[dict]) -> None:
 
 def _write_manifest(path: Path, rows: list[dict]) -> None:
     header = [
-        "analysis_index", "analysis_id", "trait_id", "gene_id", "gene_name",
+        "analysis_index", "analysis_id", "trait_id",
+        "analysis_label", "trait_ontology_id", "trait_ontology_label",
         "trait_chr", "trait_bp", "n", "tissue", "context", "mhc", "filtered_file",
     ]
     with open(path, "w", encoding="utf-8") as fh:
@@ -87,11 +88,13 @@ def _make_fixture(tmp_path: Path) -> tuple[Path, Path]:
     manifest = tmp_path / "manifest.tsv"
     _write_manifest(manifest, [
         {"analysis_index": 0, "analysis_id": "trait_a", "trait_id": "T1",
-         "gene_id": "ENSG00001", "gene_name": "GENE1", "trait_chr": "1",
+         "analysis_label": "GENE1", "trait_ontology_id": "ENSEMBL:ENSG00001",
+         "trait_ontology_label": "Ensembl", "trait_chr": "1",
          "trait_bp": 150_000, "n": 5000, "tissue": "Liver", "context": "",
          "mhc": "FALSE", "filtered_file": "trait_a.tsv.gz"},
         {"analysis_index": 1, "analysis_id": "trait_b", "trait_id": "T2",
-         "gene_id": "ENSG00002", "gene_name": "GENE2", "trait_chr": "2",
+         "analysis_label": "GENE2", "trait_ontology_id": "ENSEMBL:ENSG00002",
+         "trait_ontology_label": "Ensembl", "trait_chr": "2",
          "trait_bp": 500_000, "n": 6000, "tissue": "Blood", "context": "",
          "mhc": "FALSE", "filtered_file": "trait_b.tsv.gz"},
     ])

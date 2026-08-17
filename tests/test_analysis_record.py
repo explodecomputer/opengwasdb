@@ -14,6 +14,7 @@ import pytest
 
 from opengwasdb.model.analyses import (
     ANALYSIS_COLUMNS,
+    RETIRED_ANALYSIS_COLUMNS,
     Analysis,
     analyses_table_from_records,
     read_analyses,
@@ -21,15 +22,13 @@ from opengwasdb.model.analyses import (
     write_analysis_records,
 )
 
-_RETIRED_COLUMNS = {"phenotype_id", "phenotype_label", "trait_id"}
+_RETIRED_COLUMNS = set(RETIRED_ANALYSIS_COLUMNS)
 
 _FULL_ANALYSIS = Analysis(
     analysis_id="ieu-a-7",
     analysis_label="Body mass index",
     trait_ontology_id="EFO:0004340",
     trait_ontology_label="body mass index",
-    gene_id="ENSG00000174697",
-    gene_name="LEP",
     tissue="whole_blood",
     context="cis",
     trait_chr="7",
@@ -69,15 +68,13 @@ def test_analysis_model_has_no_retired_identifier_fields():
     assert fields.isdisjoint(_RETIRED_COLUMNS)
 
 
-def test_analysis_columns_match_the_adr_0034_order():
+def test_analysis_columns_match_the_adr_0035_order():
     assert ANALYSIS_COLUMNS == (
         "analysis_index",
         "analysis_id",
         "analysis_label",
         "trait_ontology_id",
         "trait_ontology_label",
-        "gene_id",
-        "gene_name",
         "tissue",
         "context",
         "trait_chr",

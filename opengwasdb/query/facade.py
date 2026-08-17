@@ -49,11 +49,12 @@ Method availability -- `variants_table()`/`analyses_table()` and
 `__enter__`/`__exit__` are present on all three adapters.
 `analyses_table()` returns the same shape on every adapter -- every column
 of `analyses.tsv` (ADR-0034's unified schema every layout shares), keyed by
-`analysis_index`. Ragged rows populate the molecular-QTL columns (gene_id/
-gene_name, tissue, context) that Dense/Hybrid rows mostly leave blank, and
-leave Dense/Hybrid's Trait-identity/effect-scale columns mostly blank in
-turn; a caller grouping Ragged Analyses by a shared gene filters this table
-on `gene_id`/`gene_name` rather than through a separate lookup. `rho()`/
+`analysis_index`. Ragged rows populate the molecular-QTL columns (tissue,
+context, and gene identity carried via `analysis_label`/`trait_ontology_id`,
+ADR 0035) that Dense/Hybrid rows mostly leave blank, and leave Dense/Hybrid's
+other Trait-identity/effect-scale columns mostly blank in turn; a caller
+grouping Ragged Analyses by a shared gene filters this table on
+`trait_ontology_id` rather than through a separate lookup. `rho()`/
 `rho_row()`/`rho_matrix()` (ADR-0025, a Dense storage artifact) are exposed
 on `StoreQuery` and on `HybridStoreQuery` (delegated to its Dense Component);
 `RaggedStoreQuery` has no Rho Matrix format. `range_by_analysis()` (query by
@@ -515,7 +516,7 @@ class RaggedStoreQuery:
 
         Same shape StoreQuery/HybridStoreQuery return (ADR-0034's unified
         schema). A caller grouping Ragged Analyses by a shared gene filters
-        this table on gene_id/gene_name rather than through a separate
+        this table on trait_ontology_id rather than through a separate
         lookup.
         """
         return self._analyses.all()
