@@ -266,6 +266,69 @@ def test_validator_rejects_duplicate_analysis_id(dense_store_path):
     assert any("more than one row for analysis_id" in error for error in result.errors)
 
 
+def test_validator_rejects_stray_file_in_dense_store(dense_store_path):
+    # Issue #80: the closed envelope catches a file no build path writes --
+    # this is the class of bug that let a stray Ragged traits.tsv.gz side-file
+    # go unnoticed until a human spotted it (issues #69-#73 / PR #78).
+    (dense_store_path / "traits.tsv.gz").write_bytes(b"stray")
+
+    result = validate_store(dense_store_path)
+
+    assert not result.ok
+    assert any(
+        "unexpected store entry" in error and "traits.tsv.gz" in error
+        for error in result.errors
+    )
+
+
+def test_validator_rejects_stray_directory_in_ragged_store(ragged_store_path):
+    (ragged_store_path / "extra_dir").mkdir()
+
+    result = validate_store(ragged_store_path)
+
+    assert not result.ok
+    assert any(
+        "unexpected store entry" in error and "extra_dir" in error for error in result.errors
+    )
+
+
+def test_validator_rejects_stray_file_at_hybrid_top_level(hybrid_store_path):
+    (hybrid_store_path / "traits.tsv.gz").write_bytes(b"stray")
+
+    result = validate_store(hybrid_store_path)
+
+    assert not result.ok
+    assert any(
+        "unexpected store entry" in error and "traits.tsv.gz" in error
+        for error in result.errors
+    )
+
+
+def test_validator_rejects_stray_file_in_hybrid_dense_component(hybrid_store_path):
+    from opengwasdb.layouts.hybrid.layout import dense_component_path
+
+    (dense_component_path(hybrid_store_path) / "stray.txt").write_text("x")
+
+    result = validate_store(hybrid_store_path)
+
+    assert not result.ok
+    assert any(
+        "unexpected store entry" in error and "stray.txt" in error for error in result.errors
+    )
+
+
+def test_validator_accepts_clean_dense_ragged_hybrid_stores(
+    dense_store_path, ragged_store_path, hybrid_store_path
+):
+    # Issue #80 acceptance criterion: a correctly-built release passes with no
+    # false positives -- overview.html, the Hybrid dense/ subdirectory, and
+    # its dense_to_shared.npy must all be recognised as legitimate, not just
+    # rejected as unexpected.
+    for store_path in (dense_store_path, ragged_store_path, hybrid_store_path):
+        result = validate_store(store_path)
+        assert result.ok, (store_path, result.errors)
+
+
 def test_validator_rejects_retired_gene_id_column(dense_store_path):
     # Issue #81/ADR 0035: a built store's analyses.tsv carrying the retired
     # gene_id/gene_name columns (superseded by analysis_label/

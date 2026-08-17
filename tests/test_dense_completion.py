@@ -269,6 +269,21 @@ class TestCompletionFiles:
         with pytest.raises(FileExistsError):
             complete_dense_store(observed_store, completed_store, ld_panel, min_cor=0.0)
 
+    def test_stray_file_fails_validation(self, completed_store):
+        # Issue #80: the closed-envelope check applies to Reference-Completed
+        # releases too -- Reference Completion adds no new top-level entry,
+        # so the same allowed set governs both Observed-Only and
+        # Reference-Completed Dense releases.
+        (completed_store / "traits.tsv.gz").write_bytes(b"stray")
+
+        result = validate_store(completed_store)
+
+        assert not result.ok
+        assert any(
+            "unexpected store entry" in error and "traits.tsv.gz" in error
+            for error in result.errors
+        )
+
 
 class TestRegionCap:
     """QC z-cap: an imputed |z| is clamped to the max observed |z| within

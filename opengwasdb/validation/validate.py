@@ -28,7 +28,15 @@ from opengwasdb.model.enums import (
     StoredEffectScale,
 )
 from opengwasdb.stats import p_value_from_z
-from opengwasdb.store.open import OpenGWASDBStore, UnsupportedFormatVersion, open_store
+from opengwasdb.store.open import (
+    DENSE_ENVELOPE,
+    HYBRID_DENSE_COMPONENT_ENVELOPE,
+    HYBRID_ENVELOPE,
+    RAGGED_ENVELOPE,
+    OpenGWASDBStore,
+    UnsupportedFormatVersion,
+    open_store,
+)
 from opengwasdb.variants import (
     VariantAxis,
     variant_alid_bytes_path,
@@ -102,7 +110,25 @@ def validate_store(
     return ValidationResult(errors=errors)
 
 
-def _validate_dense_store(store: OpenGWASDBStore, errors: list[str]) -> ValidationResult:
+def _validate_closed_envelope(
+    store_path: Path, allowed: frozenset[str], errors: list[str]
+) -> None:
+    """store-format spec §1/§20 (issue #80): a Store Release's top-level
+    directory is closed -- no file or directory beyond what its layout
+    legitimately produces. Every other check here is a *presence* check
+    ("required entry X exists"); this is the one *closure* check, catching
+    drift like the long-unnoticed Ragged `traits.tsv.gz` side-file (retired
+    in issue #69) that no presence check could ever have flagged."""
+    for name in sorted(p.name for p in store_path.iterdir() if p.name not in allowed):
+        errors.append(
+            f"unexpected store entry {name!r} in {store_path} is not part of the "
+            "documented store envelope for this layout (store-format spec §1)"
+        )
+
+
+def _validate_dense_store(
+    store: OpenGWASDBStore, errors: list[str], *, envelope: frozenset[str] = DENSE_ENVELOPE
+) -> ValidationResult:
     store_path = store.path
     manifest = store.manifest
     index_path = store.index_path
@@ -133,6 +159,7 @@ def _validate_dense_store(store: OpenGWASDBStore, errors: list[str]) -> Validati
         errors.append(
             "missing variant_alid_rows.npy — rebuild the store to generate the ALID search index"
         )
+    _validate_closed_envelope(store_path, envelope, errors)
     if errors:
         return ValidationResult(errors=errors)
 
@@ -270,6 +297,7 @@ def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
     ]:
         if not p.exists():
             errors.append(f"missing {label}")
+    _validate_closed_envelope(store_path, RAGGED_ENVELOPE, errors)
     if errors:
         return ValidationResult(errors=errors)
 
@@ -512,10 +540,13 @@ def _validate_hybrid_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
     ]:
         if not p.exists():
             errors.append(f"missing {label}")
+    _validate_closed_envelope(store_path, HYBRID_ENVELOPE, errors)
     if errors:
         return ValidationResult(errors=errors)
 
-    # 1. Dense Component — reuse the dense validator unchanged.
+    # 1. Dense Component — reuse the dense validator unchanged, but with the
+    #    Dense Component's own envelope (it additionally carries
+    #    dense_to_shared.npy, which a standalone Dense release never does).
     dense_store = _load_manifest(dense_dir, errors)
     if dense_store is None:
         return ValidationResult(errors=errors)
@@ -526,7 +557,7 @@ def _validate_hybrid_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
         )
         return ValidationResult(errors=errors)
     before = len(errors)
-    _validate_dense_store(dense_store, errors)
+    _validate_dense_store(dense_store, errors, envelope=HYBRID_DENSE_COMPONENT_ENVELOPE)
     if len(errors) > before:
         return ValidationResult(errors=errors)
 

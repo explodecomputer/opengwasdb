@@ -36,6 +36,50 @@ class UnsupportedFormatVersion(Exception):
     """A release declares a format_version this build cannot interpret."""
 
 
+# --- Store Release envelope (store-format spec §1/§10/§11/§16/§17) --------
+#
+# The closed set of top-level entries each Primary Storage Layout
+# legitimately produces (issue #80): `opengwasdb.validation.validate` rejects
+# a release carrying anything beyond this, the same way it was already
+# checking that required entries are present but never that unexpected ones
+# are absent -- the gap that let a stray Ragged `traits.tsv.gz` side-file
+# (retired in issue #69) go unnoticed until a human spotted it (issues
+# #69-#73 / PR #78). Reference Completion (§12) does not currently add any
+# new top-level entry for any layout -- it only adds arrays inside
+# `data.zarr/` and a `completion_quality` table inside `index.sqlite` -- so
+# one set per layout covers both Observed-Only and Reference-Completed
+# releases.
+_BASE_ENVELOPE: frozenset[str] = frozenset({
+    "manifest.json",
+    "index.sqlite",
+    "analyses.tsv",
+    "data.zarr",
+    "variants.tsv.gz",
+    "variants.tsv.gz.tbi",
+    "variant_offsets.npy",
+    "variant_alid_bytes.npy",
+    "variant_alid_rows.npy",
+})
+
+#: Dense Observed-Only/Reference-Completed (§10, §16).
+DENSE_ENVELOPE: frozenset[str] = _BASE_ENVELOPE | {"overview.html"}
+
+#: Ragged Observed-Only/Reference-Completed (§11, §17) -- no `overview.html`,
+#: which is Dense/Hybrid-only today.
+RAGGED_ENVELOPE: frozenset[str] = _BASE_ENVELOPE
+
+#: A Hybrid release's own top-level entries (§16 introduces its nested
+#: `dense/` Dense Component directory). The Dense Component's *own*
+#: top-level entries are `HYBRID_DENSE_COMPONENT_ENVELOPE`, not this one.
+HYBRID_ENVELOPE: frozenset[str] = _BASE_ENVELOPE | {"overview.html", "dense"}
+
+#: A Hybrid release's nested `<store>/dense` Dense Component: the ordinary
+#: Dense envelope plus `dense_to_shared.npy`, the Dense-row -> shared-table
+#: index map only a Dense Component (never a standalone Dense release)
+#: carries.
+HYBRID_DENSE_COMPONENT_ENVELOPE: frozenset[str] = DENSE_ENVELOPE | {"dense_to_shared.npy"}
+
+
 def _release_paths(path: Path) -> dict[str, Path]:
     return {
         "manifest": path / "manifest.json",

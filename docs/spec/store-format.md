@@ -24,6 +24,8 @@ data.zarr/
 variants.tsv.gz
 variants.tsv.gz.tbi
 variant_offsets.npy
+variant_alid_bytes.npy
+variant_alid_rows.npy
 ```
 
 `manifest.json` identifies the release and declares how to interpret it.
@@ -34,11 +36,20 @@ sole source of truth for Analytical Metadata (§7a) — one row per Analysis;
 `index.sqlite` MUST NOT also contain an `analyses` table. `overview.html` is a
 generated, store-wide human-browsable rendering of `analyses.tsv`; it MAY be
 regenerated from `analyses.tsv` and MUST NOT be treated as a second source of
-truth. `data.zarr/` stores compressed numerical association arrays and
-layout-specific numerical indexes. Dense Observed-Only releases store their
-high-cardinality variant axis in `variants.tsv.gz`, indexed by
-`variants.tsv.gz.tbi`, with `variant_offsets.npy` mapping Store-local Variant
-Indices to BGZF row offsets.
+truth — Ragged releases do not carry one (§11). `data.zarr/` stores compressed
+numerical association arrays and layout-specific numerical indexes. Every
+layout stores its high-cardinality variant axis in `variants.tsv.gz`, indexed
+by `variants.tsv.gz.tbi`, with `variant_offsets.npy` mapping Store-local
+Variant Indices to BGZF row offsets and `variant_alid_bytes.npy`/
+`variant_alid_rows.npy` supporting ALID lookup.
+
+This is the complete envelope for a standalone Dense or Ragged Store Release.
+A Hybrid release additionally nests a `dense/` Dense Component directory
+holding a self-contained Dense Store Release of its own (same envelope as
+above, plus `dense_to_shared.npy` mapping its rows into the Hybrid release's
+shared variant table) — see §16. §20 requires every Store Release's
+directory to be closed: no file or directory beyond what its `primary_layout`
+legitimately produces per this section and §10/§11/§16/§17.
 
 Build and query commands operate on an explicit Store Release path. Directory naming, multi-store catalogues, default release selection, and remote API deployment are outside the store-format contract.
 
@@ -362,7 +373,7 @@ Ragged layout is used when Analyses do not share one dense source variant axis o
 
 For Observed-Only Ragged stores, absence from an Analysis sequence means the association is not retained by that Store Release.
 
-A Ragged store's Analytical and Attribution Metadata lives in `analyses.tsv`, the same schema §7a defines for every layout (ADR 0034) — not a layout-specific `index.sqlite` table. A genomic-range lookup by Trait position (e.g. finding Analyses whose Trait falls in a region) MAY be served by a tabix-indexed positional side-file over `analyses.tsv`'s `trait_chr`/`trait_bp` columns; that side-file is a query-acceleration structure, not a second copy of Analytical Metadata with its own column set.
+A Ragged store's Analytical and Attribution Metadata lives in `analyses.tsv`, the same schema §7a defines for every layout (ADR 0034) — not a layout-specific `index.sqlite` table, and not a second, tabix-indexed positional side-file either: an earlier draft of this section allowed such a side-file over `analyses.tsv`'s `trait_chr`/`trait_bp` columns as a query-acceleration structure, but issue #69 retired it before it shipped in favour of scanning `analyses.tsv`'s own columns directly (`range_by_analysis()`), so a Ragged Store Release's envelope (§1, §20) has no such file.
 
 ## 12. Reference completion model
 
@@ -490,6 +501,14 @@ The imputed mask is not a sparse offsets index like the top-hit significance ind
 
 ## 16. Dense Reference-Completed layout and overflow
 
+A Hybrid Store Release physically nests its Dense Component as a
+self-contained Dense Store Release at `<store>/dense` (§1) — same envelope,
+opened the same way as a standalone Dense release, plus `dense_to_shared.npy`
+mapping each Dense Component row to its index in the Hybrid release's shared
+variant table. Its Ragged Overflow Component lives in the Hybrid release's
+own `data.zarr/ragged`, alongside the shared `variants.tsv.gz`/`index.sqlite`
+covering both components (§4).
+
 For Dense Reference-Completed releases:
 
 - the dense matrix axis MUST contain only Reference Variant Set variants;
@@ -578,7 +597,8 @@ Validators MUST check at least:
 - top-hit indexes, when present, are consistent with stored Z values;
 - `analyses.tsv` contains exactly one row per Analysis, covering every `analysis_index` referenced by `index.sqlite` (this is the one place SQLite cannot enforce the relationship as a foreign key, since `analyses.tsv` is a separate file);
 - `index.sqlite` does not contain an `analyses` table;
-- `original_sd_method` and `ancestry_assignment_method` values are in their controlled vocabularies (ADR 0029, ADR 0030).
+- `original_sd_method` and `ancestry_assignment_method` values are in their controlled vocabularies (ADR 0029, ADR 0030);
+- the Store Release directory contains no top-level file or directory beyond what its `primary_layout` (and, for Hybrid, its nested Dense Component directory) legitimately produces per §1/§10/§11/§16/§17 — the envelope is closed, not merely a set of required entries (issue #80).
 
 ## 21. Compatibility
 

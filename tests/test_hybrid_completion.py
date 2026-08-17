@@ -137,6 +137,41 @@ def test_hybrid_completion(tmp_path):
     assert np.array_equal(src_ovf["se"][:], dst_ovf["se"][:])
 
 
+def test_stray_file_at_completed_hybrid_top_level_fails_validation(tmp_path):
+    # Issue #80: the closed-envelope check applies to a completed Hybrid
+    # release's own top-level directory, not just its nested Dense Component.
+    src = _build_source(tmp_path)
+    ld = _make_ld_panel(tmp_path)
+    dst = tmp_path / "dst.opengwasdb"
+    complete_hybrid_store(src, dst, ld, min_cor=0.0, thresh=0.9)
+
+    (dst / "traits.tsv.gz").write_bytes(b"stray")
+
+    result = validate_store(dst)
+
+    assert not result.ok
+    assert any(
+        "unexpected store entry" in error and "traits.tsv.gz" in error
+        for error in result.errors
+    )
+
+
+def test_stray_file_in_completed_hybrid_dense_component_fails_validation(tmp_path):
+    src = _build_source(tmp_path)
+    ld = _make_ld_panel(tmp_path)
+    dst = tmp_path / "dst.opengwasdb"
+    complete_hybrid_store(src, dst, ld, min_cor=0.0, thresh=0.9)
+
+    (dst / "dense" / "stray.txt").write_text("x")
+
+    result = validate_store(dst)
+
+    assert not result.ok
+    assert any(
+        "unexpected store entry" in error and "stray.txt" in error for error in result.errors
+    )
+
+
 def test_completed_analyses_tsv_has_no_phenotype_columns_and_carries_analysis_label(tmp_path):
     """ADR 0034/issue #68: hybrid completion must carry the unified schema
     forward (no phenotype_id/phenotype_label) at both the completed Dense

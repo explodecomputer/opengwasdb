@@ -617,6 +617,20 @@ class TestValidation:
             result = validate_store(completed_store)
             assert not result.ok
 
+    def test_stray_file_in_completed_store_fails(self, completed_store):
+        # Issue #80: the closed-envelope check applies to Reference-Completed
+        # releases too, not just Observed-Only ones -- Reference Completion
+        # adds no new top-level entry, so the same allowed set governs both.
+        (completed_store / "traits.tsv.gz").write_bytes(b"stray")
+
+        result = validate_store(completed_store)
+
+        assert not result.ok
+        assert any(
+            "unexpected store entry" in error and "traits.tsv.gz" in error
+            for error in result.errors
+        )
+
 
 class TestQuery:
     def test_selected_top_hits_match_global_and_filter_imputed(self, completed_store):
