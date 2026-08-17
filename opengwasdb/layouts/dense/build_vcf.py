@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 from numcodecs import Blosc
 
-from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
+from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup, normalise_build
 from opengwasdb.index import initialise_schema, set_metadata
 from opengwasdb.layouts.dense.build import (
     DenseBuildResult,
@@ -68,6 +68,8 @@ class _ManifestRow:
     se_divisor: float  # divides original_se to standardise to SD units (issue #18); 1.0 = no-op
     source_reader_capability: str  # resolves to a SourceReader (issue #20); GWAS_VCF_CAPABILITY
     # when the manifest omits the column -- the only format this builder has ever supported.
+    source_assembly: str  # normalised "hg19"/"hg38" (issue #85); "hg19" when the manifest omits
+    # the column -- every source this builder read before GWAS-SSF (#84) was hg19 GWAS-VCF.
     original_sd_method: str  # raw manifest value, carried into analyses.tsv (issue #22)
     original_sd: str  # raw manifest value ("" when the sd_method tier carries no magnitude)
     assigned_ancestry: str  # optional manifest column (issue #22); "" when the manifest omits it
@@ -188,13 +190,13 @@ def _encode_variant_keys(
 
 
 def _build_variant_key_index(
-    hg19_lookup: dict[tuple[str, int, str, str], str],
+    source_lookup: dict[tuple[str, int, str, str], str],
     variant_index: dict[str, int],
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compose the two Pass 2 dicts into a fork-safe sorted numpy lookup.
 
     Returns ``(keys_sorted, rows_sorted)``: a sorted array of byte keys for every
-    hg19 variant that maps to a stored row, and the matching int32 row indices.
+    source variant that maps to a stored row, and the matching int32 row indices.
     Workers binary-search this instead of chaining two Python dicts.
     """
     chroms: list[str] = []
@@ -202,7 +204,7 @@ def _build_variant_key_index(
     refs: list[str] = []
     alts: list[str] = []
     rows: list[int] = []
-    for (chrom, pos, ref, alt), alid in hg19_lookup.items():
+    for (chrom, pos, ref, alt), alid in source_lookup.items():
         row = variant_index.get(alid)
         if row is None:
             continue
@@ -235,6 +237,10 @@ def _match_batch(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Resolve one batch of associations to (rows, z, se) for cells whose variant
     is present in the panel (exact key match). Order-preserving."""
+    if len(keys_sorted) == 0:
+        empty_i = np.empty(0, dtype=np.int64)
+        empty_f = np.empty(0, dtype=np.float32)
+        return empty_i, empty_f, empty_f
     query = _encode_variant_keys(chroms, poss, refs, alts)
     idx = np.searchsorted(keys_sorted, query)
     idx_clip = np.minimum(idx, len(keys_sorted) - 1)
@@ -389,6 +395,90 @@ def _log_progress(
     )
 
 
+def _lift_manifest_variants(
+    manifest_rows: list[_ManifestRow],
+    *,
+    chain_file: str | Path | None,
+    liftover_failure_threshold: float,
+) -> dict[tuple[str, int, str, str], str]:
+    """Resolve every manifest row's union of source variants to hg38 ALIDs
+    (issue #85; the dense and hybrid builders' shared Pass 1).
+
+    Each row declares its own ``source_assembly`` (`_read_manifest`). Rows
+    already on hg38 -- a harmonised GWAS-SSF source, say -- map straight to
+    their ALID with no liftover: running an already-hg38 coordinate through
+    the hg19->hg38 chain a second time silently shifts it to the wrong
+    position (the issue #85 bug), and pyliftover has no way to detect that
+    from the coordinate alone. Rows declaring hg19 (the only other build this
+    package knows) go through one shared ``LiftOver`` object for that group,
+    same as when GWAS-VCF was the only source this builder ever saw.
+    ``liftover_failure_threshold`` therefore applies only to the hg19 group's
+    own failure rate, not diluted by (or inflated against) hg38 rows that
+    were never at risk of failing.
+
+    Returns one merged ``{(chrom, pos, ref, alt): hg38_alid}`` lookup -- the
+    shape the fork-safe Pass 2 key index (`_build_variant_key_index` /
+    `_build_routing_index`) is already built from, so nothing downstream of
+    this function changes. A raw tuple present in *both* groups is not a
+    same-locus dedup the way a tuple shared by two same-assembly files is:
+    the hg38 group's tuple is a literal coordinate, the hg19 group's
+    identical-looking tuple is a *pre-lift* coordinate bound for a different
+    hg38 position, so the two groups agreeing on a raw tuple means two
+    physically different loci coincidentally share one string, not one real
+    variant reported twice. Binding both to a single stored row would
+    misattribute one row's association to the other's variant -- exactly the
+    kind of silent corruption this fix exists to remove -- so any such tuple
+    is dropped from both groups (never guessed) before returning.
+    """
+    tuples_by_assembly: dict[str, set[tuple[str, int, str, str]]] = {}
+    log.info("Pass 1: collecting source variants from %d files (serial)", len(manifest_rows))
+    t0 = time.monotonic()
+    for i, row in enumerate(manifest_rows):
+        reader = resolve_reader(
+            row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
+        )
+        tuples_by_assembly.setdefault(row.source_assembly, set()).update(reader.stream_variants())
+        n_total = sum(len(t) for t in tuples_by_assembly.values())
+        _log_progress(
+            "Pass 1", i + 1, len(manifest_rows), t0, f"{n_total} unique variants so far", every=250
+        )
+
+    passthrough_lookup: dict[tuple[str, int, str, str], str] = {}
+    passthrough = tuples_by_assembly.pop("hg38", set())
+    if passthrough:
+        log.info("%d variants already GRCh38 -- no liftover needed", len(passthrough))
+        for chrom, pos, ref, alt in passthrough:
+            a1, a2 = sorted((ref, alt))
+            passthrough_lookup[(chrom, pos, ref, alt)] = f"{chrom}:{pos}:{a1}:{a2}"
+
+    lifted_lookup: dict[tuple[str, int, str, str], str] = {}
+    hg19_tuples = tuples_by_assembly.pop("hg19", set())
+    if hg19_tuples:
+        log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
+        lifted_lookup = build_liftover_lookup(
+            hg19_tuples, from_build="hg19", to_build="hg38",
+            failure_threshold=liftover_failure_threshold, chain_file=chain_file,
+        )
+        log.info("Liftover complete: %d variants mapped", len(lifted_lookup))
+
+    assert not tuples_by_assembly, f"unhandled source_assembly values: {sorted(tuples_by_assembly)}"
+
+    ambiguous = passthrough_lookup.keys() & lifted_lookup.keys()
+    if ambiguous:
+        log.warning(
+            "%d raw variant tuple(s) declared both hg38 and hg19 in this manifest "
+            "(same chrom/pos/ref/alt string, two different builds -> two different "
+            "physical loci) -- dropped from both rather than guessed which one owns "
+            "the stored row",
+            len(ambiguous),
+        )
+        for key in ambiguous:
+            del passthrough_lookup[key]
+            del lifted_lookup[key]
+
+    return {**passthrough_lookup, **lifted_lookup}
+
+
 def build_dense_from_vcf_manifest(
     manifest_path: str | Path,
     output_path: str | Path,
@@ -404,9 +494,11 @@ def build_dense_from_vcf_manifest(
 ) -> DenseBuildResult:
     """Build a Dense Observed-Only Store from a manifest of GWAS-VCF files.
 
-    VCF files are assumed to be in GRCh37/hg19 coordinates.  All variant
-    positions are lifted to GRCh38/hg38 inline; the output store uses hg38
-    coordinates.
+    Each row's source file is assumed to be in GRCh37/hg19 coordinates unless
+    its manifest row declares ``source_assembly=hg38`` (issue #85, e.g. a
+    harmonised GWAS-SSF source) -- see `_read_manifest`. hg19 rows are lifted
+    to GRCh38/hg38 inline; hg38 rows pass through unchanged. The output store
+    always uses hg38 coordinates.
 
     Two-pass streaming: Pass 1 collects the union variant set and runs liftover
     once.  Pass 2 fills zarr columns one analysis at a time.  The full
@@ -448,47 +540,22 @@ def build_dense_from_vcf_manifest(
     out = Path(output_path)
     with OpenGWASDBStore.staging(out, overwrite=overwrite) as staged:
         # ------------------------------------------------------------------
-        # Pass 1: collect union variant set across all VCFs
+        # Pass 1: collect union variant set across all files + liftover
         # ------------------------------------------------------------------
-        # Pass 1 is intentionally serial. It streams each VCF's variants into one
+        # Pass 1 is intentionally serial. It streams each file's variants into one
         # growing union set; parallelising it would force each worker to ship its
-        # whole variant set back over IPC, and since same-cohort VCFs share nearly
+        # whole variant set back over IPC, and since same-cohort files share nearly
         # identical variant lists the union converges almost immediately — so the
         # parallel version pays a large IPC cost for no real speedup (and deadlocked
         # at genome-wide scale). The expensive, parallelised work is Pass 2.
-        log.info(
-            "Pass 1: collecting union variant set from %d VCFs (serial)",
-            len(manifest_rows),
-        )
-        hg19_tuples: set[tuple[str, int, str, str]] = set()
-        pass1_start = time.monotonic()
-        n_rows = len(manifest_rows)
-        for i, row in enumerate(manifest_rows):
-            reader = resolve_reader(
-                row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
-            )
-            hg19_tuples.update(reader.stream_variants())
-            _log_progress(
-                "Pass 1", i + 1, n_rows, pass1_start,
-                f"{len(hg19_tuples)} unique variants so far", every=250,
-            )
-        log.info("Pass 1 complete: %d unique hg19 variants", len(hg19_tuples))
-
-        # ------------------------------------------------------------------
-        # Liftover: hg19 → hg38 (single LiftOver object for entire batch)
-        # ------------------------------------------------------------------
-        log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
-        hg19_lookup = build_liftover_lookup(
-            hg19_tuples,
-            from_build="hg19",
-            to_build="hg38",
-            failure_threshold=liftover_failure_threshold,
+        source_lookup = _lift_manifest_variants(
+            manifest_rows,
             chain_file=chain_file,
+            liftover_failure_threshold=liftover_failure_threshold,
         )
-        log.info("Liftover complete: %d variants mapped", len(hg19_lookup))
 
         # Sort hg38 ALIDs by (chromosome, position, a1, a2)
-        hg38_alids = sorted(set(hg19_lookup.values()), key=_alid_sort_key)
+        hg38_alids = sorted(set(source_lookup.values()), key=_alid_sort_key)
         n_variants = len(hg38_alids)
         n_analyses = len(manifest_rows)
         variant_index: dict[str, int] = {alid: i for i, alid in enumerate(hg38_alids)}
@@ -515,11 +582,12 @@ def build_dense_from_vcf_manifest(
             for alid in hg38_alids
             for chrom, pos_str, a1, a2 in [alid.split(":")]
         ]
-        # Provenance: record the source (hg19) canonical ALID each row was lifted
-        # from. A single hg38 ALID can be the liftover target of several hg19
-        # variants (a collision); those rows are ambiguous, so leave them blank.
+        # Provenance: record the source-build canonical ALID each row resolved
+        # from (lifted from hg19, or passed through unchanged from hg38). A single
+        # hg38 ALID can be the target of several source variants (a collision);
+        # those rows are ambiguous, so leave them blank.
         hg38_to_source: dict[str, str | None] = {}
-        for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
+        for (chrom, pos, ref, alt), hg38_alid in source_lookup.items():
             a1, a2 = sorted((ref, alt))
             origin = f"{chrom}:{pos}:{a1}:{a2}"
             if hg38_alid in hg38_to_source:
@@ -535,13 +603,13 @@ def build_dense_from_vcf_manifest(
         # workers binary-search them instead of chaining Python dicts — no per-worker
         # refcount-COW of ~n_variants dict pages (issue 043 item 2).
         # ------------------------------------------------------------------
-        keys_sorted, rows_sorted = _build_variant_key_index(hg19_lookup, variant_index)
+        keys_sorted, rows_sorted = _build_variant_key_index(source_lookup, variant_index)
         max_key_len = keys_sorted.dtype.itemsize if len(keys_sorted) else 0
         log.info(
             "Pass 2 lookup: %d variant keys, max key length %d bytes",
             len(keys_sorted), max_key_len,
         )
-        del hg19_lookup, variant_index  # free the parent-side dicts before Pass 2
+        del source_lookup, variant_index  # free the parent-side dicts before Pass 2
 
         # ------------------------------------------------------------------
         # Create the empty z/se zarr datasets (NaN fill). Pass 2 streams each analysis
@@ -666,6 +734,16 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     manifest before this change) defaults every row to ``GWAS_VCF_CAPABILITY``,
     the only format this builder has ever supported.
 
+    An optional ``source_assembly`` column (issue #85) declares the genome
+    build each row's *source file* is already in -- ``hg19``/``GRCh37`` or
+    ``hg38``/``GRCh38`` (aliases per `opengwasdb.build.liftover`). A row
+    omitting it defaults to ``hg19``, matching every source this builder read
+    before GWAS-SSF (#84): GWAS-VCF is conventionally hg19 here. This is not
+    inferred from the source file itself -- a harmonised GWAS-Catalog-SSF
+    file is already hg38 and must declare so, or `_lift_manifest_variants`
+    would liftover its already-correct coordinates a second time (issue #85).
+    An invalid value fails the build loudly, same as ``stored_effect_scale``.
+
     An optional ``assigned_ancestry`` column (issue #22) carries a row's
     Assigned Ancestry straight into the built store's ``analyses.tsv`` --
     a Catalogue subset's kept rows already have this column (the Catalogue
@@ -696,6 +774,14 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
             raise ValueError(
                 f"manifest {manifest_path}: analysis {trait_id!r} has invalid "
                 f"stored_effect_scale {scale!r}"
+            ) from exc
+        source_assembly_raw = row.get("source_assembly") or "hg19"
+        try:
+            source_assembly = normalise_build(source_assembly_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"manifest {manifest_path}: analysis {trait_id!r} has invalid "
+                f"source_assembly {source_assembly_raw!r}"
             ) from exc
         sd_method_raw = row["original_sd_method"]
         try:
@@ -742,6 +828,7 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                 stored_effect_scale=scale,
                 se_divisor=se_divisor,
                 source_reader_capability=row.get("source_reader_capability") or GWAS_VCF_CAPABILITY,
+                source_assembly=source_assembly,
                 original_sd_method=sd_method_raw,
                 original_sd=original_sd_raw,
                 assigned_ancestry=row.get("assigned_ancestry") or "",

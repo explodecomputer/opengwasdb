@@ -425,6 +425,240 @@ def test_liftover_failure_above_threshold_raises(tmp_path):
         )
 
 
+# --- source_assembly (issue #85): per-row declared source genome build ---
+
+
+def test_read_manifest_defaults_source_assembly_to_hg19(tmp_path):
+    from opengwasdb.layouts.dense.build_vcf import _read_manifest
+
+    vcf = _make_vcf(
+        tmp_path, "trait_a", [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    )
+    manifest = _make_manifest(tmp_path, [("trait_a", vcf, "Trait A")])
+
+    rows = _read_manifest(manifest)
+
+    assert rows[0].source_assembly == "hg19"
+
+
+def test_read_manifest_normalises_source_assembly_aliases(tmp_path):
+    from opengwasdb.layouts.dense.build_vcf import _read_manifest
+
+    vcf = _make_vcf(
+        tmp_path, "trait_a", [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    )
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_assembly\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\tsd\tdeclared_standardised\t\tGRCh38\n",
+        encoding="utf-8",
+    )
+
+    rows = _read_manifest(manifest)
+
+    assert rows[0].source_assembly == "hg38"
+
+
+def test_read_manifest_rejects_invalid_source_assembly(tmp_path):
+    from opengwasdb.layouts.dense.build_vcf import _read_manifest
+
+    vcf = _make_vcf(
+        tmp_path, "trait_a", [f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"]
+    )
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_assembly\n"
+        f"trait_a\t{vcf}\tTrait A\t1000\tsd\tdeclared_standardised\t\thg17\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source_assembly"):
+        _read_manifest(manifest)
+
+
+def _manifest_with_source_assembly(
+    tmp_path: Path, entries: list[tuple[str, Path, str, str]]
+) -> Path:
+    """Like `_make_manifest`, plus a `source_assembly` column per entry."""
+    manifest = tmp_path / "manifest.tsv"
+    lines = [
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_assembly"
+    ]
+    for trait_id, file_path, trait_name, source_assembly in entries:
+        lines.append(
+            f"{trait_id}\t{file_path}\t{trait_name}\t1000\tsd\tdeclared_standardised\t"
+            f"\t{source_assembly}"
+        )
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest
+
+
+def test_hg38_source_assembly_is_not_lifted(tmp_path):
+    """issue #85: a row declaring source_assembly=hg38 passes through with no
+    liftover -- HG19_POS_2 (1,000,000) is a position the real hg19->hg38
+    chain shifts to 1,064,620 (see this file's module docstring); if it were
+    lifted a second time despite the hg38 declaration, the stored position
+    would be 1,064,620, not the source file's own 1,000,000.
+    """
+    vcf = _make_vcf(
+        tmp_path, "trait_ssf",
+        [f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n"],  # z=5.0, flip->-5.0
+    )
+    manifest = _manifest_with_source_assembly(tmp_path, [("trait_ssf", vcf, "Trait SSF", "hg38")])
+    store_path = tmp_path / "store.opengwasdb"
+
+    build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
+
+    query = query_store(store_path)
+    result = query.analysis("trait_ssf")
+    vt = query.variants_table()
+    query.close()
+
+    assert len(result["z"]) == 1
+    variant = vt[int(result["variant_index"][0])]
+    assert variant["position"] == HG19_POS_2
+    assert result["z"][0] == pytest.approx(-5.0, rel=5e-3)
+
+
+def test_mixed_hg19_and_hg38_manifest_builds_correctly(tmp_path):
+    """issue #85: one manifest mixing a default (hg19) row and an
+    explicitly-hg38 row lifts only the hg19 row -- the scenario the bug
+    report specifically named (a GWAS-VCF row alongside a harmonised
+    GWAS-SSF row in one build). trait_vcf's position 1,500,000 (HG19_POS_3)
+    genuinely shifts under the real chain (-> 1,564,620), proving liftover
+    ran for it; trait_ssf's position 1,000,000 (HG19_POS_2) would shift too
+    if lifted, so it staying put proves the hg38 declaration skipped it.
+    """
+    vcf_hg19 = _make_vcf(
+        tmp_path, "trait_vcf",
+        [f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n"],  # lifted -> 1564620
+    )
+    vcf_hg38 = _make_vcf(
+        tmp_path, "trait_ssf",
+        [f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n"],  # not lifted; stays 1000000
+    )
+    manifest = _manifest_with_source_assembly(
+        tmp_path,
+        [("trait_vcf", vcf_hg19, "Trait VCF", ""), ("trait_ssf", vcf_hg38, "Trait SSF", "hg38")],
+    )
+    store_path = tmp_path / "store.opengwasdb"
+
+    build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
+
+    query = query_store(store_path)
+    vt = query.variants_table()
+    vcf_result = query.analysis("trait_vcf")
+    ssf_result = query.analysis("trait_ssf")
+    query.close()
+
+    assert vt[int(vcf_result["variant_index"][0])]["position"] == 1_564_620
+    assert vt[int(ssf_result["variant_index"][0])]["position"] == HG19_POS_2
+
+
+def test_cross_assembly_tuple_collision_is_dropped_not_misattributed(tmp_path, caplog):
+    """issue #85 code review follow-up: an hg38-declared row and an
+    hg19-declared row sharing an identical raw (chrom, pos, ref, alt) string
+    are two different physical loci on two different builds -- the hg38
+    string is a literal coordinate, the hg19 string is a *pre-lift*
+    coordinate bound for a different hg38 position. Binding both to one
+    stored row would silently misattribute one row's association to the
+    other's variant, so the shared tuple must be dropped from both rather
+    than guessed.
+    """
+    import logging
+
+    colliding_row = f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n"
+    # A third, non-colliding row keeps the store non-empty -- an all-variants-
+    # dropped build hits an unrelated pre-existing limitation elsewhere in the
+    # zarr band-write path (a zero-width dense matrix), out of scope here.
+    clean_row = f"1\t{HG19_POS_1}\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n"
+    vcf_hg19 = _make_vcf(tmp_path, "trait_vcf", [colliding_row, clean_row])
+    vcf_hg38 = _make_vcf(tmp_path, "trait_ssf", [colliding_row])
+    manifest = _manifest_with_source_assembly(
+        tmp_path,
+        [("trait_vcf", vcf_hg19, "Trait VCF", ""), ("trait_ssf", vcf_hg38, "Trait SSF", "hg38")],
+    )
+    store_path = tmp_path / "store.opengwasdb"
+
+    with caplog.at_level(logging.WARNING):
+        build_dense_from_vcf_manifest(manifest, store_path, store_id="s", release_id="r")
+
+    assert "raw variant tuple" in caplog.text
+
+    query = query_store(store_path)
+    vcf_result = query.analysis("trait_vcf")
+    ssf_result = query.analysis("trait_ssf")
+    query.close()
+
+    # The colliding variant is absent from both traits; the clean one survives.
+    assert len(vcf_result["z"]) == 1
+    assert vcf_result["z"][0] == pytest.approx(-4.0, rel=5e-3)
+    assert len(ssf_result["z"]) == 0
+
+
+def test_match_batch_handles_an_empty_lookup_without_crashing():
+    """issue #85 code review follow-up: a manifest whose entire variant set is
+    dropped (e.g. every variant is an ambiguous cross-assembly collision)
+    leaves `keys_sorted` empty; `_match_batch` must report no matches rather
+    than crash indexing an empty array (`np.searchsorted` on an empty array
+    always returns 0, so `keys_sorted[len(keys_sorted) - 1]` -> `keys_sorted[-1]`
+    on a zero-length array raised IndexError before this guard)."""
+    from opengwasdb.layouts.dense.build_vcf import _match_batch
+
+    rows, z, se = _match_batch(
+        ["1"], [100], ["A"], ["G"], [1.0], [0.5],
+        keys_sorted=np.empty(0, dtype="S1"), rows_sorted=np.empty(0, dtype=np.int32),
+    )
+
+    assert len(rows) == 0
+    assert len(z) == 0
+    assert len(se) == 0
+
+
+def test_liftover_failure_threshold_scoped_to_hg19_group_not_diluted_by_hg38_rows(tmp_path):
+    """issue #85: liftover_failure_threshold is computed over the hg19 group's
+    own denominator (`_lift_manifest_variants` calls `build_liftover_lookup`
+    with only that group's tuples), not the whole manifest -- otherwise a
+    large hg38-sourced (e.g. GWAS-SSF) manifest could mask a genuinely broken
+    hg19 source. 2/2 hg19 variants fail liftover (100%, over threshold) here,
+    but 2/302 against the *whole* manifest (300 hg38 passthrough rows added)
+    would be under the 1% threshold -- so this only raises if the two groups
+    are scored separately, not summed.
+    """
+    from opengwasdb.build.liftover import LiftoverFailureError
+
+    bad_vcf = _make_vcf(
+        tmp_path, "bad_trait",
+        [
+            "1\t200000\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n",
+            "1\t300000\t.\tC\tT\t.\tPASS\t.\tES:SE\t0.5:0.2\n",
+        ],
+    )
+    good_hg38_vcf = _make_vcf(
+        tmp_path, "good_trait",
+        [
+            f"1\t{5_000_000 + i}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.0:0.5\n"
+            for i in range(300)
+        ],
+    )
+    manifest = _manifest_with_source_assembly(
+        tmp_path,
+        [
+            ("bad_trait", bad_vcf, "Bad Trait", ""),
+            ("good_trait", good_hg38_vcf, "Good Trait", "hg38"),
+        ],
+    )
+
+    with pytest.raises(LiftoverFailureError):
+        build_dense_from_vcf_manifest(
+            manifest, tmp_path / "store.opengwasdb",
+            store_id="s", release_id="r", liftover_failure_threshold=0.01,
+        )
+
+
 class TestParallel:
     def test_two_workers_matches_serial(self, tmp_path):
         vcf1 = _make_vcf(

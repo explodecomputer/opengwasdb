@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from opengwasdb.build.liftover import LiftoverFailureError, build_liftover_lookup
+from opengwasdb.build.liftover import LiftoverFailureError
 from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
@@ -34,6 +34,7 @@ from opengwasdb.layouts.dense.build_vcf import (
     _create_dense_zarr,
     _encode_variant_keys,
     _fork_pool,
+    _lift_manifest_variants,
     _log_progress,
     _manifest_row_to_analysis,
     _read_manifest,
@@ -136,14 +137,14 @@ _pass2_spill_dir: Path | None = None
 
 
 def _build_routing_index(
-    hg19_lookup: dict[tuple[str, int, str, str], str],
+    source_lookup: dict[tuple[str, int, str, str], str],
     dense_row: dict[str, int],
     shared_index: dict[str, int],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compose the liftover + partition into a single fork-safe sorted lookup.
 
-    Returns ``(keys_sorted, targets_sorted, ispanel_sorted)``: for every hg19
-    source variant that lifts to a stored variant, its byte key, the target index
+    Returns ``(keys_sorted, targets_sorted, ispanel_sorted)``: for every source
+    variant that resolves to a stored variant, its byte key, the target index
     (dense row when on-panel, shared variant_index when off-panel), and whether
     it is on-panel. Workers binary-search this once per association.
     """
@@ -153,7 +154,7 @@ def _build_routing_index(
     alts: list[str] = []
     targets: list[int] = []
     ispanel: list[bool] = []
-    for (chrom, pos, ref, alt), alid in hg19_lookup.items():
+    for (chrom, pos, ref, alt), alid in source_lookup.items():
         row = dense_row.get(alid)
         if row is not None:
             targets.append(row)
@@ -229,6 +230,10 @@ def _resolve_column_hybrid(
 
     def _flush() -> None:
         if not zs:
+            return
+        if len(keys_sorted) == 0:
+            for lst in (chroms, poss, refs, alts, zs, ses):
+                lst.clear()
             return
         query = _encode_variant_keys(chroms, poss, refs, alts)
         idx = np.searchsorted(keys_sorted, query)
@@ -365,8 +370,10 @@ def build_hybrid_from_vcf_manifest(
 
     The Dense Component axis is exactly ``reference_panel`` (hg38 ALIDs). Each
     study is read **once**: on-panel associations fill the nested Dense Component,
-    off-panel associations go to the Ragged Overflow. VCFs are assumed hg19 and
-    lifted to hg38 inline (like the dense builder).
+    off-panel associations go to the Ragged Overflow. Each row's source file is
+    assumed hg19 and lifted to hg38 inline, unless its manifest row declares
+    ``source_assembly=hg38`` (issue #85, e.g. a harmonised GWAS-SSF source),
+    in which case it passes through unchanged -- see `_read_manifest`.
     """
     manifest_rows = _read_manifest(manifest_path)
     if not manifest_rows:
@@ -384,25 +391,14 @@ def build_hybrid_from_vcf_manifest(
         log.info("Reference panel: %d variants", len(panel_alids))
 
         # ── Pass 1: union of source variants + liftover ──────────────────────────
-        log.info("Pass 1: collecting source variants from %d VCFs (serial)", len(manifest_rows))
-        hg19_tuples: set[tuple[str, int, str, str]] = set()
-        t0 = time.monotonic()
-        for i, row in enumerate(manifest_rows):
-            reader = resolve_reader(
-                row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
-            )
-            hg19_tuples.update(reader.stream_variants())
-            _log_progress("Pass 1", i + 1, len(manifest_rows), t0,
-                          f"{len(hg19_tuples)} unique variants", every=250)
-        log.info("Running liftover hg19 → hg38 (%d variants)", len(hg19_tuples))
-        hg19_lookup = build_liftover_lookup(
-            hg19_tuples, from_build="hg19", to_build="hg38",
-            failure_threshold=liftover_failure_threshold, chain_file=chain_file,
+        source_lookup = _lift_manifest_variants(
+            manifest_rows,
+            chain_file=chain_file,
+            liftover_failure_threshold=liftover_failure_threshold,
         )
-        log.info("Liftover complete: %d variants mapped", len(hg19_lookup))
 
         # Partition observed hg38 ALIDs into on-panel and off-panel.
-        observed_alids = set(hg19_lookup.values())
+        observed_alids = set(source_lookup.values())
         off_panel_alids = sorted(observed_alids - panel_alids, key=_alid_sort_key)
         panel_sorted = sorted(panel_alids, key=_alid_sort_key)
         shared_sorted = sorted(panel_alids | set(off_panel_alids), key=_alid_sort_key)
@@ -419,9 +415,10 @@ def build_hybrid_from_vcf_manifest(
             n_panel, n_off_panel, n_shared, n_analyses,
         )
 
-        # Provenance: source (hg19) ALID each hg38 row was lifted from (None on collision).
+        # Provenance: source-build ALID each hg38 row resolved from -- lifted from
+        # hg19, or passed through unchanged from hg38 (None on collision).
         hg38_to_source: dict[str, str | None] = {}
-        for (chrom, pos, ref, alt), hg38_alid in hg19_lookup.items():
+        for (chrom, pos, ref, alt), hg38_alid in source_lookup.items():
             a1, a2 = sorted((ref, alt))
             origin = f"{chrom}:{pos}:{a1}:{a2}"
             if hg38_alid in hg38_to_source:
@@ -449,9 +446,9 @@ def build_hybrid_from_vcf_manifest(
         # ── Pass 2: route each study once (dense spill + overflow spill) ──────────
         log.info("Pass 2: routing %d analyses (n_workers=%d)", n_analyses, n_workers)
         keys_sorted, targets_sorted, ispanel_sorted = _build_routing_index(
-            hg19_lookup, dense_row, shared_index
+            source_lookup, dense_row, shared_index
         )
-        del hg19_lookup
+        del source_lookup
         t2 = time.monotonic()
         spill_dir = Path(
             tempfile.mkdtemp(prefix=f".{out.name}.hybridspill.", dir=staged.path.parent)

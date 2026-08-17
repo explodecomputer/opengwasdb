@@ -502,3 +502,90 @@ def test_gwas_ssf_capability_builds_a_hybrid_store_alongside_gwas_vcf(tmp_path):
     assert on_panel["z"][0] == pytest.approx(-4.0, rel=5e-3)
     assert off_panel["z"][0] == pytest.approx(-5.0, rel=5e-3)
     assert set(np.round(analysis["z"], 1).tolist()) == {-4.0, -5.0, 3.0}
+
+
+# --- source_assembly (issue #85): per-row declared source genome build ---
+
+
+def _manifest_with_source_assembly(
+    tmp_path: Path, entries: list[tuple[str, Path, str, str]]
+) -> Path:
+    """Like `_make_manifest`, plus a `source_assembly` column per entry."""
+    manifest = tmp_path / "manifest.tsv"
+    lines = [
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_assembly"
+    ]
+    for trait_id, file_path, trait_name, source_assembly in entries:
+        lines.append(
+            f"{trait_id}\t{file_path}\t{trait_name}\t1000\tsd\tdeclared_standardised\t"
+            f"\t{source_assembly}"
+        )
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest
+
+
+def test_hg38_source_assembly_is_not_lifted_in_hybrid_build(tmp_path):
+    """issue #85: a row declaring source_assembly=hg38 passes through with no
+    liftover in the Hybrid builder too -- HG19_POS_2 (1,000,000) is a
+    position the real hg19->hg38 chain shifts to 1,064,620 (HG38_ALID_2); if
+    it were lifted a second time despite the hg38 declaration, the store
+    would show that shifted position instead of the source file's own
+    1,000,000. This is the exact bug the real GWAS-Catalog-SSF reproduction
+    in issue #85 found: an already-hg38 harmonised source silently re-lifted.
+    """
+    vcf = _make_vcf(
+        tmp_path, "trait_ssf",
+        [f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n"],  # z=5.0, flip->-5.0
+    )
+    manifest = _manifest_with_source_assembly(tmp_path, [("trait_ssf", vcf, "Trait SSF", "hg38")])
+    store_path = tmp_path / "store.opengwasdb"
+
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=_panel(tmp_path),
+        store_id="hybrid-hg38-test", release_id="v1",
+    )
+
+    q = query_store(store_path)
+    result = q.analysis("trait_ssf")
+    vt = q.variants_table()
+    q.close()
+
+    assert len(result["z"]) == 1
+    variant = vt[int(result["variant_index"][0])]
+    assert variant["position"] == HG19_POS_2
+    assert result["z"][0] == pytest.approx(-5.0, rel=5e-3)
+
+
+def test_mixed_hg19_and_hg38_manifest_builds_hybrid_store(tmp_path):
+    """issue #85: a Hybrid build mixing a default (hg19) row and an
+    explicitly-hg38 row lifts only the hg19 row -- the scenario the bug
+    report specifically named (a GWAS-VCF row alongside a harmonised
+    GWAS-SSF row in one build)."""
+    vcf_hg19 = _make_vcf(
+        tmp_path, "trait_vcf",
+        [f"1\t{HG19_POS_3}\t.\tG\tA\t.\tPASS\t.\tES:SE\t0.6:0.2\n"],  # lifted -> 1564620
+    )
+    vcf_hg38 = _make_vcf(
+        tmp_path, "trait_ssf",
+        [f"1\t{HG19_POS_2}\t.\tC\tT\t.\tPASS\t.\tES:SE\t1.5:0.3\n"],  # not lifted; stays 1000000
+    )
+    manifest = _manifest_with_source_assembly(
+        tmp_path,
+        [("trait_vcf", vcf_hg19, "Trait VCF", ""), ("trait_ssf", vcf_hg38, "Trait SSF", "hg38")],
+    )
+    store_path = tmp_path / "store.opengwasdb"
+
+    build_hybrid_from_vcf_manifest(
+        manifest, store_path, reference_panel=_panel(tmp_path),
+        store_id="hybrid-mixed-test", release_id="v1",
+    )
+
+    q = query_store(store_path)
+    vt = q.variants_table()
+    vcf_result = q.analysis("trait_vcf")
+    ssf_result = q.analysis("trait_ssf")
+    q.close()
+
+    assert vt[int(vcf_result["variant_index"][0])]["position"] == 1_564_620
+    assert vt[int(ssf_result["variant_index"][0])]["position"] == HG19_POS_2

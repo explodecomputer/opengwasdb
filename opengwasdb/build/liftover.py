@@ -22,7 +22,7 @@ class LiftoverFailureError(RuntimeError):
     """Raised when the liftover failure rate exceeds the configured threshold."""
 
 
-def _normalise_build(build: str) -> str:
+def normalise_build(build: str) -> str:
     canonical = _BUILD_ALIASES.get(build.lower().strip())
     if canonical is None:
         raise ValueError(
@@ -73,7 +73,7 @@ def build_liftover_lookup(
     if chain_file is not None:
         lo = LiftOver(str(chain_file))
     else:
-        lo = LiftOver(_normalise_build(from_build), _normalise_build(to_build))
+        lo = LiftOver(normalise_build(from_build), normalise_build(to_build))
 
     variant_list = list(variants)
     total = len(variant_list)
