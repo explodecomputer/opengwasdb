@@ -408,7 +408,8 @@ def _write_ssf_filtered(path: Path, rows: list[dict]) -> None:
 
 def _write_ssf_manifest(path: Path, rows: list[dict]) -> None:
     header = [
-        "analysis_index", "analysis_id", "trait_id", "gene_id", "gene_name",
+        "analysis_index", "analysis_id", "trait_id",
+        "analysis_label", "trait_ontology_id", "trait_ontology_label",
         "trait_chr", "trait_bp", "n", "tissue", "context", "mhc", "filtered_file",
         "assigned_ancestry",
     ]

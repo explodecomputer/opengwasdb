@@ -35,9 +35,10 @@ def ragged_store_path(tmp_path):
 
     manifest = tmp_path / "manifest.tsv"
     manifest.write_text(
-        "analysis_index\tanalysis_id\ttrait_id\tgene_id\tgene_name\ttrait_chr\ttrait_bp\t"
+        "analysis_index\tanalysis_id\ttrait_id\t"
+        "analysis_label\ttrait_ontology_id\ttrait_ontology_label\ttrait_chr\ttrait_bp\t"
         "n\ttissue\tcontext\tmhc\tfiltered_file\n"
-        "0\tt1\tT1\tENSG1\tGENE1\t1\t150\t1000\tBlood\t\tFALSE\tt1.tsv.gz\n",
+        "0\tt1\tT1\tGENE1\tENSEMBL:ENSG1\tEnsembl\t1\t150\t1000\tBlood\t\tFALSE\tt1.tsv.gz\n",
         encoding="utf-8",
     )
     store_path = tmp_path / "ragged.opengwasdb"

@@ -168,10 +168,12 @@ def build_ragged_from_besd(
             if tissue:
                 analysis_id = f"{probe.probe_id}::{tissue}"
 
+            is_ensembl = probe.probe_id.startswith("ENSG")
             analyses.append(molecular_analysis(
                 analysis_id,
-                gene_id=probe.probe_id if probe.probe_id.startswith("ENSG") else None,
-                gene_name=probe.gene,
+                analysis_label=probe.gene,
+                trait_ontology_id=f"ENSEMBL:{probe.probe_id}" if is_ensembl else None,
+                trait_ontology_label="Ensembl" if is_ensembl else None,
                 tissue=tissue,
                 context=None,
                 trait_chr=probe_chr,

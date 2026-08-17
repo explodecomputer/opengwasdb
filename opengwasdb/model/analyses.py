@@ -287,13 +287,16 @@ def to_json_schema() -> dict[str, Any]:
     }
 
 
-# --- Shared Analysis Metadata model (ADR 0034, issue #67) -----------------
+# --- Shared Analysis Metadata model (ADR 0034/0035, issue #67) ------------
 #
 # `Analysis` is the single in-repo representation of one analyses.tsv row
 # under the unified schema every Primary Storage Layout shares (ADR 0034,
 # store-format spec §7a): no `phenotype_id`/`phenotype_label`/`trait_id`,
 # Trait identity carried instead by `analysis_label`/`trait_ontology_id`/
-# `trait_ontology_label`. Dense and Hybrid build/completion (issue #68) write
+# `trait_ontology_label` -- polymorphic-by-Trait-kind enough to also carry
+# gene identity for gene-centric Analyses, so there is no separate
+# `gene_id`/`gene_name` pair either (ADR 0035). Dense and Hybrid build/
+# completion (issue #68) write
 # against this model directly. SHARED_CORE_COLUMNS/STORE_ONLY_COLUMNS/
 # REGISTRY_ONLY_COLUMNS above still describe the pre-ADR-0034 schema and are
 # retained for `opengwasdb-stores` manifest validation
@@ -307,8 +310,6 @@ ANALYSIS_COLUMNS: tuple[str, ...] = (
     "analysis_label",
     "trait_ontology_id",
     "trait_ontology_label",
-    "gene_id",
-    "gene_name",
     "tissue",
     "context",
     "trait_chr",
@@ -343,7 +344,7 @@ _ANALYSIS_SAMPLE_SIZE_KIND_INDEX = ANALYSIS_COLUMNS.index("sample_size_kind")
 @dataclass(frozen=True)
 class Analysis:
     """One Analysis's Analytical + Attribution Metadata (store-format spec
-    §7a, ADR 0034) -- the schema every layout's `analyses.tsv` shares.
+    §7a, ADR 0034/0035) -- the schema every layout's `analyses.tsv` shares.
 
     Every field beyond `analysis_id` is optional and blank by default: most
     build paths genuinely have no source for ontology mapping, sample size,
@@ -368,8 +369,6 @@ class Analysis:
     analysis_label: str = ""
     trait_ontology_id: str = ""
     trait_ontology_label: str = ""
-    gene_id: str = ""
-    gene_name: str = ""
     tissue: str = ""
     context: str = ""
     trait_chr: str = ""
@@ -424,8 +423,6 @@ def _analysis_row(index: int, a: Analysis, fieldnames: tuple[str, ...]) -> dict[
         "analysis_label": a.analysis_label,
         "trait_ontology_id": a.trait_ontology_id,
         "trait_ontology_label": a.trait_ontology_label,
-        "gene_id": a.gene_id,
-        "gene_name": a.gene_name,
         "tissue": a.tissue,
         "context": a.context,
         "trait_chr": a.trait_chr,
@@ -468,8 +465,6 @@ def _analysis_from_row(row: dict[str, str], fieldnames: tuple[str, ...]) -> Anal
         analysis_label=row.get("analysis_label", ""),
         trait_ontology_id=row.get("trait_ontology_id", ""),
         trait_ontology_label=row.get("trait_ontology_label", ""),
-        gene_id=row.get("gene_id", ""),
-        gene_name=row.get("gene_name", ""),
         tissue=row.get("tissue", ""),
         context=row.get("context", ""),
         trait_chr=row.get("trait_chr", ""),

@@ -149,8 +149,10 @@ def test_analyses_tsv_carries_probe_identities(tmp_path):
 
     table = read_analyses(out / "analyses.tsv")
     assert len(table.rows) == 3
-    gene_ids = {r["gene_id"] for r in table.rows}
-    assert gene_ids == {"ENSG00000000001", "ENSG00000000002", "ENSG00000000003"}
+    gene_ontology_ids = {r["trait_ontology_id"] for r in table.rows}
+    assert gene_ontology_ids == {
+        "ENSEMBL:ENSG00000000001", "ENSEMBL:ENSG00000000002", "ENSEMBL:ENSG00000000003",
+    }
 
 
 def test_zarr_csr_associations(tmp_path):
@@ -310,8 +312,9 @@ def test_analyses_tsv_has_no_sql_table_and_carries_molecular_columns(tmp_path):
 
     table = read_analyses(out / "analyses.tsv")
     rows = {r["analysis_id"]: r for r in table.rows}
-    assert rows["ENSG00000000001::Blood"]["gene_name"] == "GENE1"
-    assert rows["ENSG00000000001::Blood"]["gene_id"] == "ENSG00000000001"
+    assert rows["ENSG00000000001::Blood"]["analysis_label"] == "GENE1"
+    assert rows["ENSG00000000001::Blood"]["trait_ontology_id"] == "ENSEMBL:ENSG00000000001"
+    assert rows["ENSG00000000001::Blood"]["trait_ontology_label"] == "Ensembl"
     assert rows["ENSG00000000001::Blood"]["tissue"] == "Blood"
     assert rows["ENSG00000000001::Blood"]["trait_chr"] == "1"
     assert rows["ENSG00000000001::Blood"]["trait_bp"] == "1050000"
@@ -338,9 +341,12 @@ def test_top_hit_counts_in_analyses_tsv_match_top_hit_index(tmp_path):
 
 
 def test_analyses_table_groups_by_gene(tmp_path):
-    """Issue #71: a caller who used to group Ragged Analyses via the
+    """Issue #71/#81: a caller who used to group Ragged Analyses via the
     retired dual analysis_id-or-trait_id lookup can instead filter
-    analyses_table() (the same shape Dense/Hybrid return) on gene_id."""
+    analyses_table() (the same shape Dense/Hybrid return) on
+    trait_ontology_id (ADR 0035: gene identity travels via
+    analysis_label/trait_ontology_id, not dedicated gene_id/gene_name
+    columns)."""
     from opengwasdb.query import query_store
 
     prefix = _make_besd_fixture(tmp_path)
@@ -351,9 +357,12 @@ def test_analyses_table_groups_by_gene(tmp_path):
     analyses = q.analyses_table()
     q.close()
 
-    by_gene = {row["gene_id"]: idx for idx, row in analyses.items()}
-    assert by_gene["ENSG00000000002"] is not None
-    matched = [idx for idx, row in analyses.items() if row["gene_id"] == "ENSG00000000002"]
+    by_gene_ontology_id = {row["trait_ontology_id"]: idx for idx, row in analyses.items()}
+    assert by_gene_ontology_id["ENSEMBL:ENSG00000000002"] is not None
+    matched = [
+        idx for idx, row in analyses.items()
+        if row["trait_ontology_id"] == "ENSEMBL:ENSG00000000002"
+    ]
     assert len(matched) == 1
     assert analyses[matched[0]]["analysis_id"] == "ENSG00000000002"
 

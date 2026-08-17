@@ -194,9 +194,10 @@ one row per Analysis, keyed by `analysis_index`, **identically across every
 Primary Storage Layout** (ADR 0034) — Ragged is not exempt, and `index.sqlite`
 MUST NOT hold a second, layout-specific per-Analysis metadata table. This
 column list is a **breaking revision** of the one ADR 0030 originally
-specified (ADR 0034): a Store Release built against the prior column list is
-not a valid Store Release against this one, and no reader is required to
-accept both.
+specified (ADR 0034, further narrowed by ADR 0035's retirement of `gene_id`/
+`gene_name`): a Store Release built against a prior column list is not a
+valid Store Release against this one, and no reader is required to accept
+both.
 
 ```text
 analysis_index
@@ -204,8 +205,6 @@ analysis_id
 analysis_label
 trait_ontology_id            (CURIE, e.g. EFO:0001073; blank when unmapped)
 trait_ontology_label
-gene_id
-gene_name
 tissue
 context
 trait_chr                    (blank for Analyses with no single genomic position)
@@ -239,15 +238,20 @@ n_hits_5e4   (count of associations at p <= 5e-4, nominal)
 
 Every column beyond `analysis_index`/`analysis_id` MAY be blank for an
 individual row when genuinely unknown or not applicable — a phenotype-level
-Analysis leaves `gene_id`/`trait_chr`/`trait_bp` blank; a Trait with no clean
-ontology mapping yet leaves `trait_ontology_id`/`trait_ontology_label` blank
-rather than fabricating one. `trait_ontology_id` is not required to be unique
-— one Trait MAY have several Analyses (differing by cohort, ancestry, model,
-sample subset, or meta-analysis) that share it, and it MAY be blank on some or
-all of them. There is deliberately no other Trait-identifying column: a raw,
+Analysis leaves `trait_chr`/`trait_bp` blank; a Trait with no clean ontology
+mapping yet leaves `trait_ontology_id`/`trait_ontology_label` blank rather
+than fabricating one. `trait_ontology_id` is not required to be unique — one
+Trait MAY have several Analyses (differing by cohort, ancestry, model, sample
+subset, or meta-analysis) that share it, and it MAY be blank on some or all of
+them. There is deliberately no other Trait-identifying column: a raw,
 source-native trait identifier alongside `trait_ontology_id` was considered
 and rejected (ADR 0034) as recreating the same "which column is authoritative"
-ambiguity `phenotype_id` had. `analysis_id` MUST be unique within a Store
+ambiguity `phenotype_id` had. This extends to gene identity for gene-centric
+(pQTL) Analyses: `trait_ontology_id`'s CURIE contract is polymorphic by Trait
+kind, so an Ensembl gene ID (e.g. `ENSEMBL:ENSG00000152256`) belongs there and
+in `trait_ontology_label` (`"Ensembl"`) rather than in dedicated `gene_id`/
+`gene_name` columns, with the gene symbol carried as free text in
+`analysis_label` (ADR 0035). `analysis_id` MUST be unique within a Store
 Release.
 
 `analyses.tsv` MUST be sufficient on its own to interpret every Analysis's stored
