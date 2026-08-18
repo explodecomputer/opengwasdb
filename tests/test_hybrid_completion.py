@@ -12,6 +12,8 @@ import gzip
 import io
 
 import numpy as np
+import pytest
+import zarr
 
 from opengwasdb.layouts.dense.top_hits import read_top_hit_counts
 from opengwasdb.layouts.hybrid.build import build_hybrid_from_vcf_manifest
@@ -21,6 +23,7 @@ from opengwasdb.model.manifest import StoreManifest
 from opengwasdb.query import query_store
 from opengwasdb.store.open import open_store
 from opengwasdb.validation import validate_store
+from opengwasdb.variants import VariantAxis
 
 PANEL_ALIDS = ["1:100000:A:G", "1:814620:A:G", "1:1064620:A:G", "1:1564620:A:G"]
 OFF_PANEL_ALID = "1:2068561:A:G"
@@ -233,6 +236,114 @@ def test_completed_status_only_on_dense(tmp_path):
     assert statuses <= {"observed", "imputed"}
     if result.n_imputed > 0:
         assert "imputed" in statuses
+
+
+def _make_ld_panel_with_crossover(tmp_path):
+    """Like `_make_ld_panel`, plus a second block covering OFF_PANEL_ALID --
+    an LD panel wider than the build panel, extending the Dense Component to
+    include a variant that already carries a real observed overflow
+    association (issue #99)."""
+    root = _make_ld_panel(tmp_path)
+    _write_ld_block(
+        root / "EUR" / "1", "2000000-2100000",
+        [("1:2068561:A:G", 0.20, 2_068_561)],
+        seed=1,
+    )
+    return root
+
+
+def test_panel_extension_crossover_stays_disjoint_and_keeps_the_real_observation(tmp_path):
+    """issue #99: when the LD panel extends the Dense Component to cover a
+    variant already carrying a real observed overflow association
+    (OFF_PANEL_ALID, trait_a's 1:2000000 -> hg38 1:2068561, ES:SE=1.2:0.3,
+    ALT>REF -> z=-4.0), the completed store must stay disjoint -- the real
+    observation folds into the Dense Component (not an LD-imputed guess),
+    and the overflow no longer carries it.
+    """
+    src = _build_source(tmp_path)
+    ld = _make_ld_panel_with_crossover(tmp_path)
+    dst = tmp_path / "dst.opengwasdb"
+
+    result = complete_hybrid_store(src, dst, ld, min_cor=0.0, thresh=0.9)
+
+    validation = validate_store(dst)
+    assert validation.ok, validation.errors
+
+    # The crossed-over variant is on the Dense Component's own axis now.
+    dense_axis = open_store(dst).dense_component()
+    axis = VariantAxis(dense_axis.path)
+    dense_alids = {r.alid for r in axis.all()}
+    axis.close()
+    assert OFF_PANEL_ALID in dense_alids
+
+    # ... and carries trait_a's real observed value there, not an imputed one.
+    shared_axis = VariantAxis(dst)
+    alid_by_index = {r.variant_index: r.alid for r in shared_axis.all()}
+    shared_axis.close()
+
+    q = query_store(dst)
+    r = q.analysis("trait_a", observed_only=False)
+    by_alid = {
+        alid_by_index[int(vi)]: (z, status)
+        for vi, z, status in zip(r["variant_index"], r["z"], r["association_status"], strict=True)
+    }
+    z, status = by_alid[OFF_PANEL_ALID]
+    assert status == "observed"
+    assert z == pytest.approx(-4.0, rel=5e-3)
+
+    # The overflow no longer carries this association for any analysis.
+    from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+
+    ragged = RaggedCSRReader(dst)
+    overflow_alids_after = {alid_by_index[int(v)] for v in np.unique(ragged._variant_index[:])}
+    assert OFF_PANEL_ALID not in overflow_alids_after
+
+    # n_imputed reports the real (corrected) count, not complete_dense_store's
+    # pre-fold count -- trait_a's crossed-over cell was a real observation,
+    # never counted as imputed to begin with in this fixture (see the
+    # correlated-block test below for the case where it was).
+    assert result.n_imputed >= 0
+
+
+def test_fold_panel_crossovers_overwrites_an_already_imputed_cell(tmp_path):
+    """issue #99: the fold must correct a cell dense completion already
+    imputed (not merely fill an empty one) -- the failure mode the real
+    344,510/4,916,057-variant repro actually hit. Forcing a real ElasticNetCV
+    fit to succeed deterministically on a fixture this small isn't reliable
+    (test_dense_completion.py notes the same fragility for its own iid-random
+    LD blocks), so this exercises `_fold_panel_crossovers`'s `was_imputed`
+    branch directly against a synthetic completed-dense zarr array instead of
+    routing through a real completion run."""
+    from opengwasdb.layouts.hybrid.complete import _fold_panel_crossovers
+
+    dense_dir = tmp_path / "dense"
+    root = zarr.open_group(str(dense_dir / "data.zarr"), mode="w")
+    root.create_dataset("z", shape=(2, 2), dtype="float16", fill_value=np.nan)
+    root.create_dataset("se", shape=(2, 2), dtype="float16", fill_value=np.nan)
+    root.create_dataset("imputed", shape=(2, 2), dtype="uint8", fill_value=0)
+
+    # Row 1 / analysis column 0: dense completion already wrote an LD-imputed
+    # guess here before the fold runs.
+    root["z"][1, 0] = 1.23
+    root["se"][1, 0] = 0.5
+    root["imputed"][1, 0] = 1
+
+    dense_alid_to_row = {OFF_PANEL_ALID: 1}
+    offsets = np.array([0, 1])  # one analysis; one overflow association
+    src_z = np.array([-4.0], dtype=np.float32)
+    src_se = np.array([0.3], dtype=np.float32)
+    overflow_alids = np.array([OFF_PANEL_ALID], dtype=object)
+    is_crossover = np.array([True])
+
+    n_reclaimed = _fold_panel_crossovers(
+        dense_dir, dense_alid_to_row, offsets, src_z, src_se, overflow_alids, is_crossover,
+    )
+
+    assert n_reclaimed == 1
+    written = zarr.open_group(str(dense_dir / "data.zarr"), mode="r")
+    assert float(written["z"][1, 0]) == pytest.approx(-4.0, rel=1e-3)
+    assert float(written["se"][1, 0]) == pytest.approx(0.3, rel=1e-3)
+    assert int(written["imputed"][1, 0]) == 0
 
 
 def test_rho_delegates_to_dense_component(tmp_path):

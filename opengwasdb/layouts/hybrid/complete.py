@@ -11,6 +11,22 @@ rebuilt from the *completed* Dense Component's axis, and the overflow
 ``variant_index`` values are remapped onto the rebuilt shared index space. When the
 build panel already equals the LD panel (the intended case) nothing is added, so
 the overflow indices are unchanged.
+
+When the LD panel *does* extend the axis, a variant that was off-panel (with a
+real observed overflow association) can cross onto the newly-extended panel.
+``complete_dense_store`` never sees that observation -- it only completes from
+the *source* Dense Component's own previously-on-panel cells -- so left alone it
+would either impute that cell from LD-correlated neighbours or leave it missing,
+while the overflow still carried the real value: the same variant would then
+appear in both components, violating the disjoint-partition invariant
+(``opengwasdb.validation.validate``), and the real observation would be at risk
+of being silently shadowed by a lower-fidelity one. ``_fold_panel_crossovers``
+detects every such crossover after dense completion, writes the real observed
+value into the completed Dense Component (marked ``imputed=0``, a genuine
+observation, not a guess) in place of whatever dense completion computed there,
+and excludes it from the rebuilt overflow -- so no association ever needs to
+choose between the two components, and no real observation is ever discarded in
+favour of an estimate (issue #99).
 """
 
 from __future__ import annotations
@@ -21,11 +37,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+import zarr
 
 from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import _alid_sort_key, _write_index
 from opengwasdb.layouts.dense.complete import complete_dense_store
 from opengwasdb.layouts.dense.constants import DEFAULT_COMPRESSOR, DEFAULT_DTYPE
+from opengwasdb.layouts.dense.top_hits import build_top_hit_indexes as build_dense_top_hit_indexes
 from opengwasdb.layouts.hybrid.build import _write_variant_table
 from opengwasdb.layouts.hybrid.layout import (
     DENSE_SUBDIR,
@@ -112,6 +130,7 @@ def complete_hybrid_store(
         dense_records = dense_axis.all()
         dense_axis.close()
         dense_alids = [r.alid for r in dense_records]  # dense row order
+        dense_alid_to_row = {alid: i for i, alid in enumerate(dense_alids)}
 
         src_csr = RaggedCSRReader(src)
         offsets = src_csr._offsets[:]
@@ -129,6 +148,37 @@ def complete_hybrid_store(
         overflow_alids = np.array(
             [vi_to_record[int(v)].alid for v in src_vi], dtype=object
         ) if len(src_vi) else np.empty(0, dtype=object)
+
+        # A variant off-panel in the source but newly on-panel after dense
+        # completion (LD panel extension) "crosses over": fold its real
+        # observation into the completed Dense Component and drop it from the
+        # rebuilt overflow below, rather than let the same variant appear in
+        # both components -- see the module docstring (issue #99).
+        is_crossover = np.array(
+            [alid in dense_alid_to_row for alid in overflow_alids], dtype=bool
+        ) if len(overflow_alids) else np.empty(0, dtype=bool)
+        n_reclaimed_imputed = _fold_panel_crossovers(
+            dense_component_path(staged.path), dense_alid_to_row,
+            offsets, src_z, src_se, overflow_alids, is_crossover,
+        )
+        n_imputed = dense_result.n_imputed - n_reclaimed_imputed
+        if is_crossover.any():
+            log.info(
+                "%d off-panel association(s) crossed onto the newly-extended dense "
+                "panel; folded in as real observations (%d had been imputed there, "
+                "now corrected to the real value)",
+                int(is_crossover.sum()), n_reclaimed_imputed,
+            )
+            # Rebuild the Dense Component's top-hit index from the patched z
+            # values -- complete_dense_store already built one from its own
+            # pre-patch data, which the fold above can invalidate for the
+            # (small) fraction of cells it just overwrote. The completed
+            # analyses.tsv's completion-quality rollup columns (median
+            # pearson_r etc.), written by complete_dense_store before the
+            # fold, are not similarly recomputed -- an accepted, narrow
+            # imprecision limited to summary statistics for the crossed-over
+            # cells, not a correctness invariant like top-hit presence.
+            build_dense_top_hit_indexes(dense_component_path(staged.path))
 
         union = sorted(set(dense_alids) | set(overflow_alids.tolist()), key=_alid_sort_key)
         new_shared_index = {alid: i for i, alid in enumerate(union)}
@@ -150,11 +200,13 @@ def complete_hybrid_store(
         dense_to_shared = np.array([new_shared_index[a] for a in dense_alids], dtype=np.int32)
         np.save(dense_to_shared_path(staged.path), dense_to_shared)
 
-        # ── 5. Rebuild the overflow CSR with remapped shared indices ──────────
+        # ── 5. Rebuild the overflow CSR with remapped shared indices, excluding
+        #        any association folded into the Dense Component in step 2 ──────
         csr = RaggedCSRWriter()
         for ai in range(n_analyses):
             s, e = int(offsets[ai]), int(offsets[ai + 1])
-            if s == e:
+            keep = ~is_crossover[s:e] if e > s else np.empty(0, dtype=bool)
+            if s == e or not keep.any():
                 csr.add_analysis(
                     np.empty(0, dtype=np.int32),
                     np.empty(0, dtype=np.float16),
@@ -162,11 +214,11 @@ def complete_hybrid_store(
                 )
                 continue
             new_vi = np.array(
-                [new_shared_index[vi_to_record[int(v)].alid] for v in src_vi[s:e]],
+                [new_shared_index[vi_to_record[int(v)].alid] for v in src_vi[s:e][keep]],
                 dtype=np.int32,
             )
-            z = src_z[s:e].astype(np.float16)
-            se = src_se[s:e].astype(np.float16)
+            z = src_z[s:e][keep].astype(np.float16)
+            se = src_se[s:e][keep].astype(np.float16)
             order = np.argsort(new_vi, kind="stable")
             csr.add_analysis(new_vi[order], z[order], se[order])
         csr.flush(staged.path)
@@ -177,7 +229,7 @@ def complete_hybrid_store(
         new_release = release_id or f"{src_manifest.release_id}-completed"
         _write_completed_manifest(
             staged, src_manifest, new_release, n_shared, n_analyses, n_panel, n_off_panel,
-            csr.n_associations, dense_result.n_imputed,
+            csr.n_associations, n_imputed,
         )
 
         build_ragged_top_hit_indexes(staged.path)
@@ -190,14 +242,58 @@ def complete_hybrid_store(
         log.info(
             "Hybrid completion complete: %d shared variants (%d panel + %d off-panel), "
             "%d imputed dense cells, %d overflow associations (observed-only)",
-            n_shared, n_panel, n_off_panel, dense_result.n_imputed, csr.n_associations,
+            n_shared, n_panel, n_off_panel, n_imputed, csr.n_associations,
         )
 
     return HybridCompletionResult(
         output_path=dst, n_variants=n_shared, n_analyses=n_analyses,
         n_panel=n_panel, n_off_panel=n_off_panel, n_overflow=csr.n_associations,
-        n_imputed=dense_result.n_imputed,
+        n_imputed=n_imputed,
     )
+
+
+def _fold_panel_crossovers(
+    dense_dir: Path,
+    dense_alid_to_row: dict[str, int],
+    offsets: np.ndarray,
+    src_z: np.ndarray,
+    src_se: np.ndarray,
+    overflow_alids: np.ndarray,
+    is_crossover: np.ndarray,
+) -> int:
+    """Write every crossover association's real observed value into the
+    completed Dense Component at ``(dense_row, analysis)``, marked
+    ``imputed=0``, in place of whatever dense completion computed there.
+
+    ``is_crossover`` is a boolean mask over the flat source-overflow
+    association array (same order/length as ``overflow_alids``/``src_z``/
+    ``src_se``); ``offsets`` partitions that flat array by analysis, exactly
+    as ``RaggedCSRReader`` exposes it. Returns how many of the overwritten
+    cells were previously marked imputed, so the caller can correct the
+    reported imputed count -- see the module docstring (issue #99).
+    """
+    if not is_crossover.any():
+        return 0
+
+    n_analyses = len(offsets) - 1
+    assoc_ai = np.repeat(np.arange(n_analyses), np.diff(offsets))
+    crossover_idx = np.flatnonzero(is_crossover)
+
+    row_idx = np.fromiter(
+        (dense_alid_to_row[overflow_alids[k]] for k in crossover_idx),
+        dtype=np.int64, count=len(crossover_idx),
+    )
+    col_idx = assoc_ai[crossover_idx].astype(np.int64)
+    z_vals = src_z[crossover_idx].astype(np.float16)
+    se_vals = src_se[crossover_idx].astype(np.float16)
+
+    root = zarr.open_group(str(dense_dir / "data.zarr"), mode="a")
+    was_imputed = np.asarray(root["imputed"].vindex[row_idx, col_idx])
+    n_reclaimed = int(was_imputed.sum())
+    root["z"].vindex[row_idx, col_idx] = z_vals
+    root["se"].vindex[row_idx, col_idx] = se_vals
+    root["imputed"].vindex[row_idx, col_idx] = 0
+    return n_reclaimed
 
 
 def _chunk_shape(manifest: StoreManifest) -> tuple[int, int]:
