@@ -1080,8 +1080,11 @@ def test_finngen_r13_hg38_capability_builds_and_queries_dense_store(tmp_path):
     variants = query.variants_table()
     query.close()
     assert {variants[int(index)]["position"] for index in result["variant_index"]} == {
-        100,
-        200,
-        300,
+        13668,
+        17017,
+        19234,
+        98536,
     }
-    assert set(np.round(result["z"], 1).tolist()) == {-2.0, 2.0, -2.0}
+    np.testing.assert_allclose(
+        np.sort(result["z"]), np.array([-0.7, 0.2, 0.4, 1.4]), atol=0.05
+    )

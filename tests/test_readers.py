@@ -195,6 +195,7 @@ def _fake_reader() -> FakeReader:
 
 
 def _finngen_reader() -> FinnGenR13Reader:
+    # Captured verbatim from the public R13 AB1_ACTINOMYCOSIS endpoint.
     return FinnGenR13Reader(
         Path(__file__).parent / "fixtures" / "finngen_r13.tsv",
         StoredEffectScale.SD,
@@ -255,6 +256,10 @@ def test_reader_conformance_orients_associations_to_a1(reader):
 
     assert len(associations) >= 2
     by_position = {a.position: a for a in associations}
+    if isinstance(reader, FinnGenR13Reader):
+        assert by_position[13668].z == pytest.approx(1.99175 / 1.46977)
+        assert by_position[19234].z == pytest.approx(2.16344 / 10.5777)
+        return
     assert by_position[100].z == pytest.approx(-2.0)
     assert by_position[200].z == pytest.approx(2.0)
 
@@ -267,6 +272,12 @@ def test_reader_conformance_se_is_non_negative(reader):
 
 
 def test_reader_conformance_extract_at_sites_returns_a1_oriented_af(reader):
+    if isinstance(reader, FinnGenR13Reader):
+        sites = reader.extract_at_sites(["1:13668:A:G", "1:19234:A:G"])
+        assert sites["1:13668:A:G"].af == pytest.approx(0.00596897)
+        assert sites["1:19234:A:G"].af == pytest.approx(1.0 - 6.76508e-05)
+        assert all(metrics.se >= 0 for metrics in sites.values())
+        return
     sites = reader.extract_at_sites(["1:100:A:G", "1:200:A:G"])
 
     assert sites["1:100:A:G"].af == pytest.approx(0.70)
@@ -275,9 +286,10 @@ def test_reader_conformance_extract_at_sites_returns_a1_oriented_af(reader):
 
 
 def test_reader_conformance_extract_at_sites_ignores_unrequested_alids(reader):
-    sites = reader.extract_at_sites(["1:100:A:G"])
+    requested = "1:13668:A:G" if isinstance(reader, FinnGenR13Reader) else "1:100:A:G"
+    sites = reader.extract_at_sites([requested])
 
-    assert set(sites) == {"1:100:A:G"}
+    assert set(sites) == {requested}
 
 
 def test_reader_conformance_stream_variants_covers_stream_associations(reader):
@@ -292,18 +304,34 @@ def test_reader_conformance_stream_variants_covers_stream_associations(reader):
     assert assoc_positions <= variant_positions
 
 
-def test_finngen_r13_drops_unusable_rows_without_fabricating_metrics():
-    reader = _finngen_reader()
+def test_finngen_r13_drops_unusable_rows_without_fabricating_metrics(tmp_path):
+    path = tmp_path / "malformed.tsv"
+    path.write_text(
+        "#chrom\tpos\tref\talt\tbeta\tsebeta\taf_alt\n"
+        "1\t400\tA\tC\tNA\t0\tNA\n"
+        "1\tbad\tA\tG\t1.0\t0.5\t0.2\n"
+        "1\t500\tA\tN\t1.0\t0.5\t0.2\n",
+        encoding="utf-8",
+    )
+    reader = FinnGenR13Reader(path, StoredEffectScale.SD)
 
     associations = list(reader.stream_associations())
     variants = list(reader.stream_variants())
-    sites = reader.extract_at_sites(["1:300:A:T", "1:400:A:C"])
+    sites = reader.extract_at_sites(["1:400:A:C"])
 
-    assert {association.position for association in associations} == {100, 200, 300}
-    assert {position for _chromosome, position, _ref, _alt in variants} == {100, 200, 300, 400}
-    # Palindromic 300 cannot be oriented without strand information; 400 has
-    # neither a valid AF nor SE. Neither may produce partial SiteMetrics.
+    assert associations == []
+    assert variants == [("1", 400, "A", "C")]
     assert sites == {}
+
+
+def test_finngen_r13_normalises_chromosome_23_to_x():
+    reader = _finngen_reader()
+
+    association = next(a for a in reader.stream_associations() if a.position == 98536)
+    sites = reader.extract_at_sites(["X:98536:A:C"])
+
+    assert association.chromosome == "X"
+    assert sites["X:98536:A:C"].af == pytest.approx(0.00146324)
 
 
 # --- GWAS-VCF manifest authority (issue #17) ---
