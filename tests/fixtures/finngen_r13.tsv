@@ -1,0 +1,7 @@
+#chrom	pos	ref	alt	rsids	nearest_genes	pval	mlogp	beta	sebeta	af_alt	af_alt_cases	af_alt_controls
+1	100	A	G	rs1	GENE1	0.01	2	1.0	0.5	0.30	0.31	0.29
+1	200	G	A	rs2	GENE2	0.02	1.7	1.0	0.5	0.70	0.71	0.69
+1	300	A	T	rs3	GENE3	0.03	1.5	0.4	0.2	0.40	0.41	0.39
+1	400	A	C	rs4	GENE4	NA	NA	NA	0	NA	NA	NA
+1	bad	A	G	rs5	GENE5	0.5	0.3	1.0	0.5	0.2	0.2	0.2
+1	500	A	N	rs6	GENE6	0.5	0.3	1.0	0.5	0.2	0.2	0.2

@@ -1035,7 +1035,8 @@ def test_gwas_ssf_capability_builds_a_dense_store(tmp_path):
     manifest.write_text(
         "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
         "\toriginal_sd_method\toriginal_sd\tsource_reader_capability\n"
-        f"trait_ssf\t{ssf_path}\tTrait SSF\t1000\tsd\tdeclared_standardised\t\t{GWAS_SSF_CAPABILITY}\n",
+        f"trait_ssf\t{ssf_path}\tTrait SSF\t1000\tsd\tdeclared_standardised\t\t"
+        f"{GWAS_SSF_CAPABILITY}\n",
         encoding="utf-8",
     )
     store_path = tmp_path / "store_ssf.opengwasdb"
@@ -1051,3 +1052,36 @@ def test_gwas_ssf_capability_builds_a_dense_store(tmp_path):
     query.close()
 
     assert set(np.round(r["z"], 1).tolist()) == {-4.0, -5.0, 3.0}
+
+
+def test_finngen_r13_hg38_capability_builds_and_queries_dense_store(tmp_path):
+    """A FinnGen endpoint stays on GRCh38 and round-trips through Dense."""
+    from opengwasdb.readers import FINNGEN_R13_CAPABILITY
+
+    source = Path(__file__).parent / "fixtures" / "finngen_r13.tsv"
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        "trait_id\tfile_path\ttrait_name\tn\tstored_effect_scale"
+        "\toriginal_sd_method\toriginal_sd\tsource_reader_capability\tsource_assembly\n"
+        f"finngen_r13_test\t{source}\tFinnGen R13 test\t500000\tlog_or"
+        f"\tbinary_trait\t\t{FINNGEN_R13_CAPABILITY}\tGRCh38\n",
+        encoding="utf-8",
+    )
+    store_path = tmp_path / "finngen_r13.opengwasdb"
+
+    build_dense_from_vcf_manifest(
+        manifest, store_path, store_id="finngen-r13-test", release_id="r13"
+    )
+
+    validation = validate_store(store_path)
+    assert validation.ok, validation.errors
+    query = query_store(store_path)
+    result = query.analysis("finngen_r13_test")
+    variants = query.variants_table()
+    query.close()
+    assert {variants[int(index)]["position"] for index in result["variant_index"]} == {
+        100,
+        200,
+        300,
+    }
+    assert set(np.round(result["z"], 1).tolist()) == {-2.0, 2.0, -2.0}

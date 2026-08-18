@@ -15,9 +15,11 @@ import pytest
 from opengwasdb.build.phenotype_sd import estimate_phenotype_sd
 from opengwasdb.model.enums import OriginalSdMethod, StoredEffectScale
 from opengwasdb.readers import (
+    FINNGEN_R13_CAPABILITY,
     GWAS_SSF_CAPABILITY,
     GWAS_VCF_CAPABILITY,
     FakeReader,
+    FinnGenR13Reader,
     GwasSsfReader,
     GwasVcfReader,
     ReaderAssociation,
@@ -108,6 +110,14 @@ def test_resolve_reader_returns_gwas_ssf_reader_for_its_capability(tmp_path):
     assert isinstance(reader, GwasSsfReader)
 
 
+def test_resolve_reader_returns_finngen_r13_reader_for_its_capability():
+    path = Path(__file__).parent / "fixtures" / "finngen_r13.tsv"
+
+    reader = resolve_reader(FINNGEN_R13_CAPABILITY, path, StoredEffectScale.LOG_OR)
+
+    assert isinstance(reader, FinnGenR13Reader)
+
+
 def test_resolve_reader_rejects_unknown_capability(tmp_path):
     with pytest.raises(ValueError, match="unknown source reader capability"):
         resolve_reader(
@@ -184,12 +194,21 @@ def _fake_reader() -> FakeReader:
     )
 
 
-@pytest.fixture(params=["gwas_vcf", "fake", "gwas_ssf"])
+def _finngen_reader() -> FinnGenR13Reader:
+    return FinnGenR13Reader(
+        Path(__file__).parent / "fixtures" / "finngen_r13.tsv",
+        StoredEffectScale.SD,
+    )
+
+
+@pytest.fixture(params=["gwas_vcf", "fake", "gwas_ssf", "finngen_r13"])
 def reader(request, tmp_path):
     if request.param == "gwas_vcf":
         return _gwas_vcf_reader(tmp_path)
     if request.param == "gwas_ssf":
         return _gwas_ssf_reader(tmp_path)
+    if request.param == "finngen_r13":
+        return _finngen_reader()
     return _fake_reader()
 
 
@@ -234,7 +253,7 @@ def test_reader_conformance_rejects_malformed_input(malformed_reader_factory):
 def test_reader_conformance_orients_associations_to_a1(reader):
     associations = list(reader.stream_associations())
 
-    assert len(associations) == 2
+    assert len(associations) >= 2
     by_position = {a.position: a for a in associations}
     assert by_position[100].z == pytest.approx(-2.0)
     assert by_position[200].z == pytest.approx(2.0)
@@ -271,6 +290,20 @@ def test_reader_conformance_stream_variants_covers_stream_associations(reader):
     variant_positions = set(reader.stream_variants())
 
     assert assoc_positions <= variant_positions
+
+
+def test_finngen_r13_drops_unusable_rows_without_fabricating_metrics():
+    reader = _finngen_reader()
+
+    associations = list(reader.stream_associations())
+    variants = list(reader.stream_variants())
+    sites = reader.extract_at_sites(["1:300:A:T", "1:400:A:C"])
+
+    assert {association.position for association in associations} == {100, 200, 300}
+    assert {position for _chromosome, position, _ref, _alt in variants} == {100, 200, 300, 400}
+    # Palindromic 300 cannot be oriented without strand information; 400 has
+    # neither a valid AF nor SE. Neither may produce partial SiteMetrics.
+    assert sites == {}
 
 
 # --- GWAS-VCF manifest authority (issue #17) ---
