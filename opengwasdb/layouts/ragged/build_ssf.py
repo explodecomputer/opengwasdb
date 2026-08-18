@@ -148,6 +148,45 @@ def _read_filtered(path: Path) -> Iterator[tuple[CanonicalVariant, float, float,
             yield ori.variant, z, se, rsid
 
 
+def _dedupe_per_analysis(
+    recs: list[tuple[str, float, float]],
+) -> tuple[list[tuple[str, float, float]], int, int]:
+    """Resolve multiple source rows canonicalizing to the same variant within
+    one analysis (issue #101): rows with identical (z, se) are a harmless
+    duplicate submission and collapse to one; rows that disagree are dropped
+    entirely for that (analysis, variant) cell rather than silently keeping
+    an arbitrary one -- GWAS-Catalog-SSF harmonised files can carry more than
+    one row per source variant (multi-allelic splits, duplicate submissions),
+    and when their canonicalized z-scores conflict there is no principled way
+    to pick a winner from the data alone.
+
+    Returns ``(deduped_recs, n_consistent_collapsed, n_conflicting_dropped)``.
+    """
+    by_alid: dict[str, list[tuple[float, float]]] = {}
+    order: list[str] = []
+    for alid, z, se in recs:
+        if alid not in by_alid:
+            order.append(alid)
+        by_alid.setdefault(alid, []).append((z, se))
+
+    out: list[tuple[str, float, float]] = []
+    n_consistent = 0
+    n_conflicting = 0
+    for alid in order:
+        values = by_alid[alid]
+        if len(values) == 1:
+            z, se = values[0]
+            out.append((alid, z, se))
+            continue
+        first = values[0]
+        if all(v == first for v in values[1:]):
+            out.append((alid, first[0], first[1]))
+            n_consistent += 1
+        else:
+            n_conflicting += 1
+    return out, n_consistent, n_conflicting
+
+
 def build_ragged_from_ssf(
     manifest_path: str | Path,
     filtered_dir: str | Path,
@@ -186,8 +225,15 @@ def build_ragged_from_ssf(
                     alid_variant[alid] = variant
                     if rsid and rsid.startswith("rs"):
                         rsid_by_alid[alid] = rsid
+            recs, n_consistent, n_conflicting = _dedupe_per_analysis(recs)
             per_analysis.append(recs)
-            print(f"  {a.analysis_label or a.analysis_id}: {len(recs):,} associations")
+            msg = f"  {a.analysis_label or a.analysis_id}: {len(recs):,} associations"
+            if n_consistent or n_conflicting:
+                msg += (
+                    f" ({n_consistent} duplicate variant(s) collapsed, "
+                    f"{n_conflicting} conflicting duplicate(s) dropped)"
+                )
+            print(msg)
 
         # ── Variant axis: sort unique variants by (chr,pos), assign variant_index ─
         variants = sorted(

@@ -326,6 +326,53 @@ def test_manifest_without_trait_id_builds(tmp_path):
     assert validate_store(out).ok
 
 
+def test_duplicate_canonical_variant_within_analysis_is_resolved(tmp_path):
+    """issue #101: a GWAS-SSF file can carry more than one row that
+    canonicalizes to the same variant within one analysis. Rows with
+    identical (z, se) are a harmless duplicate submission and collapse to
+    one association; rows that disagree are dropped for that cell entirely
+    rather than silently keeping an arbitrary one."""
+    filtered_dir = tmp_path / "filtered"
+    filtered_dir.mkdir()
+    _write_filtered(filtered_dir / "trait_a.tsv.gz", [
+        # 1:100000 A/G appears twice with identical beta/se -> collapses to one.
+        {"chromosome": "1", "base_pair_location": 100_000, "effect_allele": "A",
+         "other_allele": "G", "beta": 1.0, "standard_error": 0.5, "rsid": "rs1"},
+        {"chromosome": "1", "base_pair_location": 100_000, "effect_allele": "A",
+         "other_allele": "G", "beta": 1.0, "standard_error": 0.5, "rsid": "rs1"},
+        # 1:200000 A/G appears twice with conflicting beta -> dropped entirely.
+        {"chromosome": "1", "base_pair_location": 200_000, "effect_allele": "A",
+         "other_allele": "G", "beta": 0.5, "standard_error": 0.2, "rsid": "rs2"},
+        {"chromosome": "1", "base_pair_location": 200_000, "effect_allele": "A",
+         "other_allele": "G", "beta": -0.5, "standard_error": 0.2, "rsid": "rs2"},
+        # 1:300000 A/G, single row, unaffected control.
+        {"chromosome": "1", "base_pair_location": 300_000, "effect_allele": "A",
+         "other_allele": "G", "beta": 2.0, "standard_error": 1.0, "rsid": "rs3"},
+    ])
+    manifest = tmp_path / "manifest.tsv"
+    _write_manifest(manifest, [
+        {"analysis_index": 0, "analysis_id": "trait_a", "trait_id": "T1",
+         "filtered_file": "trait_a.tsv.gz"},
+    ])
+    out = tmp_path / "out.opengwasdb"
+
+    result = build_ragged_from_ssf(manifest, filtered_dir, out, store_id="test", release_id="v1")
+
+    # 1:100000 (collapsed) + 1:300000 (control) survive; 1:200000 (conflict) dropped.
+    assert result.n_associations == 2
+
+    csr = RaggedCSRReader(out)
+    a0 = csr.get_analysis(0)
+    variants = VariantAxis(out).all()
+    alid_by_index = {v.variant_index: v.alid for v in variants}
+    surviving_alids = {alid_by_index[int(i)] for i in a0.variant_index}
+    assert surviving_alids == {"1:100000:A:G", "1:300000:A:G"}
+
+    from opengwasdb.validation import validate_store
+
+    assert validate_store(out).ok
+
+
 def test_cli_build_ragged_ssf(tmp_path):
     from typer.testing import CliRunner
 
