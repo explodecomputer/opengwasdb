@@ -118,10 +118,31 @@ def test_subset_catalogue_is_pure_row_filter(tmp_path):
     # The manifest is still a Catalogue superset: same header, EUR rows only.
     header = manifest.read_text().splitlines()[0].split("\t")
     assert header[0] == "trait_id" and "assigned_ancestry" in header
+    assert "ancestry_assignment_method" in header
     from opengwasdb.layouts.dense.build_vcf import _read_manifest
 
     loaded = _read_manifest(manifest)
     assert [m.trait_id for m in loaded] == ["eur_a", "eur_b"]
+    assert {m.ancestry_assignment_method for m in loaded} == {"af_assigned"}
+
+
+def test_legacy_unassigned_catalogue_subset_records_failed_assignment(tmp_path):
+    """A pre-#86 Catalogue has no method column, but still records that its
+    Unassigned rows came from an attempted AF assignment whose gates failed."""
+    manifest = tmp_path / "unassigned_manifest.tsv"
+    subset_catalogue(
+        _catalogue(tmp_path),
+        manifest,
+        ancestry="Unassigned",
+        stored_effect_scale="sd",
+        original_sd_method="declared_standardised",
+    )
+
+    from opengwasdb.layouts.dense.build_vcf import _read_manifest
+
+    loaded = _read_manifest(manifest)
+    assert [row.trait_id for row in loaded] == ["und_d"]
+    assert loaded[0].ancestry_assignment_method == "unassigned"
 
 
 def test_build_eur_hybrid_records_provenance_and_validates(tmp_path):
@@ -154,6 +175,7 @@ def test_build_eur_hybrid_records_provenance_and_validates(tmp_path):
     # manifest verbatim and land in analyses.tsv too (issue #22) -- not just
     # assigned_ancestry itself.
     rows = {r["analysis_id"]: r for r in read_analyses(store / "analyses.tsv").rows}
+    assert {row["ancestry_assignment_method"] for row in rows.values()} == {"af_assigned"}
     assert rows["eur_a"]["ancestry_prop_EUR"] == "0.95"
     assert rows["eur_a"]["ancestry_prop_AFR"] == "0.02"
     assert rows["eur_b"]["ancestry_prop_EUR"] == "0.91"

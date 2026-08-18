@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opengwasdb.ancestry.mixture import AncestryAssignment, Gates
+from opengwasdb.model.enums import AncestryAssignmentMethod
 
 # The build-manifest columns, first and in this order (superset invariant).
 BUILD_COLUMNS = ["trait_id", "file_path", "trait_name", "n"]
@@ -22,6 +23,7 @@ BUILD_COLUMNS = ["trait_id", "file_path", "trait_name", "n"]
 # composition columns and the version stamps.
 _ANNOTATION_COLUMNS = [
     "assigned_ancestry",
+    "ancestry_assignment_method",
     "reported_population",
     "af_overlap",
     "nnls_residual",
@@ -81,6 +83,11 @@ def _row_to_dict(
         "trait_name": row.trait_name,
         "n": str(row.n),
         "assigned_ancestry": a.assigned_ancestry or UNASSIGNED,
+        "ancestry_assignment_method": (
+            AncestryAssignmentMethod.AF_ASSIGNED.value
+            if a.assigned_ancestry
+            else AncestryAssignmentMethod.UNASSIGNED.value
+        ),
         "reported_population": row.reported_population,
         "af_overlap": str(a.af_overlap),
         "nnls_residual": _fmt(a.residual),
