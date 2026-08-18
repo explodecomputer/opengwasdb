@@ -39,7 +39,6 @@ from opengwasdb.layouts.dense.constants import (
 from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
 from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX, Analysis
 from opengwasdb.model.enums import (
-    AncestryAssignmentMethod,
     AssociationCoverage,
     CompletionState,
     OriginalSdMethod,
@@ -78,6 +77,14 @@ class _ManifestRow:
     ancestry_prop: dict[str, str]  # {population: proportion}, from any ancestry_prop_<pop>
     # column(s) the manifest carries -- a Catalogue subset's kept rows already have these
     # (the Catalogue writes one per reference super-population); empty for a bare manifest.
+    # Additional Analytical Metadata (issue #86): optional manifest columns passed through
+    # verbatim, blank when absent. The shared builder must not infer their meaning.
+    ancestry_assignment_method: str = ""
+    sample_size_kind: str = ""
+    sample_size_scope: str = ""
+    n_cases: str = ""
+    n_controls: str = ""
+    original_effect_scale: str = ""
     # Trait-ontology and Attribution columns (ADR 0034, issue #68): optional manifest columns,
     # resolved directly rather than via a phenotype_id/phenotype_label intermediary. "" when
     # the manifest omits them -- never fabricated.
@@ -94,13 +101,9 @@ def _manifest_row_to_analysis(row: _ManifestRow) -> Analysis:
     """A manifest row's Analytical + Attribution Metadata (issue #22, ADR
     0034), shared by the dense and hybrid manifest builders.
 
-    ``ancestry_assignment_method`` is derived, not guessed: every
-    ``assigned_ancestry`` this builder ever sees comes from a Catalogue's
-    AF-based NNLS mixture fit (`opengwasdb.ancestry.mixture.assign_ancestry`),
-    so naming that method for a row that carries an assignment is reporting
-    fact, not inference. A row with no ``assigned_ancestry`` gets no method
-    either -- ancestry was never attempted for it, which is a different state
-    from ``AncestryAssignmentMethod.UNASSIGNED`` (attempted, gates failed).
+    Optional fields are passed through verbatim and remain blank when absent.
+    In particular, the shared builder cannot infer how ancestry was assigned:
+    the manifest producer owns that fact (issue #86).
     """
     return Analysis(
         analysis_id=row.trait_id,
@@ -114,11 +117,14 @@ def _manifest_row_to_analysis(row: _ManifestRow) -> Analysis:
         first_author=row.first_author,
         stored_effect_scale=row.stored_effect_scale,
         assigned_ancestry=row.assigned_ancestry,
-        ancestry_assignment_method=(
-            AncestryAssignmentMethod.AF_ASSIGNED.value if row.assigned_ancestry else ""
-        ),
+        ancestry_assignment_method=row.ancestry_assignment_method,
         ancestry_prop=row.ancestry_prop,
+        sample_size_kind=row.sample_size_kind,
+        sample_size_scope=row.sample_size_scope,
         sample_size=str(row.n) if row.n else "",
+        n_cases=row.n_cases,
+        n_controls=row.n_controls,
+        original_effect_scale=row.original_effect_scale,
         original_sd_method=row.original_sd_method,
         original_sd=row.original_sd,
     )
@@ -751,6 +757,11 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     no longer needs a separate post-build sidecar write to record it. Blank
     or absent for a manifest with no ancestry annotation.
 
+    Optional sample-size interpretation/counts, Original Effect Scale, and
+    ancestry-assignment method columns pass straight through as Analytical
+    Metadata (issue #86). They remain blank when omitted; the shared builder
+    never fabricates values that only the manifest producer can know.
+
     Optional ``trait_ontology_id``/``trait_ontology_label`` and Attribution
     (``license``/``publication_doi``/``publication_pmid``/``consortium``/
     ``first_author``) columns (ADR 0034, issue #68) flow straight into
@@ -832,6 +843,12 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                 original_sd_method=sd_method_raw,
                 original_sd=original_sd_raw,
                 assigned_ancestry=row.get("assigned_ancestry") or "",
+                ancestry_assignment_method=row.get("ancestry_assignment_method") or "",
+                sample_size_kind=row.get("sample_size_kind") or "",
+                sample_size_scope=row.get("sample_size_scope") or "",
+                n_cases=row.get("n_cases") or "",
+                n_controls=row.get("n_controls") or "",
+                original_effect_scale=row.get("original_effect_scale") or "",
                 ancestry_prop={
                     key[len(ANCESTRY_PROP_PREFIX):]: value
                     for key, value in row.items()
@@ -851,7 +868,7 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
     return result
 
 
-def _alid_sort_key(alid: str) -> tuple:
+def _alid_sort_key(alid: str) -> tuple[tuple[int, str], int, str, str]:
     chrom, pos_str, a1, a2 = alid.split(":")
     return (chromosome_sort_key(chrom), int(pos_str), a1, a2)
 

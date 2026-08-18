@@ -28,6 +28,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from opengwasdb.ancestry.catalogue import UNASSIGNED
+from opengwasdb.model.enums import AncestryAssignmentMethod
 from opengwasdb.store.open import open_store
 
 log = logging.getLogger(__name__)
@@ -78,10 +80,24 @@ def subset_catalogue(
 
     kept = [r for r in rows if r.get("assigned_ancestry") == ancestry]
     for row in kept:
+        # Catalogue assignments are produced by the AF-mixture pipeline. Stamp
+        # the method when deriving a build manifest so legacy Catalogues written
+        # before issue #86 retain that known provenance too.
+        row["ancestry_assignment_method"] = (
+            row.get("ancestry_assignment_method")
+            or (
+                AncestryAssignmentMethod.UNASSIGNED.value
+                if row.get("assigned_ancestry") == UNASSIGNED
+                else AncestryAssignmentMethod.AF_ASSIGNED.value
+            )
+        )
         row["stored_effect_scale"] = stored_effect_scale
         row["original_sd_method"] = original_sd_method
         row["original_sd"] = "" if original_sd is None else str(original_sd)
-    out_fieldnames = [*fieldnames, "stored_effect_scale", "original_sd_method", "original_sd"]
+    added_fieldnames = [
+        "ancestry_assignment_method", "stored_effect_scale", "original_sd_method", "original_sd"
+    ]
+    out_fieldnames = [*fieldnames, *(name for name in added_fieldnames if name not in fieldnames)]
     with open(manifest_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=out_fieldnames, delimiter="\t")
         writer.writeheader()

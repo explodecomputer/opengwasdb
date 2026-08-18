@@ -245,4 +245,6 @@ def test_catalogue_is_manifest_superset(tmp_path, reference):
         records = list(csv.DictReader(fh, delimiter="\t"))
     assert records[0]["assigned_ancestry"] == "EUR"
     assert records[1]["assigned_ancestry"] == "Unassigned"
+    assert records[0]["ancestry_assignment_method"] == "af_assigned"
+    assert records[1]["ancestry_assignment_method"] == "unassigned"
     assert records[0]["catalogue_version"] == "cat-v1"
