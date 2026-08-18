@@ -15,9 +15,11 @@ import pytest
 from opengwasdb.build.phenotype_sd import estimate_phenotype_sd
 from opengwasdb.model.enums import OriginalSdMethod, StoredEffectScale
 from opengwasdb.readers import (
+    FINNGEN_R13_CAPABILITY,
     GWAS_SSF_CAPABILITY,
     GWAS_VCF_CAPABILITY,
     FakeReader,
+    FinnGenR13Reader,
     GwasSsfReader,
     GwasVcfReader,
     ReaderAssociation,
@@ -108,6 +110,14 @@ def test_resolve_reader_returns_gwas_ssf_reader_for_its_capability(tmp_path):
     assert isinstance(reader, GwasSsfReader)
 
 
+def test_resolve_reader_returns_finngen_r13_reader_for_its_capability():
+    path = Path(__file__).parent / "fixtures" / "finngen_r13.tsv"
+
+    reader = resolve_reader(FINNGEN_R13_CAPABILITY, path, StoredEffectScale.LOG_OR)
+
+    assert isinstance(reader, FinnGenR13Reader)
+
+
 def test_resolve_reader_rejects_unknown_capability(tmp_path):
     with pytest.raises(ValueError, match="unknown source reader capability"):
         resolve_reader(
@@ -184,12 +194,22 @@ def _fake_reader() -> FakeReader:
     )
 
 
-@pytest.fixture(params=["gwas_vcf", "fake", "gwas_ssf"])
+def _finngen_reader() -> FinnGenR13Reader:
+    # Captured verbatim from the public R13 AB1_ACTINOMYCOSIS endpoint.
+    return FinnGenR13Reader(
+        Path(__file__).parent / "fixtures" / "finngen_r13.tsv",
+        StoredEffectScale.SD,
+    )
+
+
+@pytest.fixture(params=["gwas_vcf", "fake", "gwas_ssf", "finngen_r13"])
 def reader(request, tmp_path):
     if request.param == "gwas_vcf":
         return _gwas_vcf_reader(tmp_path)
     if request.param == "gwas_ssf":
         return _gwas_ssf_reader(tmp_path)
+    if request.param == "finngen_r13":
+        return _finngen_reader()
     return _fake_reader()
 
 
@@ -234,8 +254,12 @@ def test_reader_conformance_rejects_malformed_input(malformed_reader_factory):
 def test_reader_conformance_orients_associations_to_a1(reader):
     associations = list(reader.stream_associations())
 
-    assert len(associations) == 2
+    assert len(associations) >= 2
     by_position = {a.position: a for a in associations}
+    if isinstance(reader, FinnGenR13Reader):
+        assert by_position[13668].z == pytest.approx(1.99175 / 1.46977)
+        assert by_position[19234].z == pytest.approx(2.16344 / 10.5777)
+        return
     assert by_position[100].z == pytest.approx(-2.0)
     assert by_position[200].z == pytest.approx(2.0)
 
@@ -248,6 +272,12 @@ def test_reader_conformance_se_is_non_negative(reader):
 
 
 def test_reader_conformance_extract_at_sites_returns_a1_oriented_af(reader):
+    if isinstance(reader, FinnGenR13Reader):
+        sites = reader.extract_at_sites(["1:13668:A:G", "1:19234:A:G"])
+        assert sites["1:13668:A:G"].af == pytest.approx(0.00596897)
+        assert sites["1:19234:A:G"].af == pytest.approx(1.0 - 6.76508e-05)
+        assert all(metrics.se >= 0 for metrics in sites.values())
+        return
     sites = reader.extract_at_sites(["1:100:A:G", "1:200:A:G"])
 
     assert sites["1:100:A:G"].af == pytest.approx(0.70)
@@ -256,9 +286,10 @@ def test_reader_conformance_extract_at_sites_returns_a1_oriented_af(reader):
 
 
 def test_reader_conformance_extract_at_sites_ignores_unrequested_alids(reader):
-    sites = reader.extract_at_sites(["1:100:A:G"])
+    requested = "1:13668:A:G" if isinstance(reader, FinnGenR13Reader) else "1:100:A:G"
+    sites = reader.extract_at_sites([requested])
 
-    assert set(sites) == {"1:100:A:G"}
+    assert set(sites) == {requested}
 
 
 def test_reader_conformance_stream_variants_covers_stream_associations(reader):
@@ -271,6 +302,36 @@ def test_reader_conformance_stream_variants_covers_stream_associations(reader):
     variant_positions = set(reader.stream_variants())
 
     assert assoc_positions <= variant_positions
+
+
+def test_finngen_r13_drops_unusable_rows_without_fabricating_metrics(tmp_path):
+    path = tmp_path / "malformed.tsv"
+    path.write_text(
+        "#chrom\tpos\tref\talt\tbeta\tsebeta\taf_alt\n"
+        "1\t400\tA\tC\tNA\t0\tNA\n"
+        "1\tbad\tA\tG\t1.0\t0.5\t0.2\n"
+        "1\t500\tA\tN\t1.0\t0.5\t0.2\n",
+        encoding="utf-8",
+    )
+    reader = FinnGenR13Reader(path, StoredEffectScale.SD)
+
+    associations = list(reader.stream_associations())
+    variants = list(reader.stream_variants())
+    sites = reader.extract_at_sites(["1:400:A:C"])
+
+    assert associations == []
+    assert variants == [("1", 400, "A", "C")]
+    assert sites == {}
+
+
+def test_finngen_r13_normalises_chromosome_23_to_x():
+    reader = _finngen_reader()
+
+    association = next(a for a in reader.stream_associations() if a.position == 98536)
+    sites = reader.extract_at_sites(["X:98536:A:C"])
+
+    assert association.chromosome == "X"
+    assert sites["X:98536:A:C"].af == pytest.approx(0.00146324)
 
 
 # --- GWAS-VCF manifest authority (issue #17) ---

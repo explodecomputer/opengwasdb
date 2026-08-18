@@ -31,72 +31,32 @@ from __future__ import annotations
 
 import csv
 import gzip
-import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from opengwasdb.model.enums import StoredEffectScale
-from opengwasdb.readers.gwas_vcf import is_palindromic
 from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics
+from opengwasdb.readers.tabular import (
+    TabularRow,
+    extract_at_sites,
+    parse_af,
+    parse_finite_float,
+    parse_positive_float,
+    stream_associations,
+    stream_variants,
+)
 from opengwasdb.variants.normalise import VariantNormalisationError, orient_to_canonical
 
 GWAS_SSF_CAPABILITY = "opengwasdb.gwas-ssf"
 
-_MISSING = {"", ".", "NA", "NaN", "nan", "None"}
-
-
-def _opt(value: str | None) -> str | None:
-    if value is None or value.strip() in _MISSING:
-        return None
-    return value.strip()
-
-
-def _parse_finite_float(value: str | None) -> float | None:
-    text = _opt(value)
-    if text is None:
-        return None
-    try:
-        parsed = float(text)
-    except ValueError:
-        return None
-    return parsed if math.isfinite(parsed) else None
-
-
-def _parse_positive_float(value: str | None) -> float | None:
-    parsed = _parse_finite_float(value)
-    return parsed if parsed is not None and parsed > 0.0 else None
-
-
-def _parse_af(value: str | None) -> float | None:
-    parsed = _parse_finite_float(value)
-    if parsed is None or not (0.0 <= parsed <= 1.0):
-        return None
-    return parsed
-
-
-@dataclass(frozen=True)
-class _ParsedRow:
-    """One GWAS-SSF row's identity, source-oriented alleles, and statistics."""
-
-    chromosome: str
-    position: int
-    alid: str
-    ref: str
-    alt: str
-    flipped: bool
-    beta: float | None
-    se: float | None
-    af: float | None
-
-
-def _iter_rows(path: str | Path) -> Iterator[_ParsedRow]:
+def _iter_rows(path: str | Path) -> Iterator[TabularRow]:
     """Parse each row of a filtered/harmonised GWAS-SSF file once.
 
     A row with an unparseable chromosome, position, or allele pair cannot be
     represented as a variant at all and is dropped from every stream; a row
     with a valid identity but an unusable `beta`/`standard_error` still
-    yields a `_ParsedRow` (its `beta`/`se` are `None`) so `stream_variants`
+    yields a `TabularRow` (its `beta`/`se` are `None`) so `stream_variants`
     can still see it per the interface's superset contract.
     """
     opener = gzip.open if str(path).endswith(".gz") else open
@@ -116,9 +76,9 @@ def _iter_rows(path: str | Path) -> Iterator[_ParsedRow]:
                 )
             except VariantNormalisationError:
                 continue
-            se = _parse_positive_float(row.get("standard_error"))
-            beta = _parse_finite_float(row.get("beta"))
-            yield _ParsedRow(
+            se = parse_positive_float(row.get("standard_error"))
+            beta = parse_finite_float(row.get("beta"))
+            yield TabularRow(
                 chromosome=ori.variant.chromosome,
                 position=ori.variant.position,
                 alid=ori.variant.alid,
@@ -127,7 +87,7 @@ def _iter_rows(path: str | Path) -> Iterator[_ParsedRow]:
                 flipped=ori.flipped,
                 beta=beta,
                 se=se,
-                af=_parse_af(row.get("effect_allele_frequency")),
+                af_alt=parse_af(row.get("effect_allele_frequency")),
             )
 
 
@@ -145,38 +105,10 @@ class GwasSsfReader:
     stored_effect_scale: StoredEffectScale = StoredEffectScale.SD
 
     def stream_associations(self) -> Iterator[ReaderAssociation]:
-        for row in _iter_rows(self.path):
-            if row.beta is None or row.se is None:
-                continue
-            z = row.beta / row.se
-            if row.flipped:
-                z = -z
-            yield ReaderAssociation(
-                chromosome=row.chromosome,
-                position=row.position,
-                ref=row.ref,
-                alt=row.alt,
-                z=z,
-                se=row.se,
-                stored_effect_scale=self.stored_effect_scale,
-            )
+        yield from stream_associations(_iter_rows(self.path), self.stored_effect_scale)
 
     def stream_variants(self) -> Iterator[tuple[str, int, str, str]]:
-        for row in _iter_rows(self.path):
-            yield (row.chromosome, row.position, row.ref, row.alt)
+        yield from stream_variants(_iter_rows(self.path))
 
     def extract_at_sites(self, alids: Iterable[str]) -> dict[str, SiteMetrics]:
-        wanted = alids if isinstance(alids, (set, frozenset, dict)) else set(alids)
-        if not wanted:
-            return {}
-        out: dict[str, SiteMetrics] = {}
-        for row in _iter_rows(self.path):
-            if row.alid not in wanted or row.af is None or row.se is None:
-                continue
-            if is_palindromic(row.ref, row.alt):
-                continue
-            out[row.alid] = SiteMetrics(
-                af=(1.0 - row.af) if row.flipped else row.af,
-                se=row.se,
-            )
-        return out
+        return extract_at_sites(_iter_rows(self.path), alids)
