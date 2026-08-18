@@ -198,3 +198,83 @@ def test_migrate_raises_when_already_migrated(dense_store_path):
 
     with pytest.raises(ValueError, match="no analyses table"):
         migrate_module.migrate_store(dense_store_path)
+
+
+def _revert_to_pre_adr0034_tsv(store_path: Path) -> None:
+    """Rewrite a freshly-built (post-ADR-0034) store's `analyses.tsv` back
+    into the shape `write_analyses_tsv` produced before the unified
+    `Analysis` model landed (issue #68): `phenotype_id`/`phenotype_label`
+    instead of `trait_ontology_id`/`trait_ontology_label`, and
+    `analysis_label` defaulted to `analysis_id` rather than genuinely
+    resolved -- matching every real store built in that window (e.g. the
+    2026-08-05 `ukb-b-c128-completed` production store)."""
+    table = read_analyses(store_path / "analyses.tsv")
+    old_fields = [
+        "analysis_index", "analysis_id", "phenotype_id", "phenotype_label", "analysis_label",
+        "stored_effect_scale", "assigned_ancestry", "ancestry_assignment_method",
+        "sample_size_kind", "sample_size_scope", "sample_size", "n_cases", "n_controls",
+        "original_effect_scale", "original_sd", "original_sd_method", "original_sd_dispersion",
+        "completed_against", "completion_median_pearson_r", "completion_n_imputed_total",
+        "completion_n_missing_total", "n_hits_5e8", "n_hits_5e6", "n_hits_5e4",
+    ]
+    old_rows = [
+        {
+            "analysis_index": row["analysis_index"],
+            "analysis_id": row["analysis_id"],
+            "phenotype_id": row["analysis_id"],
+            "phenotype_label": row["analysis_label"],
+            "analysis_label": row["analysis_id"],
+            **{f: row.get(f, "") for f in old_fields if f not in
+               {"analysis_index", "analysis_id", "phenotype_id", "phenotype_label", "analysis_label"}},
+        }
+        for row in table.rows
+    ]
+    with open(store_path / "analyses.tsv", "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=old_fields, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(old_rows)
+
+
+def test_migrate_analyses_tsv_in_place_recovers_label_and_drops_retired_columns(dense_store_path):
+    _revert_to_pre_adr0034_tsv(dense_store_path)
+    assert migrate_module.has_pre_adr0034_analyses_tsv(dense_store_path)
+
+    before = [r["analysis_id"] for r in read_analyses(dense_store_path / "analyses.tsv").rows]
+    after = migrate_module.migrate_analyses_tsv_in_place(dense_store_path)
+    assert before == after == ["a1", "a2"]
+
+    table = read_analyses(dense_store_path / "analyses.tsv")
+    assert "phenotype_id" not in table.fieldnames
+    assert "phenotype_label" not in table.fieldnames
+    assert "trait_ontology_id" in table.fieldnames
+
+    rows = {r["analysis_id"]: r for r in table.rows}
+    # phenotype_label carried the real description; the pre-migration
+    # analysis_label was just analysis_id -- recovering from phenotype_label
+    # here is the whole point of this migration path.
+    assert rows["a1"]["analysis_label"] == "Height primary"
+
+    result = validate_store(dense_store_path)
+    assert result.ok, result.errors
+
+
+def test_migrate_analyses_tsv_in_place_preserves_completion_and_hit_counts(dense_store_path):
+    _revert_to_pre_adr0034_tsv(dense_store_path)
+    before_rows = {
+        r["analysis_id"]: r for r in read_analyses(dense_store_path / "analyses.tsv").rows
+    }
+
+    migrate_module.migrate_analyses_tsv_in_place(dense_store_path)
+
+    after_rows = {r["analysis_id"]: r for r in read_analyses(dense_store_path / "analyses.tsv").rows}
+    for analysis_id, before in before_rows.items():
+        after = after_rows[analysis_id]
+        for column in ("completed_against", "completion_median_pearson_r",
+                       "completion_n_imputed_total", "completion_n_missing_total",
+                       "n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+            assert after[column] == before[column]
+
+
+def test_migrate_analyses_tsv_in_place_raises_when_already_migrated(dense_store_path):
+    with pytest.raises(ValueError, match="already migrated"):
+        migrate_module.migrate_analyses_tsv_in_place(dense_store_path)

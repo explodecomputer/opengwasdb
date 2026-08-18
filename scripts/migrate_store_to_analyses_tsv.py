@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-"""Migrate a Store Release from the pre-issue-#22 layout to `analyses.tsv`
-(ADR 0030, issue #24).
+"""Migrate a Store Release onto the current `analyses.tsv` schema
+(ADR 0030, issue #24; ADR 0034 unified schema, issue #68).
 
-Reads a store's old SQLite `analyses` table (dense/hybrid stores only -- Ragged
-stores keep their own divergent `analyses` schema, out of scope per ADR 0030)
-and its `ancestry.tsv` sidecar, when present, derives what it can from them,
-writes `analyses.tsv` + `overview.html`, drops the SQLite `analyses` table, and
-folds `ancestry_provenance.json` (when present) into `manifest.json`.
+Two distinct old layouts land here, auto-detected from what the store already
+has on disk:
+
+1. Pre-issue-#22: no `analyses.tsv` at all, Analytical Metadata still lives in
+   a SQLite `analyses` table (dense/hybrid stores only -- Ragged stores keep
+   their own divergent `analyses` schema, out of scope per ADR 0030). Reads
+   that table and its `ancestry.tsv` sidecar, when present, derives what it
+   can from them, writes `analyses.tsv` + `overview.html`, drops the SQLite
+   `analyses` table, and folds `ancestry_provenance.json` (when present) into
+   `manifest.json`.
+
+2. Pre-ADR-0034: `analyses.tsv` already exists (case 1 already ran, once) but
+   still carries the schema `write_analyses_tsv` produced before the unified
+   `Analysis` model replaced `phenotype_id`/`phenotype_label` with
+   `analysis_label`/`trait_ontology_id`/`trait_ontology_label` (issue #68).
+   Rewrites the file in place onto the current column set, preserving
+   whatever it already recorded for completion rollups and Top-Hit Counts
+   unchanged (both were already correct under the old schema, so there is
+   nothing to recompute).
 
 Top-Hit Counts (`n_hits_5e8`/`n_hits_5e6`/`n_hits_5e4`, ADR 0032) are computed
 for real from the store's existing top-hit index -- that index predates
@@ -47,7 +61,7 @@ import sqlite3
 from pathlib import Path
 
 from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
-from opengwasdb.model.analyses import Analysis
+from opengwasdb.model.analyses import RETIRED_ANALYSIS_COLUMNS, Analysis, read_analyses
 from opengwasdb.model.enums import OriginalSdMethod
 from opengwasdb.store.open import open_store
 
@@ -83,6 +97,15 @@ def _read_old_analyses(index_path: Path) -> list[dict[str, object]]:
             )
         rows = connection.execute("SELECT * FROM analyses ORDER BY analysis_index").fetchall()
         return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
+def _has_sqlite_analyses_table(store_path: Path) -> bool:
+    connection = sqlite3.connect(str(store_path / "index.sqlite"))
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(analyses)")}
+        return bool(columns)
     finally:
         connection.close()
 
@@ -158,15 +181,88 @@ def migrate_store(store_path: str | Path) -> list[str]:
     return [a.analysis_id for a in analyses]
 
 
+def has_pre_adr0034_analyses_tsv(store_path: str | Path) -> bool:
+    """True when `store_path` already has `analyses.tsv`, but it still
+    carries retired (pre-ADR-0034) columns -- the case `migrate_analyses_tsv_in_place`
+    targets, distinct from the pre-issue-#22 SQLite-table case `migrate_store`
+    targets."""
+    path = Path(store_path) / "analyses.tsv"
+    if not path.exists():
+        return False
+    table = read_analyses(path)
+    return bool(set(RETIRED_ANALYSIS_COLUMNS) & set(table.fieldnames))
+
+
+def migrate_analyses_tsv_in_place(store_path: str | Path) -> list[str]:
+    """Rewrite a store's own pre-ADR-0034 `analyses.tsv` onto the current
+    unified schema, in place. Returns the migrated `analysis_id`s, in
+    `analysis_index` order."""
+    store_path = Path(store_path)
+    table = read_analyses(store_path / "analyses.tsv")
+    if not (set(RETIRED_ANALYSIS_COLUMNS) & set(table.fieldnames)):
+        raise ValueError(
+            f"{store_path}/analyses.tsv carries no retired columns -- "
+            "already migrated, or not a pre-ADR-0034 file"
+        )
+
+    analyses: list[Analysis] = []
+    for row in table.rows:
+        old_scale = row.get("stored_effect_scale", "")
+        # Unlike migrate_store's pre-#22 SQLite case, every real store built
+        # in this window's builder defaulted analysis_label to analysis_id
+        # (a placeholder, not a resolved label) and kept the real human
+        # description in phenotype_label -- ADR 0034 is what taught the
+        # builder to resolve analysis_label for real. So the priority here is
+        # reversed: prefer phenotype_label, falling back to analysis_label
+        # only when phenotype_label itself is blank.
+        analysis_label = row.get("phenotype_label") or row.get("analysis_label") or ""
+        analyses.append(
+            Analysis(
+                analysis_id=str(row["analysis_id"]),
+                analysis_label=str(analysis_label),
+                stored_effect_scale=_LEGACY_STORED_EFFECT_SCALE.get(old_scale, old_scale),
+                assigned_ancestry=row.get("assigned_ancestry", ""),
+                ancestry_assignment_method=row.get("ancestry_assignment_method", ""),
+                sample_size_kind=row.get("sample_size_kind", ""),
+                sample_size_scope=row.get("sample_size_scope", ""),
+                sample_size=row.get("sample_size", ""),
+                n_cases=row.get("n_cases", ""),
+                n_controls=row.get("n_controls", ""),
+                original_effect_scale=row.get("original_effect_scale", ""),
+                original_sd=row.get("original_sd", ""),
+                original_sd_method=row.get("original_sd_method") or OriginalSdMethod.UNAVAILABLE.value,
+                original_sd_dispersion=row.get("original_sd_dispersion", ""),
+                completed_against=row.get("completed_against", ""),
+                completion_median_pearson_r=row.get("completion_median_pearson_r", ""),
+                completion_n_imputed_total=row.get("completion_n_imputed_total", ""),
+                completion_n_missing_total=row.get("completion_n_missing_total", ""),
+                n_hits_5e8=row.get("n_hits_5e8", ""),
+                n_hits_5e6=row.get("n_hits_5e6", ""),
+                n_hits_5e4=row.get("n_hits_5e4", ""),
+            )
+        )
+
+    write_analyses_tsv(store_path, analyses)
+    return [a.analysis_id for a in analyses]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("store_path", type=Path, help="Store Release directory to migrate in place")
     args = parser.parse_args()
 
-    before = read_old_layout_analysis_ids(args.store_path)
-    after = migrate_store(args.store_path)
-    assert before == after, "migration changed the Analysis set -- this is a bug"
-    print(f"Migrated {len(after)} analyses at {args.store_path}")
+    if (args.store_path / "index.sqlite").exists() and _has_sqlite_analyses_table(args.store_path):
+        before = read_old_layout_analysis_ids(args.store_path)
+        after = migrate_store(args.store_path)
+        assert before == after, "migration changed the Analysis set -- this is a bug"
+        print(f"Migrated {len(after)} analyses (pre-issue-#22 SQLite layout) at {args.store_path}")
+    elif has_pre_adr0034_analyses_tsv(args.store_path):
+        before = [r["analysis_id"] for r in read_analyses(args.store_path / "analyses.tsv").rows]
+        after = migrate_analyses_tsv_in_place(args.store_path)
+        assert before == after, "migration changed the Analysis set -- this is a bug"
+        print(f"Migrated {len(after)} analyses (pre-ADR-0034 analyses.tsv) at {args.store_path}")
+    else:
+        raise SystemExit(f"{args.store_path} has nothing to migrate -- already on the current schema")
 
 
 if __name__ == "__main__":
