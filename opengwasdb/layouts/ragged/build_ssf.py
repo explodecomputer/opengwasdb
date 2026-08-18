@@ -3,7 +3,11 @@
 Adapter mirroring :func:`build_ragged_from_besd`, but the source is one filtered
 GWAS-SSF ``.tsv.gz`` per analysis (as produced by the opengwasdb-stores
 download+filter step) plus an analyses manifest carrying per-analysis metadata
-(trait id, gene, trait position, N, tissue/context, MHC flag).
+(trait position, N, tissue/context, MHC flag). ``trait_id`` and other
+gene-target columns are family-specific to gene-target Store Families (for
+example SomaScan proteomics) and are not required here -- a manifest without
+one (for example small-molecule metabolomics, no single encoding gene) builds
+identically.
 
 The ragged storage, variant axis, top-hit indexes and manifest are all reused
 unchanged; the only new code is the read + group + variant-index-mapping glue.
@@ -62,7 +66,6 @@ class RaggedBuildResult:
 class AnalyteInput:
     analysis_index: int
     analysis_id: str
-    trait_id: str
     analysis_label: str | None
     trait_ontology_id: str | None
     trait_ontology_label: str | None
@@ -91,7 +94,6 @@ def _read_manifest(manifest_path: str | Path, filtered_dir: str | Path) -> list[
             rows.append(AnalyteInput(
                 analysis_index=int(r["analysis_index"]),
                 analysis_id=r["analysis_id"],
-                trait_id=r["trait_id"],
                 analysis_label=_opt(r.get("analysis_label")),
                 trait_ontology_id=_opt(r.get("trait_ontology_id")),
                 trait_ontology_label=_opt(r.get("trait_ontology_label")),

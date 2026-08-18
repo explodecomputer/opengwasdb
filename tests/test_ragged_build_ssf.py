@@ -289,6 +289,43 @@ def test_non_dense_analysis_index_fails_loudly(tmp_path):
         build_ragged_from_ssf(manifest, filtered_dir, out, store_id="test", release_id="v1")
 
 
+def test_manifest_without_trait_id_builds(tmp_path):
+    """A gene-target-less Store Family (e.g. small-molecule metabolomics) has
+    no single encoding gene, so its manifest omits trait_id entirely -- per
+    docs/release-metadata-schema.md's documented convention that its absence
+    (not a blank value) is how a reviewer tells the two family shapes apart.
+    trait_id is unused by this builder's own output, so a manifest without it
+    must build identically to one with it."""
+    filtered_dir = tmp_path / "filtered"
+    filtered_dir.mkdir()
+    _write_filtered(filtered_dir / "trait_a.tsv.gz", [
+        {"chromosome": "1", "base_pair_location": 100_000, "effect_allele": "A",
+         "other_allele": "G", "beta": 1.0, "standard_error": 0.5, "rsid": "rs1"},
+    ])
+    manifest = tmp_path / "manifest.tsv"
+    header = [
+        "analysis_index", "analysis_id",
+        "analysis_label", "trait_ontology_id", "trait_ontology_label",
+        "trait_chr", "trait_bp", "n", "tissue", "context", "mhc", "filtered_file",
+    ]
+    with open(manifest, "w", encoding="utf-8") as fh:
+        fh.write("\t".join(header) + "\n")
+        row = {
+            "analysis_index": 0, "analysis_id": "metabolite_a",
+            "analysis_label": "Metabolite A", "filtered_file": "trait_a.tsv.gz",
+        }
+        fh.write("\t".join(str(row.get(col, "")) for col in header) + "\n")
+    out = tmp_path / "out.opengwasdb"
+
+    result = build_ragged_from_ssf(manifest, filtered_dir, out, store_id="test", release_id="v1")
+
+    assert result.n_analyses == 1
+    assert result.n_variants == 1
+    from opengwasdb.validation import validate_store
+
+    assert validate_store(out).ok
+
+
 def test_cli_build_ragged_ssf(tmp_path):
     from typer.testing import CliRunner
 
