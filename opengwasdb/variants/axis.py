@@ -197,6 +197,7 @@ class VariantAxis:
         else:
             self._alid_bytes = None
             self._alid_rows = None
+        self._alid_inverse: np.ndarray | None = None  # built lazily, see identity_by_indices()
 
     @property
     def n_variants(self) -> int:
@@ -358,6 +359,56 @@ class VariantAxis:
             if (record := self.by_index(index)) is not None:
                 records[index] = record
         return records
+
+    def identity_by_indices(self, variant_index: np.ndarray) -> dict[str, np.ndarray] | None:
+        """chromosome/position/effect_allele/other_allele/alid for `variant_index`,
+        resolved with zero `variants.tsv.gz` I/O -- not even a scan.
+
+        An ALID *is* `chromosome:position:effect_allele:other_allele`
+        (`parse_canonical_alid`), and the mmap'd ALID search index
+        (`_alid_bytes`/`_alid_rows`, already loaded at construction for
+        `by_alid()`) already holds the reverse of what's needed here:
+        `_alid_rows[k]` is the variant_index of the k-th alid in sorted
+        order. That's a permutation of `0..n_variants-1`, so inverting it
+        once (cached on this instance) gives `variant_index -> sorted
+        position` and, from there, alid-by-index via pure numpy fancy
+        indexing -- no `by_index()`/`by_indices()` seek or scan at all.
+        `rsid` is the one identity field this can't produce: it isn't part
+        of the alid, so it's the only reason a caller still needs
+        `by_indices()`.
+
+        Returns `None` when the mmap'd ALID index isn't present (stores
+        built before issue 029) -- callers should fall back to
+        `by_indices()` there.
+        """
+        if self._alid_bytes is None or self._alid_rows is None:
+            return None
+        vi = np.asarray(variant_index, dtype="int64")
+        if self._alid_inverse is None:
+            rows = np.asarray(self._alid_rows, dtype="int64")
+            inverse = np.empty(self.n_variants, dtype="int64")
+            inverse[rows] = np.arange(self.n_variants, dtype="int64")
+            self._alid_inverse = inverse
+        positions = self._alid_inverse[vi]
+        alid_bytes = np.asarray(self._alid_bytes)[positions]
+        alids = np.array([b.decode("utf-8") for b in alid_bytes], dtype=object)
+        if len(alids) == 0:
+            empty = np.empty(0, dtype=object)
+            return {
+                "chromosome": empty,
+                "position": np.empty(0, dtype="int64"),
+                "effect_allele": empty,
+                "other_allele": empty,
+                "alid": empty,
+            }
+        parts = np.array([a.split(":") for a in alids], dtype=object)
+        return {
+            "chromosome": parts[:, 0],
+            "position": parts[:, 1].astype("int64"),
+            "effect_allele": parts[:, 2],
+            "other_allele": parts[:, 3],
+            "alid": alids,
+        }
 
     def all(self) -> list[VariantRecord]:
         with pysam.BGZFile(str(self.table_path), "r") as handle:  # type: ignore[call-arg]
