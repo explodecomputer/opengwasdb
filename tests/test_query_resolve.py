@@ -54,10 +54,12 @@ def test_store_query_resolve_joins_variant_and_analysis_identity(dense_store_pat
         assert math.isclose(10.0 ** r["log10_p"], expected_p, rel_tol=1e-3)
 
 
-def test_store_query_resolve_include_rsid(dense_store_path):
+def test_store_query_resolve_include_variant_info(dense_store_path):
     with query_store(dense_store_path) as query:
         result = query.phewas("rs1")
-        rows = sorted(query.resolve(result, include_rsid=True), key=lambda r: r["analysis_id"])
+        rows = sorted(
+            query.resolve(result, include_variant_info=True), key=lambda r: r["analysis_id"]
+        )
     assert all(r["rsid"] == "rs1" for r in rows)
 
 
@@ -102,7 +104,7 @@ def rsid_gap_store_path(tmp_path):
 def test_resolve_rsid_placeholder_when_store_has_none(rsid_gap_store_path):
     with query_store(rsid_gap_store_path) as query:
         result = query.analysis("a1")
-        rows = list(query.resolve(result, include_rsid=True))
+        rows = list(query.resolve(result, include_variant_info=True))
     assert len(rows) == 1
     assert rows[0]["rsid"] == "."
 

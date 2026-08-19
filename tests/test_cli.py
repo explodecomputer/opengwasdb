@@ -83,10 +83,10 @@ def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
     assert phewas.exit_code == 0, phewas.output
     lines = phewas.output.strip("\n").split("\n")
     header, *rows = [line.split("\t") for line in lines]
-    # rsid is opt-in (--rsid), not part of the default columns (issue #104
-    # follow-up): it's the one identity field that still needs a
-    # variants.tsv.gz lookup, so it's the one thing a caller pays for only
-    # when they ask for it.
+    # rsid is opt-in (--variant-info), not part of the default columns
+    # (issue #104 follow-up): it's the one identity field that still needs
+    # a variants.tsv.gz lookup, so it's the one thing a caller pays for
+    # only when they ask for it.
     assert header == [
         "analysis_id", "analysis_label", "chromosome", "position", "alid",
         "effect_allele", "other_allele", "z", "se", "p", "association_status",
@@ -112,7 +112,7 @@ def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
     assert all(len(line.split("\t")) == 11 for line in range_lines)
 
 
-def test_cli_query_rsid_flag_adds_rsid_column(tmp_path, source_path):
+def test_cli_query_variant_info_flag_adds_rsid_column(tmp_path, source_path):
     runner = CliRunner()
     store_path = tmp_path / "cli-store.opengwasdb"
     build = runner.invoke(
@@ -124,13 +124,13 @@ def test_cli_query_rsid_flag_adds_rsid_column(tmp_path, source_path):
     )
     assert build.exit_code == 0, build.output
 
-    without_rsid = runner.invoke(app, ["query-phewas", str(store_path), "rs1"])
-    assert without_rsid.exit_code == 0, without_rsid.output
-    assert "rsid" not in without_rsid.output.splitlines()[0].split("\t")
+    without_it = runner.invoke(app, ["query-phewas", str(store_path), "rs1"])
+    assert without_it.exit_code == 0, without_it.output
+    assert "rsid" not in without_it.output.splitlines()[0].split("\t")
 
-    with_rsid = runner.invoke(app, ["query-phewas", str(store_path), "rs1", "--rsid"])
-    assert with_rsid.exit_code == 0, with_rsid.output
-    header, *rows = [line.split("\t") for line in with_rsid.output.strip("\n").split("\n")]
+    with_it = runner.invoke(app, ["query-phewas", str(store_path), "rs1", "--variant-info"])
+    assert with_it.exit_code == 0, with_it.output
+    header, *rows = [line.split("\t") for line in with_it.output.strip("\n").split("\n")]
     assert header == [
         "analysis_id", "analysis_label", "rsid", "chromosome", "position", "alid",
         "effect_allele", "other_allele", "z", "se", "p", "association_status",
