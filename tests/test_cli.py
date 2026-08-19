@@ -83,8 +83,12 @@ def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
     assert phewas.exit_code == 0, phewas.output
     lines = phewas.output.strip("\n").split("\n")
     header, *rows = [line.split("\t") for line in lines]
+    # rsid is opt-in (--rsid), not part of the default columns (issue #104
+    # follow-up): it's the one identity field that still needs a
+    # variants.tsv.gz lookup, so it's the one thing a caller pays for only
+    # when they ask for it.
     assert header == [
-        "analysis_id", "analysis_label", "rsid", "chromosome", "position", "alid",
+        "analysis_id", "analysis_label", "chromosome", "position", "alid",
         "effect_allele", "other_allele", "z", "se", "p", "association_status",
     ]
     assert len(rows) == 2
@@ -92,12 +96,11 @@ def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
     assert set(by_analysis) == {"a1", "a2"}
     a1_row = by_analysis["a1"]
     assert a1_row[1] == "Height primary"  # analysis_label
-    assert a1_row[2] == "rs1"  # rsid
-    assert a1_row[3] == "1"  # chromosome
-    assert a1_row[4] == "100"  # position
-    assert a1_row[8] == "2"  # z
-    assert a1_row[11] == "observed"  # association_status
-    assert float(a1_row[10]) < 0.05  # p, parseable and plausible
+    assert a1_row[2] == "1"  # chromosome
+    assert a1_row[3] == "100"  # position
+    assert a1_row[7] == "2"  # z
+    assert a1_row[10] == "observed"  # association_status
+    assert float(a1_row[9]) < 0.05  # p, parseable and plausible
 
     # An explicit --format tsv is equivalent to the default.
     explicit = runner.invoke(app, ["query-phewas", str(store_path), "rs1", "--format", "tsv"])
@@ -106,7 +109,33 @@ def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
     range_query = runner.invoke(app, ["query-range-phewas", str(store_path), "1", "1", "500"])
     assert range_query.exit_code == 0, range_query.output
     range_lines = range_query.output.strip("\n").split("\n")
-    assert all(len(line.split("\t")) == 12 for line in range_lines)
+    assert all(len(line.split("\t")) == 11 for line in range_lines)
+
+
+def test_cli_query_rsid_flag_adds_rsid_column(tmp_path, source_path):
+    runner = CliRunner()
+    store_path = tmp_path / "cli-store.opengwasdb"
+    build = runner.invoke(
+        app,
+        [
+            "build-dense", str(source_path), str(store_path),
+            "--store-id", "cli-fixture", "--release-id", "observed-v1",
+        ],
+    )
+    assert build.exit_code == 0, build.output
+
+    without_rsid = runner.invoke(app, ["query-phewas", str(store_path), "rs1"])
+    assert without_rsid.exit_code == 0, without_rsid.output
+    assert "rsid" not in without_rsid.output.splitlines()[0].split("\t")
+
+    with_rsid = runner.invoke(app, ["query-phewas", str(store_path), "rs1", "--rsid"])
+    assert with_rsid.exit_code == 0, with_rsid.output
+    header, *rows = [line.split("\t") for line in with_rsid.output.strip("\n").split("\n")]
+    assert header == [
+        "analysis_id", "analysis_label", "rsid", "chromosome", "position", "alid",
+        "effect_allele", "other_allele", "z", "se", "p", "association_status",
+    ]
+    assert all(row[2] == "rs1" for row in rows)
 
 
 def test_cli_regenerate_overview_rewrites_from_persisted_data_only(tmp_path, source_path):

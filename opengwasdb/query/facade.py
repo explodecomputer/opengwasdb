@@ -210,10 +210,12 @@ class StoreQuery:
         """Return all analyses keyed by analysis_index -- every analyses.tsv column."""
         return self._analyses.all()
 
-    def resolve(self, result: dict[str, np.ndarray]) -> Iterator[dict[str, object]]:
+    def resolve(
+        self, result: dict[str, np.ndarray], *, include_rsid: bool = False
+    ) -> Iterator[dict[str, object]]:
         """Resolve a raw (index-keyed) result to human-readable rows (issue #104);
         see `opengwasdb.query.resolve.resolve_rows`."""
-        return resolve_rows(self._analyses, self._variant_axis, result)
+        return resolve_rows(self._analyses, self._variant_axis, result, include_rsid=include_rsid)
 
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """Return all finite associations for one analysis."""
@@ -528,10 +530,12 @@ class RaggedStoreQuery:
         """
         return self._analyses.all()
 
-    def resolve(self, result: dict[str, np.ndarray]) -> Iterator[dict[str, object]]:
+    def resolve(
+        self, result: dict[str, np.ndarray], *, include_rsid: bool = False
+    ) -> Iterator[dict[str, object]]:
         """Resolve a raw (index-keyed) result to human-readable rows (issue #104);
         see `opengwasdb.query.resolve.resolve_rows`."""
-        return resolve_rows(self._analyses, self._variant_axis, result)
+        return resolve_rows(self._analyses, self._variant_axis, result, include_rsid=include_rsid)
 
     def _get_imputed_slice(self, start: int, end: int) -> np.ndarray:
         """Return imputed mask slice [start:end]; all-zeros if not a completed store."""
@@ -940,13 +944,15 @@ class HybridStoreQuery:
     def analyses_table(self) -> dict[int, dict]:
         return self._dense.analyses_table()
 
-    def resolve(self, result: dict[str, np.ndarray]) -> Iterator[dict[str, object]]:
+    def resolve(
+        self, result: dict[str, np.ndarray], *, include_rsid: bool = False
+    ) -> Iterator[dict[str, object]]:
         """Resolve a raw (index-keyed) result to human-readable rows (issue #104);
         see `opengwasdb.query.resolve.resolve_rows`. Uses the shared
         analyses/variant tables (not the Dense Component's panel-local
         ones), matching the shared `variant_index` space `resolve()`'s
         results are already remapped into."""
-        return resolve_rows(self._analyses, self._variant_axis, result)
+        return resolve_rows(self._analyses, self._variant_axis, result, include_rsid=include_rsid)
 
     # ── Rho Matrix (ADR 0025, Dense-only artifact) ───────────────────────────
     # Delegated to the Dense Component: Rho is opt-in, built against a Dense

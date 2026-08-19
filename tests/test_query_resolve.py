@@ -39,7 +39,10 @@ def test_store_query_resolve_joins_variant_and_analysis_identity(dense_store_pat
 
     assert [r["analysis_id"] for r in rows] == ["a1", "a2"]
     assert [r["analysis_label"] for r in rows] == ["Height primary", "Disease primary"]
-    assert all(r["rsid"] == "rs1" for r in rows)
+    # rsid is the one identity field not derivable from the alid alone, and is
+    # the expensive part of this join at scale -- omitted from the row
+    # entirely unless a caller opts in (issue #104 follow-up).
+    assert all("rsid" not in r for r in rows)
     assert all(r["chromosome"] == "1" for r in rows)
     assert all(r["position"] == 100 for r in rows)
     assert [round(r["z"], 3) for r in rows] == [2.0, 6.0]
@@ -49,6 +52,13 @@ def test_store_query_resolve_joins_variant_and_analysis_identity(dense_store_pat
     for r in rows:
         expected_p = 2.0 * (1.0 - _norm_cdf(abs(r["z"])))
         assert math.isclose(10.0 ** r["log10_p"], expected_p, rel_tol=1e-3)
+
+
+def test_store_query_resolve_include_rsid(dense_store_path):
+    with query_store(dense_store_path) as query:
+        result = query.phewas("rs1")
+        rows = sorted(query.resolve(result, include_rsid=True), key=lambda r: r["analysis_id"])
+    assert all(r["rsid"] == "rs1" for r in rows)
 
 
 def test_store_query_resolve_is_empty_for_empty_result(dense_store_path):
@@ -92,7 +102,7 @@ def rsid_gap_store_path(tmp_path):
 def test_resolve_rsid_placeholder_when_store_has_none(rsid_gap_store_path):
     with query_store(rsid_gap_store_path) as query:
         result = query.analysis("a1")
-        rows = list(query.resolve(result))
+        rows = list(query.resolve(result, include_rsid=True))
     assert len(rows) == 1
     assert rows[0]["rsid"] == "."
 

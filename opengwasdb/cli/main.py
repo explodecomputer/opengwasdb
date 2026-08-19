@@ -731,16 +731,28 @@ _FORMAT_OPTION = typer.Option(
     "--format",
     help="tsv (default): resolved, human-readable rows. json: the raw index-keyed result.",
 )
+_RSID_OPTION = typer.Option(
+    False,
+    "--rsid",
+    help=(
+        "Include the rsid column in tsv output. Off by default: rsid is the one "
+        "identity field not derivable from the alid, so including it costs an "
+        "extra variants.tsv.gz lookup that can dominate query time on a large result."
+    ),
+)
 
 
 @app.command("query-phewas")
 def query_phewas_command(
-    store_path: Path, identifier: str, output_format: OutputFormat = _FORMAT_OPTION
+    store_path: Path,
+    identifier: str,
+    output_format: OutputFormat = _FORMAT_OPTION,
+    include_rsid: bool = _RSID_OPTION,
 ) -> None:
     """Extract one variant across all analyses (PheWAS)."""
 
     query = query_store(store_path)
-    _emit(query, query.phewas(identifier), output_format)
+    _emit(query, query.phewas(identifier), output_format, include_rsid)
 
 
 @app.command("query-range-phewas")
@@ -750,21 +762,25 @@ def query_range_phewas_command(
     start: int,
     end: int,
     output_format: OutputFormat = _FORMAT_OPTION,
+    include_rsid: bool = _RSID_OPTION,
 ) -> None:
     """Regional PheWAS: all variants in a genomic range across all analyses."""
 
     query = query_store(store_path)
-    _emit(query, query.range_phewas(chromosome, start, end), output_format)
+    _emit(query, query.range_phewas(chromosome, start, end), output_format, include_rsid)
 
 
 @app.command("query-analysis")
 def query_analysis_command(
-    store_path: Path, analysis_id: str, output_format: OutputFormat = _FORMAT_OPTION
+    store_path: Path,
+    analysis_id: str,
+    output_format: OutputFormat = _FORMAT_OPTION,
+    include_rsid: bool = _RSID_OPTION,
 ) -> None:
     """Extract all finite associations for one analysis."""
 
     query = query_store(store_path)
-    _emit(query, query.analysis(analysis_id), output_format)
+    _emit(query, query.analysis(analysis_id), output_format, include_rsid)
 
 
 @app.command("query-lookup")
@@ -773,6 +789,7 @@ def query_lookup_command(
     identifiers: str,
     analysis_ids: str,
     output_format: OutputFormat = _FORMAT_OPTION,
+    include_rsid: bool = _RSID_OPTION,
 ) -> None:
     """Query comma-separated variants against comma-separated analyses."""
 
@@ -781,7 +798,7 @@ def query_lookup_command(
         [item for item in identifiers.split(",") if item],
         [item for item in analysis_ids.split(",") if item],
     )
-    _emit(query, result, output_format)
+    _emit(query, result, output_format, include_rsid)
 
 
 @app.command("query-top-hits")
@@ -790,21 +807,27 @@ def query_top_hits_command(
     threshold: float = typer.Option(5e-8),
     limit: int | None = typer.Option(None),
     output_format: OutputFormat = _FORMAT_OPTION,
+    include_rsid: bool = _RSID_OPTION,
 ) -> None:
     """Return ranked top-hit associations."""
 
     query = query_store(store_path)
-    _emit(query, query.top_hits(threshold=threshold, limit=limit), output_format)
+    _emit(query, query.top_hits(threshold=threshold, limit=limit), output_format, include_rsid)
 
 
 QueryFacade = StoreQuery | RaggedStoreQuery | HybridStoreQuery
 
 
-def _emit(query: QueryFacade, result: dict[str, np.ndarray], output_format: OutputFormat) -> None:
+def _emit(
+    query: QueryFacade,
+    result: dict[str, np.ndarray],
+    output_format: OutputFormat,
+    include_rsid: bool,
+) -> None:
     if output_format is OutputFormat.json:
         _emit_json(result)
     else:
-        _emit_tsv(query, result)
+        _emit_tsv(query, result, include_rsid)
 
 
 def _emit_json(result: dict[str, np.ndarray]) -> None:
@@ -827,6 +850,19 @@ def _emit_json(result: dict[str, np.ndarray]) -> None:
 
 
 _TSV_COLUMNS = (
+    "analysis_id",
+    "analysis_label",
+    "chromosome",
+    "position",
+    "alid",
+    "effect_allele",
+    "other_allele",
+    "z",
+    "se",
+    "p",
+    "association_status",
+)
+_TSV_COLUMNS_WITH_RSID = (
     "analysis_id",
     "analysis_label",
     "rsid",
@@ -854,28 +890,29 @@ def _format_p(log10_p: float) -> str:
     return f"{10.0 ** log10_p:.3g}"
 
 
-def _emit_tsv(query: QueryFacade, result: dict[str, np.ndarray]) -> None:
+def _emit_tsv(query: QueryFacade, result: dict[str, np.ndarray], include_rsid: bool) -> None:
     # query.resolve() writes each output row lazily as this loop consumes it
     # rather than building a Python list/string of the whole formatted table
-    # up front -- but it does build its own variant/analysis lookup tables
-    # eagerly (see VariantAxis.by_indices()'s docstring on why that's the
-    # faster choice once a query touches a large share of the store).
+    # up front. rsid is the one identity field not derivable from the alid
+    # (VariantAxis.identity_by_indices()), so it's the only part of this
+    # join that still needs a variants.tsv.gz lookup -- resolve() only pays
+    # for it when include_rsid is set (issue #104 follow-up).
     writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
-    writer.writerow(_TSV_COLUMNS)
-    for row in query.resolve(result):
-        writer.writerow(
-            [
-                row["analysis_id"],
-                row["analysis_label"],
-                row["rsid"],
-                row["chromosome"],
-                row["position"],
-                row["alid"],
-                row["effect_allele"],
-                row["other_allele"],
-                f"{row['z']:.6g}",
-                f"{row['se']:.6g}",
-                _format_p(cast(float, row["log10_p"])),
-                row["association_status"],
-            ]
-        )
+    writer.writerow(_TSV_COLUMNS_WITH_RSID if include_rsid else _TSV_COLUMNS)
+    for row in query.resolve(result, include_rsid=include_rsid):
+        fields = [
+            row["analysis_id"],
+            row["analysis_label"],
+            row["chromosome"],
+            row["position"],
+            row["alid"],
+            row["effect_allele"],
+            row["other_allele"],
+            f"{row['z']:.6g}",
+            f"{row['se']:.6g}",
+            _format_p(cast(float, row["log10_p"])),
+            row["association_status"],
+        ]
+        if include_rsid:
+            fields.insert(2, row["rsid"])
+        writer.writerow(fields)
