@@ -88,9 +88,22 @@ pytest = ">=8"
 ruff = ">=0.6"
 mypy = ">=1.10"
 
+# Separate from dev: rendering docs/benchmark-output/*.qmd needs Quarto's
+# Jupyter engine (pyyaml, a Jupyter kernel) and matplotlib for the plotting
+# cells, none of which contributors running only tests/lint need to install.
+[tool.pixi.feature.report.dependencies]
+pyyaml = "*"
+matplotlib = ">=3.8"
+ipykernel = "*"
+jupyter_client = "*"
+nbclient = "*"
+nbformat = "*"
+quarto = "*"
+
 [tool.pixi.environments]
 default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
+report = { features = ["report"], solve-group = "default" }
 
 [tool.pixi.feature.dev.tasks]
 test = "pytest"
