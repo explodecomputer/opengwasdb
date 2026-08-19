@@ -855,9 +855,11 @@ def _format_p(log10_p: float) -> str:
 
 
 def _emit_tsv(query: QueryFacade, result: dict[str, np.ndarray]) -> None:
-    # Streams rows out one at a time (query.resolve() is a generator) rather
-    # than materialising the resolved table -- query-analysis on a dense
-    # store can return millions of rows (issue #104).
+    # query.resolve() writes each output row lazily as this loop consumes it
+    # rather than building a Python list/string of the whole formatted table
+    # up front -- but it does build its own variant/analysis lookup tables
+    # eagerly (see VariantAxis.by_indices()'s docstring on why that's the
+    # faster choice once a query touches a large share of the store).
     writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
     writer.writerow(_TSV_COLUMNS)
     for row in query.resolve(result):

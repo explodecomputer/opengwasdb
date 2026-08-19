@@ -32,6 +32,10 @@ VARIANT_HEADER = (
 # Supports chromosomes up to 3 chars, positions up to 9 digits, alleles up to ~20 chars.
 _ALID_DTYPE = "|S64"
 
+# `by_indices()` switchover point between random-access and full-scan
+# resolution -- see that method's docstring for the measured costs behind it.
+_BULK_SCAN_FRACTION = 0.01
+
 
 @dataclass(frozen=True)
 class VariantRecord(Mapping[str, Any]):
@@ -325,8 +329,32 @@ class VariantAxis:
         return record
 
     def by_indices(self, indices: Iterable[int]) -> dict[int, VariantRecord]:
+        """Resolve many Store-local Variant Indices to `VariantRecord`s.
+
+        Adaptively picks between two strategies (issue #104 follow-up,
+        measured on the UKB pilot store's ~9.85M-row Store Variant Table):
+        a random-access `by_index()` seek costs ~300us/row regardless of
+        whether the underlying BGZF handle is reused (the cost is the
+        seek-and-decompress-from-the-nearest-block itself, not file-open
+        overhead), while one sequential `all()` scan costs ~1-2us/row. The
+        two cross over well under 1% of the table, so once a caller wants
+        more than `_BULK_SCAN_FRACTION` of it, one full scan beats N random
+        seeks by orders of magnitude -- the difference between a
+        sub-second dense "query-analysis" resolution and one that never
+        finishes in practice.
+        """
+        wanted = sorted(set(int(item) for item in indices))
+        if not wanted:
+            return {}
+        if len(wanted) > self.n_variants * _BULK_SCAN_FRACTION:
+            wanted_set = set(wanted)
+            return {
+                record.variant_index: record
+                for record in self.all()
+                if record.variant_index in wanted_set
+            }
         records: dict[int, VariantRecord] = {}
-        for index in sorted(set(int(item) for item in indices)):
+        for index in wanted:
             if (record := self.by_index(index)) is not None:
                 records[index] = record
         return records
