@@ -65,6 +65,7 @@ Ragged/molecular-QTL releases populate.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +77,7 @@ from opengwasdb.layouts.dense.top_hits import DenseTopHitReader, threshold_key
 from opengwasdb.layouts.hybrid.layout import dense_component_path, dense_to_shared_path
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
 from opengwasdb.model.enums import CompletionState, PrimaryStorageLayout
+from opengwasdb.query.resolve import resolve_rows
 from opengwasdb.store.open import OpenGWASDBStore, open_store
 from opengwasdb.variants import VariantAxis
 
@@ -207,6 +209,11 @@ class StoreQuery:
     def analyses_table(self) -> dict[int, dict]:
         """Return all analyses keyed by analysis_index -- every analyses.tsv column."""
         return self._analyses.all()
+
+    def resolve(self, result: dict[str, np.ndarray]) -> Iterator[dict[str, object]]:
+        """Resolve a raw (index-keyed) result to human-readable rows (issue #104);
+        see `opengwasdb.query.resolve.resolve_rows`."""
+        return resolve_rows(self._analyses, self._variant_axis, result)
 
     def analysis(self, analysis_id: str, *, observed_only: bool = False) -> dict[str, np.ndarray]:
         """Return all finite associations for one analysis."""
@@ -520,6 +527,11 @@ class RaggedStoreQuery:
         lookup.
         """
         return self._analyses.all()
+
+    def resolve(self, result: dict[str, np.ndarray]) -> Iterator[dict[str, object]]:
+        """Resolve a raw (index-keyed) result to human-readable rows (issue #104);
+        see `opengwasdb.query.resolve.resolve_rows`."""
+        return resolve_rows(self._analyses, self._variant_axis, result)
 
     def _get_imputed_slice(self, start: int, end: int) -> np.ndarray:
         """Return imputed mask slice [start:end]; all-zeros if not a completed store."""
@@ -927,6 +939,14 @@ class HybridStoreQuery:
     # ── shared-table tables ──────────────────────────────────────────────────
     def analyses_table(self) -> dict[int, dict]:
         return self._dense.analyses_table()
+
+    def resolve(self, result: dict[str, np.ndarray]) -> Iterator[dict[str, object]]:
+        """Resolve a raw (index-keyed) result to human-readable rows (issue #104);
+        see `opengwasdb.query.resolve.resolve_rows`. Uses the shared
+        analyses/variant tables (not the Dense Component's panel-local
+        ones), matching the shared `variant_index` space `resolve()`'s
+        results are already remapped into."""
+        return resolve_rows(self._analyses, self._variant_axis, result)
 
     # ── Rho Matrix (ADR 0025, Dense-only artifact) ───────────────────────────
     # Delegated to the Dense Component: Rho is opt-in, built against a Dense

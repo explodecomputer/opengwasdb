@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import json
+import math
 
 from typer.testing import CliRunner
 
-from opengwasdb.cli.main import app
+from opengwasdb.cli.main import _format_p, app
+
+
+def test_format_p_underflow_and_nan():
+    # Ordinary p, e.g. p=0.05 -> log10(p) ~= -1.301.
+    assert _format_p(math.log10(0.05)) == "0.05"
+    # Past float64's own representable range (issue #104: FADS1/FADS2 reaches
+    # |z|=47.8), an explicit sentinel replaces a silent 0.
+    assert _format_p(-320.0) == "<1e-300"
+    assert _format_p(math.nan) == "NA"
 
 
 def test_cli_build_validate_info_and_query_workflow(tmp_path, source_path):
@@ -35,23 +45,68 @@ def test_cli_build_validate_info_and_query_workflow(tmp_path, source_path):
     assert "store_id: cli-fixture" in info.output
     assert "primary_layout: dense" in info.output
 
-    phewas = runner.invoke(app, ["query-phewas", str(store_path), "rs1"])
+    phewas = runner.invoke(app, ["query-phewas", str(store_path), "rs1", "--format", "json"])
     assert phewas.exit_code == 0, phewas.output
     phewas_rows = json.loads(phewas.output)
     assert sorted(r["analysis_index"] for r in phewas_rows) == [0, 1]
+    # json format is unchanged -- no resolved/human-readable fields.
+    assert set(phewas_rows[0]) == {"variant_index", "analysis_index", "z", "se"}
 
-    range_query = runner.invoke(app, ["query-range-phewas", str(store_path), "1", "150", "350"])
+    range_query = runner.invoke(app, ["query-range-phewas", str(store_path), "1", "150", "350",
+                                       "--format", "json"])
     assert range_query.exit_code == 0, range_query.output
     range_rows = json.loads(range_query.output)
     assert len(range_rows) == 2
 
-    analysis = runner.invoke(app, ["query-analysis", str(store_path), "a1"])
+    analysis = runner.invoke(app, ["query-analysis", str(store_path), "a1", "--format", "json"])
     assert analysis.exit_code == 0, analysis.output
     assert len(json.loads(analysis.output)) == 2
 
-    top_hits = runner.invoke(app, ["query-top-hits", str(store_path)])
+    top_hits = runner.invoke(app, ["query-top-hits", str(store_path), "--format", "json"])
     assert top_hits.exit_code == 0, top_hits.output
     assert [row["z"] for row in json.loads(top_hits.output)] == [6.0, 6.0]
+
+
+def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
+    runner = CliRunner()
+    store_path = tmp_path / "cli-store.opengwasdb"
+    build = runner.invoke(
+        app,
+        [
+            "build-dense", str(source_path), str(store_path),
+            "--store-id", "cli-fixture", "--release-id", "observed-v1",
+        ],
+    )
+    assert build.exit_code == 0, build.output
+
+    phewas = runner.invoke(app, ["query-phewas", str(store_path), "rs1"])
+    assert phewas.exit_code == 0, phewas.output
+    lines = phewas.output.strip("\n").split("\n")
+    header, *rows = [line.split("\t") for line in lines]
+    assert header == [
+        "analysis_id", "analysis_label", "rsid", "chromosome", "position", "alid",
+        "effect_allele", "other_allele", "z", "se", "p", "association_status",
+    ]
+    assert len(rows) == 2
+    by_analysis = {row[0]: row for row in rows}
+    assert set(by_analysis) == {"a1", "a2"}
+    a1_row = by_analysis["a1"]
+    assert a1_row[1] == "Height primary"  # analysis_label
+    assert a1_row[2] == "rs1"  # rsid
+    assert a1_row[3] == "1"  # chromosome
+    assert a1_row[4] == "100"  # position
+    assert a1_row[8] == "2"  # z
+    assert a1_row[11] == "observed"  # association_status
+    assert float(a1_row[10]) < 0.05  # p, parseable and plausible
+
+    # An explicit --format tsv is equivalent to the default.
+    explicit = runner.invoke(app, ["query-phewas", str(store_path), "rs1", "--format", "tsv"])
+    assert explicit.output == phewas.output
+
+    range_query = runner.invoke(app, ["query-range-phewas", str(store_path), "1", "1", "500"])
+    assert range_query.exit_code == 0, range_query.output
+    range_lines = range_query.output.strip("\n").split("\n")
+    assert all(len(line.split("\t")) == 12 for line in range_lines)
 
 
 def test_cli_regenerate_overview_rewrites_from_persisted_data_only(tmp_path, source_path):
@@ -145,7 +200,7 @@ def test_cli_build_hybrid_validate_and_query(tmp_path):
 
     # Off-panel variant is served from the overflow.
     lookup = runner.invoke(
-        app, ["query-lookup", str(store), "1:1064620:C:T", "trait_a"]
+        app, ["query-lookup", str(store), "1:1064620:C:T", "trait_a", "--format", "json"]
     )
     assert lookup.exit_code == 0, lookup.output
     assert len(json.loads(lookup.output.strip().splitlines()[-1])) == 1

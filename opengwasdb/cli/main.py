@@ -1,8 +1,13 @@
 """OpenGWASDB command line interface."""
 
+import csv
 import json
 import logging
+import math
+import sys
+from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import typer
@@ -33,6 +38,7 @@ from opengwasdb.layouts.ragged.complete import complete_ragged_store
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.model.analyses import read_analyses
 from opengwasdb.query import query_store
+from opengwasdb.query.facade import HybridStoreQuery, RaggedStoreQuery, StoreQuery
 from opengwasdb.store import open_store
 from opengwasdb.validation import validate_store
 
@@ -43,6 +49,13 @@ logging.basicConfig(
 )
 
 app = typer.Typer(no_args_is_help=True)
+
+
+class OutputFormat(StrEnum):
+    """--format for the query-* commands (issue #104)."""
+
+    tsv = "tsv"
+    json = "json"
 
 
 @app.command()
@@ -713,11 +726,21 @@ def regenerate_overview_command(store_path: Path) -> None:
     typer.echo(f"wrote {out_path}")
 
 
+_FORMAT_OPTION = typer.Option(
+    OutputFormat.tsv,
+    "--format",
+    help="tsv (default): resolved, human-readable rows. json: the raw index-keyed result.",
+)
+
+
 @app.command("query-phewas")
-def query_phewas_command(store_path: Path, identifier: str) -> None:
+def query_phewas_command(
+    store_path: Path, identifier: str, output_format: OutputFormat = _FORMAT_OPTION
+) -> None:
     """Extract one variant across all analyses (PheWAS)."""
 
-    _emit_results(query_store(store_path).phewas(identifier))
+    query = query_store(store_path)
+    _emit(query, query.phewas(identifier), output_format)
 
 
 @app.command("query-range-phewas")
@@ -726,29 +749,39 @@ def query_range_phewas_command(
     chromosome: str,
     start: int,
     end: int,
+    output_format: OutputFormat = _FORMAT_OPTION,
 ) -> None:
     """Regional PheWAS: all variants in a genomic range across all analyses."""
 
-    _emit_results(query_store(store_path).range_phewas(chromosome, start, end))
+    query = query_store(store_path)
+    _emit(query, query.range_phewas(chromosome, start, end), output_format)
 
 
 @app.command("query-analysis")
-def query_analysis_command(store_path: Path, analysis_id: str) -> None:
+def query_analysis_command(
+    store_path: Path, analysis_id: str, output_format: OutputFormat = _FORMAT_OPTION
+) -> None:
     """Extract all finite associations for one analysis."""
 
-    _emit_results(query_store(store_path).analysis(analysis_id))
+    query = query_store(store_path)
+    _emit(query, query.analysis(analysis_id), output_format)
 
 
 @app.command("query-lookup")
-def query_lookup_command(store_path: Path, identifiers: str, analysis_ids: str) -> None:
+def query_lookup_command(
+    store_path: Path,
+    identifiers: str,
+    analysis_ids: str,
+    output_format: OutputFormat = _FORMAT_OPTION,
+) -> None:
     """Query comma-separated variants against comma-separated analyses."""
 
-    _emit_results(
-        query_store(store_path).lookup(
-            [item for item in identifiers.split(",") if item],
-            [item for item in analysis_ids.split(",") if item],
-        )
+    query = query_store(store_path)
+    result = query.lookup(
+        [item for item in identifiers.split(",") if item],
+        [item for item in analysis_ids.split(",") if item],
     )
+    _emit(query, result, output_format)
 
 
 @app.command("query-top-hits")
@@ -756,13 +789,25 @@ def query_top_hits_command(
     store_path: Path,
     threshold: float = typer.Option(5e-8),
     limit: int | None = typer.Option(None),
+    output_format: OutputFormat = _FORMAT_OPTION,
 ) -> None:
     """Return ranked top-hit associations."""
 
-    _emit_results(query_store(store_path).top_hits(threshold=threshold, limit=limit))
+    query = query_store(store_path)
+    _emit(query, query.top_hits(threshold=threshold, limit=limit), output_format)
 
 
-def _emit_results(result: dict[str, np.ndarray]) -> None:
+QueryFacade = StoreQuery | RaggedStoreQuery | HybridStoreQuery
+
+
+def _emit(query: QueryFacade, result: dict[str, np.ndarray], output_format: OutputFormat) -> None:
+    if output_format is OutputFormat.json:
+        _emit_json(result)
+    else:
+        _emit_tsv(query, result)
+
+
+def _emit_json(result: dict[str, np.ndarray]) -> None:
     rows = [
         {
             "variant_index": int(vi),
@@ -779,3 +824,56 @@ def _emit_results(result: dict[str, np.ndarray]) -> None:
         )
     ]
     typer.echo(json.dumps(rows, sort_keys=True))
+
+
+_TSV_COLUMNS = (
+    "analysis_id",
+    "analysis_label",
+    "rsid",
+    "chromosome",
+    "position",
+    "alid",
+    "effect_allele",
+    "other_allele",
+    "z",
+    "se",
+    "p",
+    "association_status",
+)
+
+
+def _format_p(log10_p: float) -> str:
+    """Two-sided p as a compact display string. Past the point float64 can no
+    longer represent the value (|z| >~ 39; the FADS1/FADS2 window reaches
+    |z| = 47.8) an explicit ``<1e-300`` is printed instead of a silent 0
+    (issue #104)."""
+    if math.isnan(log10_p):
+        return "NA"
+    if log10_p < -300:
+        return "<1e-300"
+    return f"{10.0 ** log10_p:.3g}"
+
+
+def _emit_tsv(query: QueryFacade, result: dict[str, np.ndarray]) -> None:
+    # Streams rows out one at a time (query.resolve() is a generator) rather
+    # than materialising the resolved table -- query-analysis on a dense
+    # store can return millions of rows (issue #104).
+    writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
+    writer.writerow(_TSV_COLUMNS)
+    for row in query.resolve(result):
+        writer.writerow(
+            [
+                row["analysis_id"],
+                row["analysis_label"],
+                row["rsid"],
+                row["chromosome"],
+                row["position"],
+                row["alid"],
+                row["effect_allele"],
+                row["other_allele"],
+                f"{row['z']:.6g}",
+                f"{row['se']:.6g}",
+                _format_p(cast(float, row["log10_p"])),
+                row["association_status"],
+            ]
+        )
