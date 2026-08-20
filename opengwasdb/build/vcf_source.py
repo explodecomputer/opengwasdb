@@ -14,6 +14,7 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
+from opengwasdb.stats import parse_af
 from opengwasdb.variants.normalise import normalise_chromosome
 
 log = logging.getLogger(__name__)
@@ -119,7 +120,7 @@ def stream_vcf_associations(
             if len(parts) != n_fields:
                 continue
             chrom_raw, pos_str, ref, alt, ez_str, es_str, se_str = parts[:7]
-            af = _parse_af(parts[7]) if with_af else None
+            af = parse_af(parts[7]) if with_af else None
             if "," in alt:
                 continue
 
@@ -142,11 +143,6 @@ def stream_vcf_associations(
     finally:
         proc.stdout.close()  # type: ignore[union-attr]
         proc.wait()
-
-
-def _parse_af(s: str) -> float | None:
-    af = _parse_float(s)
-    return af if af is not None and 0.0 <= af <= 1.0 else None
 
 
 def _parse_float(s: str) -> float | None:

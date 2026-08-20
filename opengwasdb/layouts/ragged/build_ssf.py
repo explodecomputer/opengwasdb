@@ -38,6 +38,7 @@ from opengwasdb.model.enums import (
     StoredEffectScale,
 )
 from opengwasdb.model.manifest import StoreManifest
+from opengwasdb.stats import parse_af
 from opengwasdb.store.open import CURRENT_FORMAT_VERSION, OpenGWASDBStore, StagedRelease
 from opengwasdb.variants.axis import (
     VARIANT_AXIS_FORMAT,
@@ -178,25 +179,12 @@ def _read_filtered(
             # when `rsid` is absent (opengwasdb-stores' download-filter step selects
             # both columns when present).
             rsid = _opt(row.get("rsid")) or _opt(row.get("variant_id"))
-            eaf = _parse_eaf(row.get("effect_allele_frequency"))
+            eaf = parse_af(row.get("effect_allele_frequency"))
             if eaf is not None and ori.flipped:
                 # The column is the frequency of the source's effect allele;
                 # the flip made the *other* allele the stored one (ADR 0036).
                 eaf = 1.0 - eaf
             yield ori.variant, z, se, rsid, eaf
-
-
-def _parse_eaf(value: str | None) -> float | None:
-    """A usable effect allele frequency, or None. Out-of-range and unparseable
-    values are None rather than clamped: a frequency outside [0, 1] is a
-    broken row, not a nearly-right one (ADR 0036)."""
-    if value is None or value.strip() in _MISSING:
-        return None
-    try:
-        eaf = float(value)
-    except ValueError:
-        return None
-    return eaf if np.isfinite(eaf) and 0.0 <= eaf <= 1.0 else None
 
 
 def _dedupe_per_analysis(

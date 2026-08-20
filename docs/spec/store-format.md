@@ -26,6 +26,8 @@ variants.tsv.gz.tbi
 variant_offsets.npy
 variant_alid_bytes.npy
 variant_alid_rows.npy
+variant_rsid_bytes.npy
+variant_rsid_rows.npy
 ```
 
 `manifest.json` identifies the release and declares how to interpret it.
@@ -40,8 +42,14 @@ truth — Ragged releases do not carry one (§11). `data.zarr/` stores compresse
 numerical association arrays and layout-specific numerical indexes. Every
 layout stores its high-cardinality variant axis in `variants.tsv.gz`, indexed
 by `variants.tsv.gz.tbi`, with `variant_offsets.npy` mapping Store-local
-Variant Indices to BGZF row offsets and `variant_alid_bytes.npy`/
-`variant_alid_rows.npy` supporting ALID lookup.
+Variant Indices to BGZF row offsets, `variant_alid_bytes.npy`/
+`variant_alid_rows.npy` supporting ALID lookup, and
+`variant_rsid_bytes.npy`/`variant_rsid_rows.npy` supporting rsid lookup
+(issue #109). The rsid pair is written by every layout and MAY be empty — a
+source that names no variants indexes none — but a release whose
+`variants.tsv.gz` carries rsids and whose index does not is invalid (§20):
+every rsid lookup against such a release returns an empty result
+indistinguishable from a real absence.
 
 This is the complete envelope for a standalone Dense or Ragged Store Release.
 A Hybrid release additionally nests a `dense/` Dense Component directory
@@ -115,6 +123,13 @@ reference_assembly + ALID
 
 `rsid` is an alias, not primary identity.
 
+One rsid MAY name several Store-local Variant Indices — a multi-allelic site,
+or one position stored under both allele orders — so an rsid is not a key.
+Resolution therefore has two contracts (issue #109): an API returning a *set*
+of variants MUST return every row the rsid names, and an API whose contract is
+a single variant MUST resolve to the lowest Store-local Variant Index among
+them. Neither may silently pick an arbitrary one.
+
 Every Store Release assigns compact Store-local Variant Indices. Variant Indices MUST NOT be assumed stable across releases or stores.
 
 Dense Observed-Only releases use a tabix-backed Store Variant Table:
@@ -123,6 +138,10 @@ Dense Observed-Only releases use a tabix-backed Store Variant Table:
 variants.tsv.gz
 variants.tsv.gz.tbi
 variant_offsets.npy
+variant_alid_bytes.npy
+variant_alid_rows.npy
+variant_rsid_bytes.npy
+variant_rsid_rows.npy
 ```
 
 The `variants.tsv.gz` table MUST contain one row per Store-local Variant Index,
@@ -229,6 +248,7 @@ sample_size_scope
 sample_size
 n_cases
 n_controls
+eaf_scope                    (see §9; blank or `absent` when the build stored no EAF)
 original_effect_scale
 original_sd
 original_sd_method
@@ -621,7 +641,9 @@ Validators MUST check at least:
 - top-hit indexes, when present, are consistent with stored Z values;
 - `analyses.tsv` contains exactly one row per Analysis, covering every `analysis_index` referenced by `index.sqlite` (this is the one place SQLite cannot enforce the relationship as a foreign key, since `analyses.tsv` is a separate file);
 - `index.sqlite` does not contain an `analyses` table;
-- `original_sd_method` and `ancestry_assignment_method` values are in their controlled vocabularies (ADR 0029, ADR 0030);
+- `original_sd_method`, `ancestry_assignment_method` and `eaf_scope` values are in their controlled vocabularies (ADR 0029, ADR 0030, ADR 0036);
+- every rsid in the Store Variant Table is resolvable through the rsid search index (§1) — a release that carries rsids it cannot resolve fails silently at query time, so the check is on coverage, not merely presence (issue #109);
+- `eaf`, when present, has the same shape/length as `z`/`se` and holds no finite value outside `[0, 1]` (ADR 0036);
 - the Store Release directory contains no top-level file or directory beyond what its `primary_layout` (and, for Hybrid, its nested Dense Component directory) legitimately produces per §1/§10/§11/§16/§17 — the envelope is closed, not merely a set of required entries (issue #80).
 
 ## 21. Compatibility

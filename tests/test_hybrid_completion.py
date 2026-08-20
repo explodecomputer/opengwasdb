@@ -332,11 +332,13 @@ def test_fold_panel_crossovers_overwrites_an_already_imputed_cell(tmp_path):
     offsets = np.array([0, 1])  # one analysis; one overflow association
     src_z = np.array([-4.0], dtype=np.float32)
     src_se = np.array([0.3], dtype=np.float32)
+    src_eaf = np.array([0.42], dtype=np.float32)
     overflow_alids = np.array([OFF_PANEL_ALID], dtype=object)
     is_crossover = np.array([True])
 
     n_reclaimed = _fold_panel_crossovers(
-        dense_dir, dense_alid_to_row, offsets, src_z, src_se, overflow_alids, is_crossover,
+        dense_dir, dense_alid_to_row, offsets, src_z, src_se, src_eaf,
+        overflow_alids, is_crossover,
     )
 
     assert n_reclaimed == 1
@@ -344,6 +346,10 @@ def test_fold_panel_crossovers_overwrites_an_already_imputed_cell(tmp_path):
     assert float(written["z"][1, 0]) == pytest.approx(-4.0, rel=1e-3)
     assert float(written["se"][1, 0]) == pytest.approx(0.3, rel=1e-3)
     assert int(written["imputed"][1, 0]) == 0
+    # The crossed-over cell's EAF moves with its z/se (ADR 0036); this
+    # fixture's Dense Component has no eaf array, so the fold must leave it
+    # alone rather than fail trying to write one.
+    assert "eaf" not in written
 
 
 def test_rho_delegates_to_dense_component(tmp_path):

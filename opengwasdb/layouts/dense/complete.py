@@ -709,7 +709,7 @@ def _create_completed_zarr(
         chunks=(effective_chunks[0],), compressor=_COMPRESSOR, dtype="uint8",
     )
     if src_has_eaf:
-        # float32, unlike z/se -- see `build_vcf.create_eaf_array` for why
+        # float32, unlike z/se -- see `build_vcf._create_eaf_array` for why
         # float16 cannot hold an EAF near 1 (ADR 0036). Created only when the
         # observed store had one: completion adds panel rows, it does not
         # invent frequencies the source never reported.
@@ -824,7 +824,7 @@ def _write_completed_bands(
     # Pass 3 -- eaf (ADR 0036). Observed frequencies carried across the row
     # remap; imputed cells stay NaN, since the panel EAF is not yet carried
     # through the completion checkpoint. Its own float32 buffer, because eaf
-    # cannot share z/se's float16 (see `build_vcf.create_eaf_array`).
+    # cannot share z/se's float16 (see `build_vcf._create_eaf_array`).
     if "eaf" in root and "eaf" in src_root:
         eaf_arr, src_eaf = root["eaf"], src_root["eaf"]
         eaf_band = np.empty((band_rows, n_analyses), dtype=np.float32)

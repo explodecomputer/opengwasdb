@@ -153,11 +153,58 @@ class RaggedCSRReader:
             eaf=self.eaf_slice(start, end),
         )
 
+    @property
+    def has_eaf(self) -> bool:
+        """Whether this component stores EAF at all (ADR 0036)."""
+        return self._eaf is not None
+
     def eaf_slice(self, start: int, end: int) -> np.ndarray:
         """`eaf[start:end]`, or all-NaN when this store carries no EAF array."""
         if self._eaf is None:
             return np.full(end - start, np.nan, dtype=np.float32)
         return np.asarray(self._eaf[start:end], dtype=np.float32)
+
+    def eaf_at(self, positions: np.ndarray) -> np.ndarray:
+        """EAF at arbitrary flat CSR positions; all-NaN when there is no array.
+
+        For the scanning query paths, which already hold flat positions into
+        the concatenated arrays and would otherwise pay `eaf_pairs`'
+        per-Analysis searchsorted to recover what they already know.
+        """
+        if self._eaf is None:
+            return np.full(len(positions), np.nan, dtype=np.float32)
+        return np.asarray(np.asarray(self._eaf[:], dtype=np.float32)[positions], dtype=np.float32)
+
+    def eaf_pairs(self, variant_index: np.ndarray, analysis_index: np.ndarray) -> np.ndarray:
+        """EAF for elementwise (variant, analysis) pairs (ADR 0036).
+
+        All-NaN when this component stores no `eaf` array -- built before ADR
+        0036, or from sources reporting no frequency. Each Analysis's CSR slice
+        is sorted by variant_index (every builder sorts before writing), so one
+        `searchsorted` per distinct Analysis resolves its pairs; a pair whose
+        variant is absent from that Analysis stays NaN rather than silently
+        taking a neighbour's frequency.
+        """
+        out = np.full(len(variant_index), np.nan, dtype=np.float32)
+        if self._eaf is None or len(variant_index) == 0:
+            return out
+        offsets = self._offsets[:]
+        for ai in np.unique(analysis_index):
+            ai_int = int(ai)
+            if ai_int < 0 or ai_int + 1 >= len(offsets):
+                continue
+            start, end = int(offsets[ai_int]), int(offsets[ai_int + 1])
+            if start == end:
+                continue
+            slot = np.where(analysis_index == ai)[0]
+            slice_vi = np.asarray(self._variant_index[start:end])
+            pos = np.searchsorted(slice_vi, variant_index[slot])
+            in_bounds = pos < len(slice_vi)
+            hit = np.zeros(len(slot), dtype=bool)
+            hit[in_bounds] = slice_vi[pos[in_bounds]] == variant_index[slot][in_bounds]
+            if hit.any():
+                out[slot[hit]] = self.eaf_slice(start, end)[pos[hit]]
+        return out
 
     def get_analyses(self, analysis_indices: list[int]) -> list[AnalysisAssociations]:
         """Return associations for multiple analyses."""

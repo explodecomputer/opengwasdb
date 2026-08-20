@@ -93,41 +93,6 @@ def _empty_result() -> dict[str, np.ndarray]:
     }
 
 
-def _csr_eaf_pairs(
-    csr: RaggedCSRReader, variant_index: np.ndarray, analysis_index: np.ndarray
-) -> np.ndarray:
-    """EAF for elementwise (variant, analysis) pairs from a CSR component.
-
-    All-NaN when the component stores no `eaf` array -- a store built before
-    ADR 0036, or one whose sources reported no frequency. Each Analysis's CSR
-    slice is sorted by variant_index (both Ragged builders sort before
-    writing), so one `searchsorted` per distinct Analysis resolves its pairs;
-    a pair whose variant is absent from that Analysis stays NaN rather than
-    silently taking a neighbour's frequency.
-    """
-    out = np.full(len(variant_index), np.nan, dtype="float32")
-    if csr._eaf is None or len(variant_index) == 0:
-        return out
-    offsets = csr._offsets[:]
-    for ai in np.unique(analysis_index):
-        ai_int = int(ai)
-        if ai_int < 0 or ai_int + 1 >= len(offsets):
-            continue
-        start, end = int(offsets[ai_int]), int(offsets[ai_int + 1])
-        if start == end:
-            continue
-        slot = np.where(analysis_index == ai)[0]
-        slice_vi = np.asarray(csr._variant_index[start:end])
-        pos = np.searchsorted(slice_vi, variant_index[slot])
-        in_bounds = pos < len(slice_vi)
-        hit = np.zeros(len(slot), dtype=bool)
-        hit[in_bounds] = slice_vi[pos[in_bounds]] == variant_index[slot][in_bounds]
-        if hit.any():
-            eaf_slice = csr.eaf_slice(start, end)
-            out[slot[hit]] = eaf_slice[pos[hit]]
-    return out
-
-
 def _status_array(imputed_flags: np.ndarray, z_vals: np.ndarray, se_vals: np.ndarray) -> np.ndarray:
     """Derive association_status strings from imputed mask, z, and se (ADR-0013:
     finite Z and SE means observed/imputed; NaN Z *or* SE means missing)."""
@@ -595,17 +560,6 @@ class RaggedStoreQuery:
             self._analyses, self._variant_axis, result, include_variant_info=include_variant_info
         )
 
-    def _eaf_all(self, positions: np.ndarray) -> np.ndarray:
-        """EAF at arbitrary flat CSR positions (ADR 0036); all-NaN when the
-        store has no `eaf` array. The scanning query paths already hold flat
-        positions into the concatenated arrays, so they index it directly
-        rather than going back through `_csr_eaf_pairs`'s per-Analysis
-        searchsorted."""
-        if self._csr._eaf is None:
-            return np.full(len(positions), np.nan, dtype="float32")
-        eaf_all = np.asarray(self._csr._eaf[:], dtype="float32")
-        return np.asarray(eaf_all[positions], dtype="float32")
-
     def _get_imputed_slice(self, start: int, end: int) -> np.ndarray:
         """Return imputed mask slice [start:end]; all-zeros if not a completed store."""
         if self._imputed is not None:
@@ -683,7 +637,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "eaf": self._eaf_all(hit_positions),
+            "eaf": self._csr.eaf_at(hit_positions),
             "association_status": _status_array(imp, z_out, se_out),
         }
 
@@ -792,7 +746,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "eaf": self._eaf_all(hit_positions),
+            "eaf": self._csr.eaf_at(hit_positions),
             "association_status": _status_array(imp, z_out, se_out),
         }
 
@@ -843,7 +797,7 @@ class RaggedStoreQuery:
                 imp = imp[:limit]
             return {
                 "variant_index": vi, "analysis_index": ai, "z": z, "se": se,
-                "eaf": _csr_eaf_pairs(self._csr, vi, ai),
+                "eaf": self._csr.eaf_pairs(vi, ai),
                 "association_status": _status_array(imp, z, se),
             }
 
@@ -913,7 +867,7 @@ class RaggedStoreQuery:
             "analysis_index": analysis_indices,
             "z": z_out,
             "se": se_out,
-            "eaf": self._eaf_all(hit_positions),
+            "eaf": self._csr.eaf_at(hit_positions),
             "association_status": _status_array(imp_hits, z_out, se_out),
         }
 
@@ -1114,11 +1068,7 @@ class HybridStoreQuery:
         analysis_indices = np.searchsorted(offsets[1:], hits, side="right").astype("int32")
         z = self._csr._z[:][hits].astype("float32")
         se = self._csr._se[:][hits].astype("float32")
-        eaf = (
-            np.asarray(self._csr._eaf[:], dtype="float32")[hits]
-            if self._csr._eaf is not None
-            else np.full(len(hits), np.nan, dtype="float32")
-        )
+        eaf = self._csr.eaf_at(hits)
         return {
             "variant_index": vi_all[hits].astype("int32"),
             "analysis_index": analysis_indices,
@@ -1213,7 +1163,7 @@ class HybridStoreQuery:
             "analysis_index": ai,
             "z": z,
             "se": se,
-            "eaf": _csr_eaf_pairs(self._csr, vi, ai),
+            "eaf": self._csr.eaf_pairs(vi, ai),
             "association_status": _status_array(np.zeros(len(z), dtype=np.uint8), z, se),
         }
 

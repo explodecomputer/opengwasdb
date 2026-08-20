@@ -45,6 +45,20 @@ _ALID_DTYPE = "|S64"
 _RSID_WIDTH = 24
 _RSID_DTYPE = f"|S{_RSID_WIDTH}"
 
+
+def is_indexable_rsid(rsid: str | None) -> bool:
+    """Whether `rsid` can be resolved by name in a store (issue #109).
+
+    The one place the rule lives: `_write_rsid_index` decides what to index by
+    it, `indices_by_alias` decides what is worth searching for by it, and
+    `opengwasdb.validation.validate` counts what it should find by it. Three
+    copies of a width check would be three chances for a correctly-built store
+    to fail its own validator.
+    """
+    if not rsid or rsid == ".":
+        return False
+    return len(rsid.encode("utf-8")) <= _RSID_WIDTH
+
 # `by_indices()` switchover point between random-access and full-scan
 # resolution -- see that method's docstring for the measured costs behind it.
 _BULK_SCAN_FRACTION = 0.01
@@ -226,7 +240,7 @@ def _write_rsid_index(
         rsid = rsid_by_alid.get(variant.alid)
         if not rsid:
             continue
-        if len(rsid.encode("utf-8")) > _RSID_WIDTH:
+        if not is_indexable_rsid(rsid):
             n_too_long += 1
             continue
         rows.append((rsid, index))
@@ -325,11 +339,10 @@ class VariantAxis:
         a row with no rsid is not reachable by asking for one.
         """
         rsid_bytes, rsid_rows = self._rsid_bytes, self._rsid_rows
-        if rsid_bytes is None or rsid_rows is None or not alias or alias == ".":
-            return np.empty(0, dtype="int32")
-        if len(alias.encode("utf-8")) > _RSID_WIDTH:
-            # Never indexed (see `_write_rsid_index`), so a truncated query
-            # could only ever produce a false match.
+        # An identifier too long to encode was never indexed (see
+        # `_write_rsid_index`), so a truncated query could only ever produce a
+        # false match for a different variant.
+        if rsid_bytes is None or rsid_rows is None or not is_indexable_rsid(alias):
             return np.empty(0, dtype="int32")
         query = np.array(alias, dtype=_RSID_DTYPE)
         lo = int(np.searchsorted(rsid_bytes, query, side="left"))

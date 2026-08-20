@@ -357,7 +357,7 @@ def _spill_column(
     rows: np.ndarray,
     z: np.ndarray,
     se: np.ndarray,
-    eaf: np.ndarray | None = None,
+    eaf: np.ndarray,
 ) -> None:
     """Atomically spill one resolved column to ``{spill_dir}/{col_idx}.npz``
     (temp-then-rename; both names end in .npz because np.savez appends that suffix
@@ -368,8 +368,6 @@ def _spill_column(
     query reads back from the ``z`` array (issue 046)."""
     final = spill_dir / f"{col_idx}.npz"
     tmp = spill_dir / f"{col_idx}.tmp.npz"
-    if eaf is None:
-        eaf = np.full(len(rows), np.nan, dtype=np.float32)
     np.savez(tmp, rows=rows, z=z, se=se, eaf=eaf)
     tmp.replace(final)
 
@@ -724,7 +722,7 @@ def build_dense_from_vcf_manifest(
         )
         log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
         write_top_hit_indexes(staged.path, all_rows, all_cols, all_z, all_se)
-        analyses = apply_eaf_scope(analyses, column_has_eaf)
+        analyses = _apply_eaf_scope(analyses, column_has_eaf)
         write_analyses_tsv(staged.path, add_hit_counts(staged.path, analyses))
         log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
 
@@ -921,7 +919,7 @@ def _parse_alid(alid: str) -> tuple[str, int, str, str]:
     return parts[0], int(parts[1]), parts[2], parts[3]
 
 
-def apply_eaf_scope(analyses: list[Analysis], column_has_eaf: np.ndarray) -> list[Analysis]:
+def _apply_eaf_scope(analyses: list[Analysis], column_has_eaf: np.ndarray) -> list[Analysis]:
     """Stamp each Analysis's `eaf_scope` from what the build actually stored.
 
     Derived, never copied from the manifest (ADR 0036): only the build knows
@@ -943,7 +941,7 @@ def apply_eaf_scope(analyses: list[Analysis], column_has_eaf: np.ndarray) -> lis
     ]
 
 
-def create_eaf_array(
+def _create_eaf_array(
     staged: StagedRelease, n_variants: int, n_analyses: int, effective_chunks: tuple[int, int]
 ) -> None:
     """Create the NaN-filled `eaf` array (ADR 0036).
@@ -1075,7 +1073,7 @@ def _write_dense_bands(
     # z/se's float16 (see `create_eaf_array`). Skipped whole when no source
     # reported a frequency.
     if column_has_eaf.any():
-        create_eaf_array(staged, n_variants, n_analyses, effective_chunks)
+        _create_eaf_array(staged, n_variants, n_analyses, effective_chunks)
         eaf_zarr = staged.arrays(mode="a")["eaf"]
         eaf_band = np.empty((n_variants, band_cols), dtype="float32")
         for c0 in range(0, n_analyses, band_cols):

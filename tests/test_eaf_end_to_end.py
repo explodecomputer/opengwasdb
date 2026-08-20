@@ -172,3 +172,100 @@ def test_eaf_is_absent_from_the_default_resolved_row(tmp_path: Path, layout: str
         rows = list(query.resolve(query.phewas(_ALID)))
 
     assert rows and "eaf" not in rows[0]
+
+
+# ── Reference Completion ──────────────────────────────────────────────────────
+
+
+def _ld_panel(tmp_path: Path) -> Path:
+    """A one-block EUR panel covering the fixture's variant plus one the store
+    has never seen, so completion has something real to impute."""
+    import io
+
+    block_dir = tmp_path / "ld_panel" / "EUR" / "1"
+    block_dir.mkdir(parents=True)
+    snps = [("1:100000:A:G", 0.30, 100_000), ("1:150000:C:T", 0.40, 150_000)]
+    lines = ["CHR\tSNP\tOA\tEA\tEAF\tBP"]
+    for alid, panel_eaf, bp in snps:
+        chrom, pos, a1, a2 = alid.split(":")
+        lines.append(f"{chrom}\t{alid}\t{a2}\t{a1}\t{panel_eaf}\t{bp}")
+    (block_dir / "1-500000.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((len(snps), len(snps)))
+    ld = a @ a.T + np.eye(len(snps)) * len(snps) * 0.1
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+        for row in ld:
+            gz.write(("\t".join(f"{v:.6f}" for v in row) + "\n").encode())
+    (block_dir / "1-500000.unphased.vcor1.gz").write_bytes(buf.getvalue())
+    return tmp_path / "ld_panel"
+
+
+_OFF_PANEL_ALID = "1:200000:C:T"
+_OFF_PANEL_SOURCE_EAF = 0.10  # reported for T, which sorts second -> stored as 0.90
+_OFF_PANEL_STORED_EAF = 0.90
+
+
+def test_dense_completion_keeps_the_observed_frequencies(tmp_path: Path):
+    from opengwasdb.layouts.dense.complete import complete_dense_store
+
+    observed = _build(tmp_path, "dense")
+    completed = tmp_path / "dense-completed.opengwasdb"
+    complete_dense_store(observed, completed, _ld_panel(tmp_path), ancestry="EUR", min_cor=0.0)
+
+    with query_store(completed) as query:
+        result = query.phewas(_ALID)
+
+    assert len(result["z"]) == 1
+    assert result["eaf"][0] == pytest.approx(_STORED_EAF, abs=1e-6)
+
+
+def test_hybrid_completion_keeps_frequencies_in_both_components(tmp_path: Path):
+    """A Hybrid store partitions its associations between the Dense Component
+    and the Ragged Overflow Component, and completion rebuilds the overflow CSR
+    from scratch. Checking only an on-panel variant would pass while the
+    overflow silently lost every frequency it had -- which is exactly what a
+    code review caught, with `analyses.tsv` still claiming
+    `eaf_scope=association` for the emptied Analysis.
+    """
+    from opengwasdb.layouts.hybrid.complete import complete_hybrid_store
+
+    source = tmp_path / "two_variants.vcf"
+    source.write_text(
+        _VCF_HEADER
+        + f"1\t100000\t.\tA\tG\t.\tPASS\t.\tES:SE:AF\t0.6:0.3:{_SOURCE_EAF}\n"
+        + f"1\t200000\t.\tC\tT\t.\tPASS\t.\tES:SE:AF\t0.4:0.2:{_OFF_PANEL_SOURCE_EAF}\n",
+        encoding="utf-8",
+    )
+    panel = tmp_path / "one_variant_panel.txt"
+    panel.write_text(f"{_ALID}\n", encoding="utf-8")  # _OFF_PANEL_ALID is deliberately absent
+    observed = tmp_path / "hybrid-split.opengwasdb"
+    build_hybrid_from_vcf_manifest(
+        _vcf_manifest(tmp_path, source), observed, reference_panel=panel,
+        store_id="eaf", release_id="r1",
+    )
+
+    with query_store(observed) as query:
+        before = {
+            int(v): float(e)
+            for v, e in zip(
+                query.analysis("study1")["variant_index"],
+                query.analysis("study1")["eaf"],
+                strict=True,
+            )
+        }
+    assert len(before) == 2, "fixture must span both components for this to mean anything"
+
+    completed = tmp_path / "hybrid-split-completed.opengwasdb"
+    complete_hybrid_store(observed, completed, _ld_panel(tmp_path), ancestry="EUR", min_cor=0.0)
+
+    with query_store(completed) as query:
+        on_panel = query.phewas(_ALID)
+        off_panel = query.phewas(_OFF_PANEL_ALID)
+
+    assert on_panel["eaf"][0] == pytest.approx(_STORED_EAF, abs=1e-6)
+    assert len(off_panel["eaf"]) == 1, "the off-panel association did not survive completion"
+    assert off_panel["eaf"][0] == pytest.approx(_OFF_PANEL_STORED_EAF, abs=1e-6), (
+        "completion dropped the Ragged Overflow Component's observed frequencies"
+    )

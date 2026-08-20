@@ -40,6 +40,7 @@ from opengwasdb.store.open import (
 from opengwasdb.variants import (
     VariantAxis,
     VariantRecord,
+    is_indexable_rsid,
     variant_alid_bytes_path,
     variant_alid_rows_path,
     variant_offsets_path,
@@ -846,7 +847,10 @@ def _validate_rsid_index(
     an rsid-less one of those is not wrong, merely older. That is why the
     index is not in any layout's required-entry list, only its envelope.
     """
-    named = sum(1 for record in records if record.rsid and record.rsid != ".")
+    # Counted through the same predicate `_write_rsid_index` indexes by, so a
+    # correctly-built store cannot fail its own validator over an identifier
+    # that was deliberately left out.
+    named = sum(1 for record in records if is_indexable_rsid(record.rsid))
     indexed = variant_axis._rsid_bytes
     if indexed is None:
         if named:

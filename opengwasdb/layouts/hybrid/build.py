@@ -30,6 +30,7 @@ from opengwasdb.layouts.dense.build import add_hit_counts, write_analyses_tsv
 from opengwasdb.layouts.dense.build_vcf import (
     _RESOLVE_BATCH,
     _alid_sort_key,
+    _apply_eaf_scope,
     _apply_se_divisor,
     _create_dense_zarr,
     _encode_variant_keys,
@@ -40,7 +41,6 @@ from opengwasdb.layouts.dense.build_vcf import (
     _read_manifest,
     _write_dense_bands,
     _write_index,
-    apply_eaf_scope,
 )
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
@@ -543,7 +543,7 @@ def build_hybrid_from_vcf_manifest(
             # have been read (ADR 0036).
             log.info("Assembling Ragged Overflow CSR from %d columns", n_analyses)
             csr, overflow_has_eaf = _assemble_overflow_csr(spill_dir, n_analyses)
-            analyses = apply_eaf_scope(analyses, column_has_eaf | overflow_has_eaf)
+            analyses = _apply_eaf_scope(analyses, column_has_eaf | overflow_has_eaf)
 
             # manifest.json before analyses.tsv/overview.html: overview.html
             # reads manifest.json fresh from output_path for its header (ADR 0032).

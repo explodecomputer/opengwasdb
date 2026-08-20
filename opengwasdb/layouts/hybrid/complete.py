@@ -138,6 +138,7 @@ def complete_hybrid_store(
         src_vi = src_csr._variant_index[:]
         src_z = src_csr._z[:]
         src_se = src_csr._se[:]
+        src_eaf = src_csr.eaf_slice(0, len(src_vi))
 
         src_shared_axis = VariantAxis(src)
         vi_to_record = src_shared_axis.by_indices(np.unique(src_vi).tolist())
@@ -163,7 +164,7 @@ def complete_hybrid_store(
         ) if len(overflow_alids) else np.empty(0, dtype=bool)
         n_reclaimed_imputed = _fold_panel_crossovers(
             dense_component_path(staged.path), dense_alid_to_row,
-            offsets, src_z, src_se, overflow_alids, is_crossover,
+            offsets, src_z, src_se, src_eaf, overflow_alids, is_crossover,
         )
         n_imputed = dense_result.n_imputed - n_reclaimed_imputed
         if is_crossover.any():
@@ -223,8 +224,17 @@ def complete_hybrid_store(
             )
             z = src_z[s:e][keep].astype(np.float16)
             se = src_se[s:e][keep].astype(np.float16)
+            # Observed EAF survives the remap (ADR 0036), like rsids above:
+            # Reference Completion adds rows, it does not change what the
+            # source reported for the ones it already had.
+            eaf = src_eaf[s:e][keep].astype(np.float32)
             order = np.argsort(new_vi, kind="stable")
-            csr.add_analysis(new_vi[order], z[order], se[order])
+            csr.add_analysis(
+                new_vi[order],
+                z[order],
+                se[order],
+                eaf=eaf[order] if np.isfinite(eaf).any() else None,
+            )
         csr.flush(staged.path)
 
         # ── 6. Hybrid manifest (reference-completed) ──────────────────────────
@@ -262,6 +272,7 @@ def _fold_panel_crossovers(
     offsets: np.ndarray,
     src_z: np.ndarray,
     src_se: np.ndarray,
+    src_eaf: np.ndarray,
     overflow_alids: np.ndarray,
     is_crossover: np.ndarray,
 ) -> int:
@@ -271,7 +282,7 @@ def _fold_panel_crossovers(
 
     ``is_crossover`` is a boolean mask over the flat source-overflow
     association array (same order/length as ``overflow_alids``/``src_z``/
-    ``src_se``); ``offsets`` partitions that flat array by analysis, exactly
+    ``src_se``/``src_eaf``); ``offsets`` partitions that flat array by analysis, exactly
     as ``RaggedCSRReader`` exposes it. Returns how many of the overwritten
     cells were previously marked imputed, so the caller can correct the
     reported imputed count -- see the module docstring (issue #99).
@@ -290,6 +301,7 @@ def _fold_panel_crossovers(
     col_idx = assoc_ai[crossover_idx].astype(np.int64)
     z_vals = src_z[crossover_idx].astype(np.float16)
     se_vals = src_se[crossover_idx].astype(np.float16)
+    eaf_vals = src_eaf[crossover_idx].astype(np.float32)
 
     root = zarr.open_group(str(dense_dir / "data.zarr"), mode="a")
     was_imputed = np.asarray(root["imputed"].vindex[row_idx, col_idx])
@@ -297,6 +309,10 @@ def _fold_panel_crossovers(
     root["z"].vindex[row_idx, col_idx] = z_vals
     root["se"].vindex[row_idx, col_idx] = se_vals
     root["imputed"].vindex[row_idx, col_idx] = 0
+    # The crossed-over cell's EAF moves with its z/se (ADR 0036) -- the whole
+    # point of the fold is that this is one real observation, not two.
+    if "eaf" in root and np.isfinite(eaf_vals).any():
+        root["eaf"].vindex[row_idx, col_idx] = eaf_vals
     return n_reclaimed
 
 

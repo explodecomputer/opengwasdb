@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from opengwasdb.model.enums import StoredEffectScale
 from opengwasdb.readers.gwas_vcf import is_palindromic
 from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics, SourceVariant
+from opengwasdb.stats import parse_af
 
 _MISSING = {"", ".", "NA", "NaN", "nan", "None"}
 
@@ -28,9 +29,18 @@ def parse_positive_float(value: str | None) -> float | None:
     return parsed if parsed is not None and parsed > 0.0 else None
 
 
-def parse_af(value: str | None) -> float | None:
-    parsed = parse_finite_float(value)
-    return parsed if parsed is not None and 0.0 <= parsed <= 1.0 else None
+__all__ = [
+    "TabularRow",
+    "extract_at_sites",
+    # Re-exported: the readers built on this module import their column
+    # parsing from here, but the allele-frequency rule itself is shared with
+    # every other source path (ADR 0036), so it lives in opengwasdb.stats.
+    "parse_af",
+    "parse_finite_float",
+    "parse_positive_float",
+    "stream_associations",
+    "stream_variants",
+]
 
 
 @dataclass(frozen=True)
