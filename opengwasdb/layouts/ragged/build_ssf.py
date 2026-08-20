@@ -18,7 +18,7 @@ from __future__ import annotations
 import csv
 import gzip
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,7 +28,7 @@ from opengwasdb.layouts.dense.build import add_hit_counts
 from opengwasdb.layouts.ragged.analyses import molecular_analysis
 from opengwasdb.layouts.ragged.top_hits import build_ragged_top_hit_indexes
 from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRWriter
-from opengwasdb.model.analyses import write_analysis_records
+from opengwasdb.model.analyses import PassthroughMetadata, write_analysis_records
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -77,6 +77,9 @@ class AnalyteInput:
     mhc: bool
     filtered_path: Path
     assigned_ancestry: str = ""  # optional manifest column (ADR 0028); "" when omitted
+    # Shared-core analyses.tsv columns the manifest supplies and this builder only
+    # copies (issue #83). Blank when the manifest omits them; see PassthroughMetadata.
+    metadata: PassthroughMetadata = field(default_factory=PassthroughMetadata)
 
 
 def _opt(value: str | None) -> str | None:
@@ -86,6 +89,21 @@ def _opt(value: str | None) -> str | None:
 
 
 def _read_manifest(manifest_path: str | Path, filtered_dir: str | Path) -> list[AnalyteInput]:
+    """Read the build manifest into one `AnalyteInput` per analysis.
+
+    Beyond the molecular/context columns this builder interprets (trait
+    position, N, tissue/context, MHC flag), every shared-core `analyses.tsv`
+    column the manifest carries is read through `PassthroughMetadata` and
+    copied into the built store verbatim -- Analytical Metadata
+    (``sample_size_kind``/``sample_size_scope``/``n_cases``/``n_controls``/
+    ``original_effect_scale``/``original_sd_method``/
+    ``ancestry_assignment_method``/``ancestry_prop_<population>``) and
+    Attribution Metadata (``license``/``publication_doi``/
+    ``publication_pmid``/``consortium``/``first_author``). Ragged dropped all
+    of these before issue #83, silently: the manifest had the values, the
+    built store did not. They stay blank when the manifest omits them, never
+    inferred -- only the manifest producer knows them.
+    """
     rows: list[AnalyteInput] = []
     with open(manifest_path, newline="", encoding="utf-8") as fh:
         for r in csv.DictReader(fh, delimiter="\t"):
@@ -105,6 +123,7 @@ def _read_manifest(manifest_path: str | Path, filtered_dir: str | Path) -> list[
                 mhc=str(r.get("mhc", "")).strip().upper() in {"TRUE", "1", "YES"},
                 filtered_path=Path(filtered_dir) / r["filtered_file"],
                 assigned_ancestry=_opt(r.get("assigned_ancestry")) or "",
+                metadata=PassthroughMetadata.from_manifest_row(r),
             ))
     rows.sort(key=lambda a: a.analysis_index)
     # analysis_index must be a dense 0..n-1 sequence for CSR offset alignment.
@@ -279,6 +298,7 @@ def build_ragged_from_ssf(
                 trait_chr=a.trait_chr, trait_bp=a.trait_bp, n=a.n,
                 stored_effect_scale=stored_effect_scale,
                 assigned_ancestry=a.assigned_ancestry,
+                metadata=a.metadata,
             )
             for a in analytes
         ]

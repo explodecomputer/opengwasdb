@@ -391,7 +391,7 @@ def build_hybrid_from_vcf_manifest(
         log.info("Reference panel: %d variants", len(panel_alids))
 
         # ── Pass 1: union of source variants + liftover ──────────────────────────
-        source_lookup = _lift_manifest_variants(
+        source_lookup, rsid_by_alid = _lift_manifest_variants(
             manifest_rows,
             chain_file=chain_file,
             liftover_failure_threshold=liftover_failure_threshold,
@@ -434,7 +434,7 @@ def build_hybrid_from_vcf_manifest(
 
         # ── Write the Dense Component skeleton (a valid dense store) ──────────────
         _write_index(dense_staged, panel_sorted, analyses, chunk_shape, dtype)
-        _write_variant_table(dense_dir, panel_sorted, hg38_to_source)
+        _write_variant_table(dense_dir, panel_sorted, hg38_to_source, rsid_by_alid)
         effective_chunks = _create_dense_zarr(dense_staged, n_panel, n_analyses, chunk_shape, dtype)
 
         # dense row -> shared variant_index (ascending — panel keeps genomic order).
@@ -536,7 +536,7 @@ def build_hybrid_from_vcf_manifest(
         shared_analyses = add_hit_counts(staged.path, dense_counted)
         _write_index(staged, shared_sorted, analyses, chunk_shape, dtype)
         write_analyses_tsv(staged.path, shared_analyses)
-        _write_variant_table(staged.path, shared_sorted, hg38_to_source)
+        _write_variant_table(staged.path, shared_sorted, hg38_to_source, rsid_by_alid)
 
         log.info(
             "Hybrid build complete: %d shared variants (%d panel + %d off-panel), "
@@ -551,8 +551,17 @@ def build_hybrid_from_vcf_manifest(
 
 
 def _write_variant_table(
-    store_path: Path, alids: list[str], hg38_to_source: dict[str, str | None]
+    store_path: Path,
+    alids: list[str],
+    hg38_to_source: dict[str, str | None],
+    rsid_by_alid: dict[str, str],
 ) -> None:
+    """Write one component's Store Variant Table.
+
+    `rsid_by_alid` spans the whole build; each component writes the subset its
+    own `alids` cover, so the Dense Component and the shared table agree on
+    every row's identifier without either recomputing it (issue #109).
+    """
     canonical = [
         CanonicalVariant(
             chromosome=chrom, position=int(pos), effect_allele=a1, other_allele=a2
@@ -561,7 +570,7 @@ def _write_variant_table(
         for chrom, pos, a1, a2 in [alid.split(":")]
     ]
     source_alids = [hg38_to_source.get(alid) for alid in alids]
-    write_variant_axis(store_path, canonical, {}, source_alids)
+    write_variant_axis(store_path, canonical, rsid_by_alid, source_alids)
 
 
 def _write_dense_manifest(

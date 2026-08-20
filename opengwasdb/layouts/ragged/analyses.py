@@ -9,10 +9,15 @@ copies. Gene identity is expressed through `analysis_label`/
 `gene_name` columns (ADR 0035): `trait_ontology_id`'s CURIE contract tolerates
 per-Trait-kind vocabularies, so an Ensembl gene ID (e.g.
 `ENSEMBL:ENSG00000152256`) is as valid there as an EFO term.
+
+Analytical + Attribution Metadata the source manifest merely carries (licence,
+publication, sample-size interpretation, ...) is not enumerated here: it
+arrives as one `PassthroughMetadata` and is layered on top (issue #83). Only
+the SSF path has a manifest to read it from; the BESD path passes None.
 """
 from __future__ import annotations
 
-from opengwasdb.model.analyses import Analysis
+from opengwasdb.model.analyses import Analysis, PassthroughMetadata
 
 
 def molecular_analysis(
@@ -28,8 +33,9 @@ def molecular_analysis(
     n: int | None,
     stored_effect_scale: str = "",
     assigned_ancestry: str = "",
+    metadata: PassthroughMetadata | None = None,
 ) -> Analysis:
-    return Analysis(
+    analysis = Analysis(
         analysis_id=analysis_id,
         analysis_label=analysis_label or "",
         trait_ontology_id=trait_ontology_id or "",
@@ -42,3 +48,4 @@ def molecular_analysis(
         stored_effect_scale=stored_effect_scale,
         assigned_ancestry=assigned_ancestry,
     )
+    return metadata.applied_to(analysis) if metadata is not None else analysis

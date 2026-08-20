@@ -123,7 +123,7 @@ def test_subset_catalogue_is_pure_row_filter(tmp_path):
 
     loaded = _read_manifest(manifest)
     assert [m.trait_id for m in loaded] == ["eur_a", "eur_b"]
-    assert {m.ancestry_assignment_method for m in loaded} == {"af_assigned"}
+    assert {m.metadata.ancestry_assignment_method for m in loaded} == {"af_assigned"}
 
 
 def test_legacy_unassigned_catalogue_subset_records_failed_assignment(tmp_path):
@@ -142,7 +142,7 @@ def test_legacy_unassigned_catalogue_subset_records_failed_assignment(tmp_path):
 
     loaded = _read_manifest(manifest)
     assert [row.trait_id for row in loaded] == ["und_d"]
-    assert loaded[0].ancestry_assignment_method == "unassigned"
+    assert loaded[0].metadata.ancestry_assignment_method == "unassigned"
 
 
 def test_build_eur_hybrid_records_provenance_and_validates(tmp_path):

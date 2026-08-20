@@ -39,6 +39,7 @@ from opengwasdb.store.open import (
 )
 from opengwasdb.variants import (
     VariantAxis,
+    VariantRecord,
     variant_alid_bytes_path,
     variant_alid_rows_path,
     variant_offsets_path,
@@ -813,6 +814,41 @@ def _validate_analyses_tsv(analyses_path: Path, errors: list[str]) -> int:
     return n
 
 
+def _validate_rsid_index(
+    variant_axis: VariantAxis, records: list[VariantRecord], errors: list[str]
+) -> None:
+    """Every rsid in `variants.tsv.gz` must be resolvable (issue #109).
+
+    The failure this exists to catch is silent by construction: a store whose
+    variant table is full of rsids but whose index is empty answers every rsid
+    lookup with "nothing here", which reads exactly like a real negative. That
+    was the state of every Store Release built before #109, and it was also
+    reintroduced once afterwards, by a completion path that rewrote the
+    variant table and dropped the rsids on the way through.
+
+    A store with no rsids at all is fine -- not every source names variants --
+    so this compares the index against the table rather than demanding either
+    be non-empty. A *missing* index is likewise only an error when there are
+    rsids to index: stores built before #109 have none of these sidecars, and
+    an rsid-less one of those is not wrong, merely older. That is why the
+    index is not in any layout's required-entry list, only its envelope.
+    """
+    named = sum(1 for record in records if record.rsid and record.rsid != ".")
+    indexed = variant_axis._rsid_bytes
+    if indexed is None:
+        if named:
+            errors.append(
+                f"variants.tsv.gz names {named} rsid(s) but the store has no rsid search "
+                "index — rebuild the store, or every rsid lookup against it returns nothing"
+            )
+        return
+    if len(indexed) != named:
+        errors.append(
+            f"variant_rsid_bytes.npy has {len(indexed)} entries but variants.tsv.gz "
+            f"names {named} rsid(s)"
+        )
+
+
 def _validate_variant_axis(variant_axis: VariantAxis, errors: list[str]) -> int:
     records = variant_axis.all()
     if variant_axis.n_variants != len(records):
@@ -825,6 +861,7 @@ def _validate_variant_axis(variant_axis: VariantAxis, errors: list[str]) -> int:
             f"variant_alid_bytes.npy has {len(variant_axis._alid_bytes)} entries but "
             f"variants.tsv.gz has {len(records)} rows"
         )
+    _validate_rsid_index(variant_axis, records, errors)
     seen_alids: set[str] = set()
     for expected_index, record in enumerate(records):
         if record.variant_index != expected_index:

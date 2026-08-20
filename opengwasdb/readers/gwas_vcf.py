@@ -33,7 +33,7 @@ from opengwasdb.build.vcf_source import (
     stream_vcf_variants,
 )
 from opengwasdb.model.enums import StoredEffectScale
-from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics
+from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics, SourceVariant
 from opengwasdb.variants.normalise import VariantNormalisationError, orient_to_canonical
 
 GWAS_VCF_CAPABILITY = "opengwasdb.gwas-vcf"
@@ -157,8 +157,11 @@ class GwasVcfReader:
                 stored_effect_scale=self.stored_effect_scale,
             )
 
-    def stream_variants(self) -> Iterator[tuple[str, int, str, str]]:
-        yield from stream_vcf_variants(self.path)
+    def stream_variants(self) -> Iterator[SourceVariant]:
+        for chrom, pos, ref, alt, rsid in stream_vcf_variants(self.path):
+            yield SourceVariant(
+                chromosome=chrom, position=pos, ref=ref, alt=alt, rsid=rsid
+            )
 
     def extract_at_sites(self, alids: Iterable[str]) -> dict[str, SiteMetrics]:
         wanted = (

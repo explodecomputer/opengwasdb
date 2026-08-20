@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opengwasdb.model.enums import StoredEffectScale
-from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics
+from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics, SourceVariant
 from opengwasdb.readers.tabular import (
     TabularRow,
     extract_at_sites,
@@ -28,6 +28,18 @@ from opengwasdb.readers.tabular import (
 from opengwasdb.variants.normalise import VariantNormalisationError, orient_to_canonical
 
 FINNGEN_R13_CAPABILITY = "opengwasdb.finngen-r13"
+
+
+def _first_rsid(value: str | None) -> str:
+    """FinnGen's `rsids` column is comma-separated where dbSNP names one
+    position more than once. The Store Variant Table has one rsid per row, so
+    take the first and leave the rest unrecorded rather than inventing a
+    multi-value convention no reader or query path understands (issue #109).
+    """
+    if not value:
+        return ""
+    first = value.split(",")[0].strip()
+    return first if first.startswith("rs") else ""
 
 def _iter_rows(path: str | Path) -> Iterator[TabularRow]:
     opener = gzip.open if str(path).endswith((".gz", ".bgz")) else open
@@ -57,6 +69,7 @@ def _iter_rows(path: str | Path) -> Iterator[TabularRow]:
                 beta=parse_finite_float(row.get("beta")),
                 se=parse_positive_float(row.get("sebeta")),
                 af_alt=parse_af(row.get("af_alt")),
+                rsid=_first_rsid(row.get("rsids")),
             )
 
 
@@ -70,7 +83,7 @@ class FinnGenR13Reader:
     def stream_associations(self) -> Iterator[ReaderAssociation]:
         yield from stream_associations(_iter_rows(self.path), self.stored_effect_scale)
 
-    def stream_variants(self) -> Iterator[tuple[str, int, str, str]]:
+    def stream_variants(self) -> Iterator[SourceVariant]:
         yield from stream_variants(_iter_rows(self.path))
 
     def extract_at_sites(self, alids: Iterable[str]) -> dict[str, SiteMetrics]:

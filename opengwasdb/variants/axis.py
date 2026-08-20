@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,11 +19,15 @@ from opengwasdb.variants.normalise import (
     normalise_chromosome,
 )
 
+log = logging.getLogger(__name__)
+
 VARIANT_TABLE_FILENAME = "variants.tsv.gz"
 VARIANT_TABIX_FILENAME = "variants.tsv.gz.tbi"
 VARIANT_OFFSETS_FILENAME = "variant_offsets.npy"
 VARIANT_ALID_BYTES_FILENAME = "variant_alid_bytes.npy"
 VARIANT_ALID_ROWS_FILENAME = "variant_alid_rows.npy"
+VARIANT_RSID_BYTES_FILENAME = "variant_rsid_bytes.npy"
+VARIANT_RSID_ROWS_FILENAME = "variant_rsid_rows.npy"
 VARIANT_AXIS_FORMAT = "tabix_tsv_v1"
 VARIANT_HEADER = (
     "#chromosome\tposition\tvariant_index\teffect_allele\tother_allele\talid\trsid"
@@ -31,6 +36,14 @@ VARIANT_HEADER = (
 # Fixed byte-width for ALID encoding in the mmap'd search index.
 # Supports chromosomes up to 3 chars, positions up to 9 digits, alleles up to ~20 chars.
 _ALID_DTYPE = "|S64"
+
+# Fixed byte-width for rsid encoding in the mmap'd rsid search index. An rsid is
+# "rs" + digits, far inside this; the width exists so a malformed or non-rs
+# identifier in a source's rsid column cannot silently truncate into a *false
+# match* for a different variant. Anything wider is left out of the index (and
+# counted in a warning) rather than stored truncated -- see `_write_rsid_index`.
+_RSID_WIDTH = 24
+_RSID_DTYPE = f"|S{_RSID_WIDTH}"
 
 # `by_indices()` switchover point between random-access and full-scan
 # resolution -- see that method's docstring for the measured costs behind it.
@@ -101,6 +114,14 @@ def variant_alid_bytes_path(store_path: str | Path) -> Path:
 
 def variant_alid_rows_path(store_path: str | Path) -> Path:
     return Path(store_path) / VARIANT_ALID_ROWS_FILENAME
+
+
+def variant_rsid_bytes_path(store_path: str | Path) -> Path:
+    return Path(store_path) / VARIANT_RSID_BYTES_FILENAME
+
+
+def variant_rsid_rows_path(store_path: str | Path) -> Path:
+    return Path(store_path) / VARIANT_RSID_ROWS_FILENAME
 
 
 def parse_canonical_alid(identifier: str) -> ParsedAlid | None:
@@ -174,6 +195,53 @@ def write_variant_axis(
     sort_order = np.argsort(alid_bytes)
     np.save(variant_alid_bytes_path(store), alid_bytes[sort_order])
     np.save(variant_alid_rows_path(store), row_indices[sort_order])
+    _write_rsid_index(store, variants, rsid_by_alid)
+
+
+def _write_rsid_index(
+    store: Path, variants: list[CanonicalVariant], rsid_by_alid: Mapping[str, str]
+) -> None:
+    """Write the mmap'd rsid search index alongside the ALID one (issue #109).
+
+    Written here, in the one function every builder and every completion path
+    already calls, rather than in each builder: rsids reached
+    `variants.tsv.gz` for years while nothing indexed them, so `by_identifier`
+    returned None for every rsid -- an empty result indistinguishable from a
+    real "no association." Deriving the index from the same `rsid_by_alid`
+    the table rows are written from makes the two impossible to disagree.
+
+    Rows whose rsid does not fit `_RSID_WIDTH` are left out rather than stored
+    truncated, which would make them resolve *another* variant's lookup.
+
+    Rows with no rsid are omitted, so a store whose source carries none writes
+    a pair of empty arrays -- present but matching nothing, which is the
+    honest answer to "does this store know rs123?" Sorted by rsid bytes with
+    row order preserved within a run of equal rsids (stable sort), so the
+    several rows one rsid can name (multi-allelic site, or one position stored
+    under both allele orders) come back in ascending variant_index.
+    """
+    rows = []
+    n_too_long = 0
+    for index, variant in enumerate(variants):
+        rsid = rsid_by_alid.get(variant.alid)
+        if not rsid:
+            continue
+        if len(rsid.encode("utf-8")) > _RSID_WIDTH:
+            n_too_long += 1
+            continue
+        rows.append((rsid, index))
+    if n_too_long:
+        log.warning(
+            "%d variant identifier(s) longer than %d bytes left out of the rsid index: "
+            "they are not resolvable by name in this store",
+            n_too_long,
+            _RSID_WIDTH,
+        )
+    rsid_bytes = np.array([rsid for rsid, _ in rows], dtype=_RSID_DTYPE)
+    rsid_rows = np.array([index for _, index in rows], dtype="int32")
+    order = np.argsort(rsid_bytes, kind="stable")
+    np.save(variant_rsid_bytes_path(store), rsid_bytes[order])
+    np.save(variant_rsid_rows_path(store), rsid_rows[order])
 
 
 class VariantAxis:
@@ -197,6 +265,17 @@ class VariantAxis:
         else:
             self._alid_bytes = None
             self._alid_rows = None
+        # mmap'd rsid search index — present on stores built after issue #109.
+        # Absent on older stores, where rsid lookups find nothing (as they did
+        # before that index existed).
+        _rsid_bytes_path = variant_rsid_bytes_path(self.store_path)
+        _rsid_rows_path = variant_rsid_rows_path(self.store_path)
+        if _rsid_bytes_path.exists() and _rsid_rows_path.exists():
+            self._rsid_bytes: np.ndarray | None = np.load(_rsid_bytes_path, mmap_mode="r")
+            self._rsid_rows: np.ndarray | None = np.load(_rsid_rows_path, mmap_mode="r")
+        else:
+            self._rsid_bytes = None
+            self._rsid_rows = None
         self._alid_inverse: np.ndarray | None = None  # built lazily, see identity_by_indices()
 
     @property
@@ -207,9 +286,21 @@ class VariantAxis:
         self._tabix.close()
 
     def by_identifier(self, identifier: str) -> VariantRecord | None:
+        """Resolve one ALID or rsid to a single Store Variant Table row.
+
+        An rsid can legitimately name several rows -- a multi-allelic site, or
+        one position stored under both allele orders. This method's contract is
+        one record, so it returns the lowest `variant_index` among them, the
+        same choice the `variant_aliases` fallback below has always made
+        (``ORDER BY variant_index LIMIT 1``). Callers that need every row an
+        rsid names want `indices_by_identifiers`, which returns all of them.
+        """
         parsed = parse_canonical_alid(identifier)
         if parsed is not None:
             return self.by_alid(parsed)
+        indices = self.indices_by_alias(identifier)
+        if len(indices):
+            return self.by_index(int(indices[0]))
         if self.aliases is None:
             return None
         row = self.aliases.execute(
@@ -226,6 +317,27 @@ class VariantAxis:
             return None
         return self.by_index(int(row["variant_index"]))
 
+    def indices_by_alias(self, alias: str) -> np.ndarray:
+        """Every Store-local Variant Index the rsid `alias` names, ascending.
+
+        Empty when the store has no rsid index (built before issue #109), when
+        the rsid is unknown, or when `alias` is the table's blank marker `.` --
+        a row with no rsid is not reachable by asking for one.
+        """
+        rsid_bytes, rsid_rows = self._rsid_bytes, self._rsid_rows
+        if rsid_bytes is None or rsid_rows is None or not alias or alias == ".":
+            return np.empty(0, dtype="int32")
+        if len(alias.encode("utf-8")) > _RSID_WIDTH:
+            # Never indexed (see `_write_rsid_index`), so a truncated query
+            # could only ever produce a false match.
+            return np.empty(0, dtype="int32")
+        query = np.array(alias, dtype=_RSID_DTYPE)
+        lo = int(np.searchsorted(rsid_bytes, query, side="left"))
+        hi = int(np.searchsorted(rsid_bytes, query, side="right"))
+        if lo == hi:
+            return np.empty(0, dtype="int32")
+        return np.asarray(rsid_rows[lo:hi], dtype="int32")
+
     def indices_by_identifiers(self, identifiers: Sequence[str]) -> np.ndarray:
         """Resolve many identifiers to Store-local Variant Indices in one
         batched pass, without materialising a `VariantRecord` (and its
@@ -233,12 +345,13 @@ class VariantAxis:
         one -- the fast path dense `lookup()` needs (issue #3).
 
         Canonical ALIDs are resolved with a single vectorised `searchsorted`
-        over the mmap'd ALID index. Aliases/rsids have no vectorised index and
-        fall back to `by_identifier()`'s per-identifier SQLite lookup, same as
-        stores that predate the mmap ALID index (`self._alid_bytes is None`).
-        Identifiers that don't resolve are dropped, matching `by_identifier()`'s
-        None-on-miss semantics. The returned order is not guaranteed to match
-        the input order.
+        over the mmap'd ALID index; rsids through the equivalent rsid index
+        (issue #109), falling back to the `variant_aliases` SQLite table for
+        stores built before it. Unlike `by_identifier`, an rsid contributes
+        *every* row it names, not only the lowest-indexed one. Identifiers that
+        don't resolve are dropped, matching `by_identifier()`'s None-on-miss
+        semantics. The returned order is not guaranteed to match the input
+        order.
         """
         parsed_pairs: list[tuple[str, ParsedAlid]] = []
         alias_identifiers: list[str] = []
@@ -270,6 +383,12 @@ class VariantAxis:
                         indices.append(record.variant_index)
 
         for identifier in alias_identifiers:
+            # Every row the rsid names, not just the first: a phewas over
+            # rs123 at a multi-allelic site wants both stored rows.
+            matched = self.indices_by_alias(identifier)
+            if len(matched):
+                indices.extend(int(index) for index in matched)
+                continue
             record = self.by_identifier(identifier)
             if record is not None:
                 indices.append(record.variant_index)

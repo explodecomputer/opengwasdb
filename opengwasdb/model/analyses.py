@@ -25,7 +25,8 @@ draft spelling -- see `opengwasdb.model.enums`.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -418,6 +419,75 @@ class Analysis:
     def __post_init__(self) -> None:
         if not self.analysis_id:
             raise ValueError("Analysis.analysis_id must not be blank")
+
+# Shared-core `analyses.tsv` columns every layout's build manifest may supply
+# and no builder may interpret: the manifest producer owns the fact, the
+# builder copies it through verbatim (issue #86 for Dense/Hybrid, #83 for
+# Ragged). Kept as one list so a column added here reaches every layout at
+# once, rather than each builder growing its own drifting copy -- the
+# divergence issue #83 exists to close.
+PASSTHROUGH_MANIFEST_COLUMNS: tuple[str, ...] = (
+    "ancestry_assignment_method",
+    "sample_size_kind",
+    "sample_size_scope",
+    "n_cases",
+    "n_controls",
+    "original_effect_scale",
+    "original_sd_method",
+    "license",
+    "publication_doi",
+    "publication_pmid",
+    "consortium",
+    "first_author",
+)
+
+
+@dataclass(frozen=True)
+class PassthroughMetadata:
+    """The `PASSTHROUGH_MANIFEST_COLUMNS` values one manifest row carries.
+
+    One type rather than a dozen loose parameters threaded through each
+    builder: these columns always travel together, are always strings, and
+    are always copied rather than computed. `ancestry_prop` rides along
+    because it is shared-core too (`ANCESTRY_PROP_PREFIX`) and equally
+    uninterpreted -- it is just dict-shaped rather than scalar, one column
+    per reference population.
+
+    Every field defaults to blank. A manifest that omits a column produces a
+    blank value in the built store's `analyses.tsv`, which is honest: only
+    the manifest producer knows how ancestry was assigned or what licence
+    the source carries, so a builder that guessed would be fabricating.
+    """
+
+    ancestry_assignment_method: str = ""
+    sample_size_kind: str = ""
+    sample_size_scope: str = ""
+    n_cases: str = ""
+    n_controls: str = ""
+    original_effect_scale: str = ""
+    original_sd_method: str = ""
+    license: str = ""
+    publication_doi: str = ""
+    publication_pmid: str = ""
+    consortium: str = ""
+    first_author: str = ""
+    ancestry_prop: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_manifest_row(cls, row: Mapping[str, str]) -> PassthroughMetadata:
+        """Read the passthrough columns out of one raw manifest row."""
+        return cls(
+            **{column: row.get(column) or "" for column in PASSTHROUGH_MANIFEST_COLUMNS},
+            ancestry_prop={
+                key[len(ANCESTRY_PROP_PREFIX):]: value
+                for key, value in row.items()
+                if key.startswith(ANCESTRY_PROP_PREFIX) and value
+            },
+        )
+
+    def applied_to(self, analysis: Analysis) -> Analysis:
+        """`analysis` with these columns filled in."""
+        return replace(analysis, **asdict(self))
 
 
 def _analysis_fieldnames(analyses: list[Analysis]) -> tuple[str, ...]:

@@ -291,6 +291,27 @@ class TestCompletionFiles:
         obs_ax.close()
         comp_ax.close()
 
+    def test_completion_keeps_the_observed_store_rsids(self, completed_store, observed_store):
+        """Issue #109: completion rewrote variants.tsv.gz and passed no rsids,
+        so every Reference-Completed Ragged store silently lost them -- the
+        eqtlgen-cis pilot went from 49,967 named rows to none. Rows the panel
+        adds are genuinely unnamed and stay blank."""
+        from opengwasdb.variants.axis import VariantAxis
+
+        obs_ax = VariantAxis(observed_store)
+        comp_ax = VariantAxis(completed_store)
+        try:
+            observed_rsids = {r.alid: r.rsid for r in obs_ax.all() if r.rsid}
+            assert observed_rsids, "fixture must name some variants for this to mean anything"
+            completed_rsids = {r.alid: r.rsid for r in comp_ax.all() if r.rsid}
+            assert completed_rsids == observed_rsids
+            alid, rsid = next(iter(observed_rsids.items()))
+            record = comp_ax.by_identifier(rsid)
+            assert record is not None and record.alid == alid
+        finally:
+            obs_ax.close()
+            comp_ax.close()
+
     def test_completion_quality_table_exists(self, completed_store):
         import sqlite3
         conn = sqlite3.connect(str(completed_store / "index.sqlite"))

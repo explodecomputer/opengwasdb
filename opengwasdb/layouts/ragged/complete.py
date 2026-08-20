@@ -409,7 +409,14 @@ def _run_completion(
         print(f"Merged variant table: {len(merged_variants):,} variants")
 
         print("Writing variants.tsv.gz...")
-        write_variant_axis(staged.path, merged_variants, {})
+        # Carry the observed store's rsids across (issue #109). Passing {} here
+        # silently blanked the rsid column of every Reference-Completed Ragged
+        # store: the eqtlgen-cis pilot had 49,967 rsids in 50,000 observed rows
+        # and none at all in its completed sibling. Reference-Completed rows get
+        # no rsid -- they are positions the reference panel supplies, which the
+        # source never named.
+        rsid_by_alid = {v.alid: v.rsid for v in src_variants if v.rsid}
+        write_variant_axis(staged.path, merged_variants, rsid_by_alid)
 
         print("Writing index.sqlite...")
         dst_db = staged.index_connection()

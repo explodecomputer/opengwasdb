@@ -231,6 +231,11 @@ def _write_index(
                 },
             },
         )
+        # `variant_aliases` is no longer the rsid lookup path -- `write_variant_axis`
+        # writes an rsid search index every layout shares (issue #109), and
+        # `VariantAxis.by_identifier` consults that first. The table is still written
+        # here, and still read as a fallback, so stores built before that index keep
+        # resolving rsids; nothing new depends on it.
         variant_indices = {variant.alid: i for i, variant in enumerate(variants)}
         aliases: set[tuple[str, int]] = set()
         for record in records:

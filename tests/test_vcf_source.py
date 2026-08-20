@@ -42,7 +42,7 @@ def test_stream_vcf_variants_yields_biallelic_records(tmp_path):
 
     variants = list(stream_vcf_variants(vcf))
 
-    assert variants == [("1", 100, "A", "G"), ("1", 200, "C", "T")]
+    assert variants == [("1", 100, "A", "G", ""), ("1", 200, "C", "T", "")]
 
 
 def test_stream_vcf_variants_skips_multi_allelic(tmp_path):
@@ -56,7 +56,7 @@ def test_stream_vcf_variants_skips_multi_allelic(tmp_path):
     variants = list(stream_vcf_variants(vcf))
 
     assert len(variants) == 1
-    assert variants[0] == ("1", 200, "C", "T")
+    assert variants[0] == ("1", 200, "C", "T", "")
 
 
 def test_stream_vcf_variants_normalises_chr_prefix(tmp_path):

@@ -28,15 +28,18 @@ def _require_bcftools() -> str:
     return path
 
 
-def stream_vcf_variants(path: str | Path) -> Iterator[tuple[str, int, str, str]]:
-    """Yield (bare_chrom, pos, ref, alt) for every biallelic record.
+def stream_vcf_variants(path: str | Path) -> Iterator[tuple[str, int, str, str, str]]:
+    """Yield (bare_chrom, pos, ref, alt, rsid) for every biallelic record.
 
-    Multi-allelic records (comma in ALT) are skipped silently.
-    CHROM is normalised to bare form (no chr prefix).
+    ``rsid`` is the record's ID field, or ``""`` where the VCF records none
+    (``.``) or records something that is not an rs identifier -- GWAS-VCF's ID
+    column is free-form, and a non-rs value there is not an rsid a user could
+    look the variant up by (issue #109). Multi-allelic records (comma in ALT)
+    are skipped silently. CHROM is normalised to bare form (no chr prefix).
     """
     bcftools = _require_bcftools()
     proc = subprocess.Popen(
-        [bcftools, "query", "-f", "%CHROM\t%POS\t%REF\t%ALT\n", str(path)],
+        [bcftools, "query", "-f", "%CHROM\t%POS\t%REF\t%ALT\t%ID\n", str(path)],
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -45,10 +48,11 @@ def stream_vcf_variants(path: str | Path) -> Iterator[tuple[str, int, str, str]]
             line = line.rstrip("\n")
             if not line:
                 continue
-            chrom_raw, pos_str, ref, alt = line.split("\t")
+            chrom_raw, pos_str, ref, alt, id_field = line.split("\t")
             if "," in alt:
                 continue
-            yield normalise_chromosome(chrom_raw), int(pos_str), ref, alt
+            rsid = id_field if id_field.startswith("rs") else ""
+            yield normalise_chromosome(chrom_raw), int(pos_str), ref, alt, rsid
     finally:
         proc.stdout.close()  # type: ignore[union-attr]
         proc.wait()

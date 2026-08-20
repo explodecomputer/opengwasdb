@@ -299,7 +299,7 @@ def test_reader_conformance_stream_variants_covers_stream_associations(reader):
     assoc_positions = {
         (a.chromosome, a.position, a.ref, a.alt) for a in reader.stream_associations()
     }
-    variant_positions = set(reader.stream_variants())
+    variant_positions = {v.site for v in reader.stream_variants()}
 
     assert assoc_positions <= variant_positions
 
@@ -320,7 +320,7 @@ def test_finngen_r13_drops_unusable_rows_without_fabricating_metrics(tmp_path):
     sites = reader.extract_at_sites(["1:400:A:C"])
 
     assert associations == []
-    assert variants == [("1", 400, "A", "C")]
+    assert [v.site for v in variants] == [("1", 400, "A", "C")]
     assert sites == {}
 
 
@@ -370,7 +370,7 @@ def test_gwas_vcf_reader_stream_variants_includes_rows_dropped_from_associations
     reader = GwasVcfReader(vcf, StoredEffectScale.SD)
 
     assoc_positions = {(a.chromosome, a.position) for a in reader.stream_associations()}
-    variant_positions = {(chrom, pos) for chrom, pos, _ref, _alt in reader.stream_variants()}
+    variant_positions = {(v.chromosome, v.position) for v in reader.stream_variants()}
 
     assert assoc_positions == {("1", 100)}
     assert variant_positions == {("1", 100), ("1", 200)}
@@ -437,7 +437,7 @@ def test_gwas_ssf_reader_stream_variants_includes_rows_dropped_from_associations
     reader = GwasSsfReader(path, StoredEffectScale.SD)
 
     assoc_positions = {(a.chromosome, a.position) for a in reader.stream_associations()}
-    variant_positions = {(chrom, pos) for chrom, pos, _ref, _alt in reader.stream_variants()}
+    variant_positions = {(v.chromosome, v.position) for v in reader.stream_variants()}
 
     assert assoc_positions == {("1", 100)}
     assert variant_positions == {("1", 100), ("1", 200)}
@@ -465,7 +465,7 @@ def test_gwas_ssf_reader_drops_rows_with_unparseable_alleles(tmp_path):
     reader = GwasSsfReader(path, StoredEffectScale.SD)
 
     assert {a.position for a in reader.stream_associations()} == {100}
-    assert {pos for _chrom, pos, _ref, _alt in reader.stream_variants()} == {100}
+    assert {v.position for v in reader.stream_variants()} == {100}
 
 
 def test_gwas_ssf_reader_extract_at_sites_excludes_palindromic(tmp_path):

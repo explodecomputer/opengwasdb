@@ -59,6 +59,11 @@ _BASE_ENVELOPE: frozenset[str] = frozenset({
     "variant_offsets.npy",
     "variant_alid_bytes.npy",
     "variant_alid_rows.npy",
+    # rsid search index (issue #109). Every layout writes it, empty when the
+    # source names no variants, so it belongs in the base envelope rather than
+    # being optional per layout.
+    "variant_rsid_bytes.npy",
+    "variant_rsid_rows.npy",
 })
 
 #: Dense Observed-Only/Reference-Completed (§10, §16).

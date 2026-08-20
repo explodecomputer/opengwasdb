@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -37,7 +37,7 @@ from opengwasdb.layouts.dense.constants import (
     TOP_HIT_THRESHOLDS,
 )
 from opengwasdb.layouts.dense.top_hits import write_top_hit_indexes, z_critical
-from opengwasdb.model.analyses import ANCESTRY_PROP_PREFIX, Analysis
+from opengwasdb.model.analyses import Analysis, PassthroughMetadata
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
@@ -69,32 +69,24 @@ class _ManifestRow:
     # when the manifest omits the column -- the only format this builder has ever supported.
     source_assembly: str  # normalised "hg19"/"hg38" (issue #85); "hg19" when the manifest omits
     # the column -- every source this builder read before GWAS-SSF (#84) was hg19 GWAS-VCF.
-    original_sd_method: str  # raw manifest value, carried into analyses.tsv (issue #22)
-    original_sd: str  # raw manifest value ("" when the sd_method tier carries no magnitude)
+    original_sd: str  # raw manifest value ("" when the sd_method tier carries no magnitude);
+    # not part of PassthroughMetadata because this builder *uses* it (se_divisor), rather
+    # than only copying it.
     assigned_ancestry: str  # optional manifest column (issue #22); "" when the manifest omits it
     # or carries no assignment for this row -- e.g. a Catalogue subset's kept rows (already
     # filtered to one target ancestry) stamp this in verbatim; a bare manifest has no column.
-    ancestry_prop: dict[str, str]  # {population: proportion}, from any ancestry_prop_<pop>
-    # column(s) the manifest carries -- a Catalogue subset's kept rows already have these
-    # (the Catalogue writes one per reference super-population); empty for a bare manifest.
-    # Additional Analytical Metadata (issue #86): optional manifest columns passed through
-    # verbatim, blank when absent. The shared builder must not infer their meaning.
-    ancestry_assignment_method: str = ""
-    sample_size_kind: str = ""
-    sample_size_scope: str = ""
-    n_cases: str = ""
-    n_controls: str = ""
-    original_effect_scale: str = ""
-    # Trait-ontology and Attribution columns (ADR 0034, issue #68): optional manifest columns,
-    # resolved directly rather than via a phenotype_id/phenotype_label intermediary. "" when
-    # the manifest omits them -- never fabricated.
+    # Shared-core analyses.tsv columns the manifest supplies and this builder only copies
+    # (issues #86, #83) -- sample-size interpretation and counts, Original Effect Scale,
+    # ancestry-assignment method and proportions, Attribution. Blank when absent; the shared
+    # builder must not infer their meaning. One type, shared with Ragged, so a column added
+    # to the contract reaches both layouts.
+    metadata: PassthroughMetadata = field(default_factory=PassthroughMetadata)
+    # Trait-ontology columns (ADR 0034, issue #68): optional manifest columns, resolved
+    # directly rather than via a phenotype_id/phenotype_label intermediary. "" when the
+    # manifest omits them -- never fabricated. Not passthrough-shared: Ragged resolves its
+    # own (a gene ID, ADR 0035) rather than copying a manifest column.
     trait_ontology_id: str = ""
     trait_ontology_label: str = ""
-    license: str = ""
-    publication_doi: str = ""
-    publication_pmid: str = ""
-    consortium: str = ""
-    first_author: str = ""
 
 
 def _manifest_row_to_analysis(row: _ManifestRow) -> Analysis:
@@ -105,28 +97,17 @@ def _manifest_row_to_analysis(row: _ManifestRow) -> Analysis:
     In particular, the shared builder cannot infer how ancestry was assigned:
     the manifest producer owns that fact (issue #86).
     """
-    return Analysis(
-        analysis_id=row.trait_id,
-        analysis_label=row.trait_name,
-        trait_ontology_id=row.trait_ontology_id,
-        trait_ontology_label=row.trait_ontology_label,
-        license=row.license,
-        publication_doi=row.publication_doi,
-        publication_pmid=row.publication_pmid,
-        consortium=row.consortium,
-        first_author=row.first_author,
-        stored_effect_scale=row.stored_effect_scale,
-        assigned_ancestry=row.assigned_ancestry,
-        ancestry_assignment_method=row.ancestry_assignment_method,
-        ancestry_prop=row.ancestry_prop,
-        sample_size_kind=row.sample_size_kind,
-        sample_size_scope=row.sample_size_scope,
-        sample_size=str(row.n) if row.n else "",
-        n_cases=row.n_cases,
-        n_controls=row.n_controls,
-        original_effect_scale=row.original_effect_scale,
-        original_sd_method=row.original_sd_method,
-        original_sd=row.original_sd,
+    return row.metadata.applied_to(
+        Analysis(
+            analysis_id=row.trait_id,
+            analysis_label=row.trait_name,
+            trait_ontology_id=row.trait_ontology_id,
+            trait_ontology_label=row.trait_ontology_label,
+            stored_effect_scale=row.stored_effect_scale,
+            assigned_ancestry=row.assigned_ancestry,
+            sample_size=str(row.n) if row.n else "",
+            original_sd=row.original_sd,
+        )
     )
 
 
@@ -406,7 +387,7 @@ def _lift_manifest_variants(
     *,
     chain_file: str | Path | None,
     liftover_failure_threshold: float,
-) -> dict[tuple[str, int, str, str], str]:
+) -> tuple[dict[tuple[str, int, str, str], str], dict[str, str]]:
     """Resolve every manifest row's union of source variants to hg38 ALIDs
     (issue #85; the dense and hybrid builders' shared Pass 1).
 
@@ -425,7 +406,14 @@ def _lift_manifest_variants(
     Returns one merged ``{(chrom, pos, ref, alt): hg38_alid}`` lookup -- the
     shape the fork-safe Pass 2 key index (`_build_variant_key_index` /
     `_build_routing_index`) is already built from, so nothing downstream of
-    this function changes. A raw tuple present in *both* groups is not a
+    this function changes -- plus ``{hg38_alid: rsid}`` for the rows whose
+    source named one (issue #109). The rsid map rides along on this pass
+    rather than a second one: Pass 1 is already the serial read of every
+    source file, and re-reading them just to recover identifiers the first
+    read saw would double the most expensive part of a genome-scale build.
+    Where two sources name one variant differently, the first wins; where a
+    source names none, the ALID is simply absent from the map and its row's
+    rsid column is written blank. A raw tuple present in *both* groups is not a
     same-locus dedup the way a tuple shared by two same-assembly files is:
     the hg38 group's tuple is a literal coordinate, the hg19 group's
     identical-looking tuple is a *pre-lift* coordinate bound for a different
@@ -437,13 +425,18 @@ def _lift_manifest_variants(
     is dropped from both groups (never guessed) before returning.
     """
     tuples_by_assembly: dict[str, set[tuple[str, int, str, str]]] = {}
+    rsid_by_site: dict[tuple[str, int, str, str], str] = {}
     log.info("Pass 1: collecting source variants from %d files (serial)", len(manifest_rows))
     t0 = time.monotonic()
     for i, row in enumerate(manifest_rows):
         reader = resolve_reader(
             row.source_reader_capability, row.file_path, StoredEffectScale(row.stored_effect_scale)
         )
-        tuples_by_assembly.setdefault(row.source_assembly, set()).update(reader.stream_variants())
+        sites = tuples_by_assembly.setdefault(row.source_assembly, set())
+        for variant in reader.stream_variants():
+            sites.add(variant.site)
+            if variant.rsid:
+                rsid_by_site.setdefault(variant.site, variant.rsid)
         n_total = sum(len(t) for t in tuples_by_assembly.values())
         _log_progress(
             "Pass 1", i + 1, len(manifest_rows), t0, f"{n_total} unique variants so far", every=250
@@ -482,7 +475,16 @@ def _lift_manifest_variants(
             del passthrough_lookup[key]
             del lifted_lookup[key]
 
-    return {**passthrough_lookup, **lifted_lookup}
+    source_lookup = {**passthrough_lookup, **lifted_lookup}
+    # Re-key the identifiers onto the hg38 ALIDs the store's rows are keyed by.
+    # Several source sites can lift onto one ALID; the first named wins, the
+    # same first-wins rule the Ragged builders already apply.
+    rsid_by_alid: dict[str, str] = {}
+    for site, alid in source_lookup.items():
+        rsid = rsid_by_site.get(site)
+        if rsid:
+            rsid_by_alid.setdefault(alid, rsid)
+    return source_lookup, rsid_by_alid
 
 
 def build_dense_from_vcf_manifest(
@@ -554,7 +556,7 @@ def build_dense_from_vcf_manifest(
         # identical variant lists the union converges almost immediately — so the
         # parallel version pays a large IPC cost for no real speedup (and deadlocked
         # at genome-wide scale). The expensive, parallelised work is Pass 2.
-        source_lookup = _lift_manifest_variants(
+        source_lookup, rsid_by_alid = _lift_manifest_variants(
             manifest_rows,
             chain_file=chain_file,
             liftover_failure_threshold=liftover_failure_threshold,
@@ -602,7 +604,7 @@ def build_dense_from_vcf_manifest(
             else:
                 hg38_to_source[hg38_alid] = origin
         source_alids = [hg38_to_source.get(alid) for alid in hg38_alids]
-        write_variant_axis(staged.path, canonical_variants, {}, source_alids)
+        write_variant_axis(staged.path, canonical_variants, rsid_by_alid, source_alids)
 
         # ------------------------------------------------------------------
         # Fork-safe Pass 2 lookup: compose the two dicts into sorted numpy arrays so
@@ -840,29 +842,13 @@ def _read_manifest(manifest_path: str | Path) -> list[_ManifestRow]:
                 se_divisor=se_divisor,
                 source_reader_capability=row.get("source_reader_capability") or GWAS_VCF_CAPABILITY,
                 source_assembly=source_assembly,
-                original_sd_method=sd_method_raw,
                 original_sd=original_sd_raw,
                 assigned_ancestry=row.get("assigned_ancestry") or "",
-                ancestry_assignment_method=row.get("ancestry_assignment_method") or "",
-                sample_size_kind=row.get("sample_size_kind") or "",
-                sample_size_scope=row.get("sample_size_scope") or "",
-                n_cases=row.get("n_cases") or "",
-                n_controls=row.get("n_controls") or "",
-                original_effect_scale=row.get("original_effect_scale") or "",
-                ancestry_prop={
-                    key[len(ANCESTRY_PROP_PREFIX):]: value
-                    for key, value in row.items()
-                    if key.startswith(ANCESTRY_PROP_PREFIX) and value
-                },
+                metadata=PassthroughMetadata.from_manifest_row(row),
                 trait_ontology_id=row.get("trait_ontology_id") or "",
                 trait_ontology_label=(
                     row.get("trait_ontology_label") or row.get("trait_ontology_name") or ""
                 ),
-                license=row.get("license") or "",
-                publication_doi=row.get("publication_doi") or "",
-                publication_pmid=row.get("publication_pmid") or "",
-                consortium=row.get("consortium") or "",
-                first_author=row.get("first_author") or "",
             )
         )
     return result

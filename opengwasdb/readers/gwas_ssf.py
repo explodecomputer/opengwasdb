@@ -7,10 +7,11 @@ route through `opengwasdb.readers.registry.resolve_reader` into the Dense
 and Hybrid builders (issue #20), not only the Ragged-only path that module
 serves. `stream_associations`/`stream_variants` share one row parser
 (`_iter_rows`) with `extract_at_sites`, so orientation and column handling
-live in exactly one place. Unlike that Ragged path, `ReaderAssociation` has
-no rsid field -- rsid is not part of the `SourceReader` interface any more
-than it is for `GwasVcfReader` -- so this reader does not parse `rsid`/
-`variant_id` at all.
+live in exactly one place. `rsid`/`variant_id` are read into each
+`SourceVariant` (issue #109) so a Dense or Hybrid store built through this
+reader is queryable by rsid, exactly as the Ragged path already was;
+`ReaderAssociation` still has no rsid field -- an rsid names a variant, not
+an association.
 
 `ref`/`alt` on each `ReaderAssociation`/`stream_variants` tuple are the
 source's own `other_allele`/`effect_allele` labelling (mirroring GWAS-VCF's
@@ -36,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opengwasdb.model.enums import StoredEffectScale
-from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics
+from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics, SourceVariant
 from opengwasdb.readers.tabular import (
     TabularRow,
     extract_at_sites,
@@ -49,6 +50,22 @@ from opengwasdb.readers.tabular import (
 from opengwasdb.variants.normalise import VariantNormalisationError, orient_to_canonical
 
 GWAS_SSF_CAPABILITY = "opengwasdb.gwas-ssf"
+
+def _rsid(row: dict[str, str]) -> str:
+    """The row's rs identifier, or "" if it names none.
+
+    Harmonised GWAS-SSF carries a dedicated `rsid` column; `variant_id` is the
+    harmonised (usually non-rs) identifier and is only a fallback, mirroring
+    `opengwasdb.layouts.ragged.build_ssf._read_filtered`. Anything that is not
+    an rs identifier is dropped: it is not something a user can look the
+    variant up by (issue #109).
+    """
+    for column in ("rsid", "variant_id"):
+        value = (row.get(column) or "").strip()
+        if value.startswith("rs"):
+            return value
+    return ""
+
 
 def _iter_rows(path: str | Path) -> Iterator[TabularRow]:
     """Parse each row of a filtered/harmonised GWAS-SSF file once.
@@ -88,6 +105,7 @@ def _iter_rows(path: str | Path) -> Iterator[TabularRow]:
                 beta=beta,
                 se=se,
                 af_alt=parse_af(row.get("effect_allele_frequency")),
+                rsid=_rsid(row),
             )
 
 
@@ -107,7 +125,7 @@ class GwasSsfReader:
     def stream_associations(self) -> Iterator[ReaderAssociation]:
         yield from stream_associations(_iter_rows(self.path), self.stored_effect_scale)
 
-    def stream_variants(self) -> Iterator[tuple[str, int, str, str]]:
+    def stream_variants(self) -> Iterator[SourceVariant]:
         yield from stream_variants(_iter_rows(self.path))
 
     def extract_at_sites(self, alids: Iterable[str]) -> dict[str, SiteMetrics]:

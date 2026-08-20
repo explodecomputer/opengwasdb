@@ -144,6 +144,10 @@ def complete_hybrid_store(
         src_shared_all = src_shared_axis.all()
         src_shared_axis.close()
         source_alid_by_alid = {r.alid: r.source_alid for r in src_shared_all}
+        # Carry the observed store's rsids into the completed one (issue #109):
+        # Reference Completion adds panel rows, it does not rename the rows the
+        # source already named. Completed-only rows get no rsid.
+        rsid_by_alid = {r.alid: r.rsid for r in src_shared_all if r.rsid}
 
         overflow_alids = np.array(
             [vi_to_record[int(v)].alid for v in src_vi], dtype=object
@@ -194,7 +198,7 @@ def complete_hybrid_store(
         analyses = _read_analyses(dense_component_path(staged.path))
         _write_index(staged, union, analyses, _chunk_shape(src_manifest), DEFAULT_DTYPE)
         source_by_alid = {a: source_alid_by_alid.get(a) for a in union}
-        _write_variant_table(staged.path, union, source_by_alid)
+        _write_variant_table(staged.path, union, source_by_alid, rsid_by_alid)
 
         # ── 4. dense_to_shared map for the completed axis ─────────────────────
         dense_to_shared = np.array([new_shared_index[a] for a in dense_alids], dtype=np.int32)

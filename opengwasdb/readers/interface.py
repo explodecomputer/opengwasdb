@@ -60,6 +60,34 @@ class ReaderAssociation:
 
 
 @dataclass(frozen=True)
+class SourceVariant:
+    """One variant a source names, with the source's own identifier for it.
+
+    `chromosome`/`position`/`ref`/`alt` are the source's own labelling, same
+    as `ReaderAssociation`. `rsid` is whatever identifier the source records
+    for the row -- blank when it records none, never fabricated.
+
+    A dataclass rather than the bare 4-tuple this used to be (issue #109):
+    Dense and Hybrid builds discarded rsids entirely because the variant
+    stream had nowhere to carry them, so every rsid lookup against those
+    stores returned an empty result indistinguishable from "no association."
+    Dedup by `site`, not by the whole record -- two rows for one variant may
+    disagree on the identifier without being two different variants.
+    """
+
+    chromosome: str
+    position: int
+    ref: str
+    alt: str
+    rsid: str = ""
+
+    @property
+    def site(self) -> tuple[str, int, str, str]:
+        """The variant's identity, independent of what the source calls it."""
+        return (self.chromosome, self.position, self.ref, self.alt)
+
+
+@dataclass(frozen=True)
 class SiteMetrics:
     """A1-oriented allele frequency and standard error at one canonical site."""
 
@@ -81,9 +109,9 @@ class SourceReader(Protocol):
         """Yield every association in the source, oriented per ReaderAssociation."""
         ...
 
-    def stream_variants(self) -> Iterator[tuple[str, int, str, str]]:
-        """Yield ``(chromosome, position, ref, alt)`` for every biallelic variant
-        in the source, independent of whether it carries a usable association.
+    def stream_variants(self) -> Iterator[SourceVariant]:
+        """Yield a `SourceVariant` for every biallelic variant in the source,
+        independent of whether it carries a usable association.
 
         A superset of what :meth:`stream_associations` yields positions for --
         a record dropped there for an invalid/missing effect size or SE may

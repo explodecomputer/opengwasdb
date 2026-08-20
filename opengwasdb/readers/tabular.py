@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from opengwasdb.model.enums import StoredEffectScale
 from opengwasdb.readers.gwas_vcf import is_palindromic
-from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics
+from opengwasdb.readers.interface import ReaderAssociation, SiteMetrics, SourceVariant
 
 _MISSING = {"", ".", "NA", "NaN", "nan", "None"}
 
@@ -46,6 +46,7 @@ class TabularRow:
     beta: float | None
     se: float | None
     af_alt: float | None
+    rsid: str = ""  # the source's own identifier for this row; "" when it names none
 
 
 def stream_associations(
@@ -68,9 +69,15 @@ def stream_associations(
         )
 
 
-def stream_variants(rows: Iterable[TabularRow]) -> Iterator[tuple[str, int, str, str]]:
+def stream_variants(rows: Iterable[TabularRow]) -> Iterator[SourceVariant]:
     for row in rows:
-        yield row.chromosome, row.position, row.ref, row.alt
+        yield SourceVariant(
+            chromosome=row.chromosome,
+            position=row.position,
+            ref=row.ref,
+            alt=row.alt,
+            rsid=row.rsid,
+        )
 
 
 def extract_at_sites(
