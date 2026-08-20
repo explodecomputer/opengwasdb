@@ -946,7 +946,18 @@ class HybridStoreQuery:
 
     # ── shared-table tables ──────────────────────────────────────────────────
     def analyses_table(self) -> dict[int, dict]:
-        return self._dense.analyses_table()
+        """Every column of the *shared* `analyses.tsv`, keyed by analysis_index.
+
+        Deliberately not delegated to the Dense Component. Hybrid builds write
+        `analyses.tsv` twice -- once under `dense/` counting only that
+        component's on-panel top hits, once at the shared root where
+        `add_hit_counts()` has additionally counted the Ragged Overflow
+        Component's -- so the Dense Component's own copy undercounts
+        `n_hits_*` for any Analysis with off-panel hits (issue #107). The
+        Analytical Metadata columns are identical in both; only the counts
+        differ, which is exactly what makes the wrong one easy to miss.
+        """
+        return self._analyses.all()
 
     def resolve(
         self, result: dict[str, np.ndarray], *, include_variant_info: bool = False

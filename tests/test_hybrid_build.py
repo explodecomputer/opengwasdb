@@ -589,3 +589,43 @@ def test_mixed_hg19_and_hg38_manifest_builds_hybrid_store(tmp_path):
 
     assert vt[int(vcf_result["variant_index"][0])]["position"] == 1_564_620
     assert vt[int(ssf_result["variant_index"][0])]["position"] == HG19_POS_2
+
+
+def test_analyses_table_reports_shared_not_dense_only_hit_counts(hybrid_store):
+    """`analyses_table()` must report the shared table's Top-Hit Counts, which
+    include the Ragged Overflow Component's hits, not the Dense Component's
+    panel-local counts (issue #107).
+
+    The two files legitimately differ: `add_hit_counts()` is applied once
+    against the Dense Component's own index and again against the whole
+    store's, so the Dense Component's own `analyses.tsv` counts only on-panel
+    hits. Delegating to it silently undercounts every Analysis with off-panel
+    hits -- on the `gwas-catalog-eur-hybrid` pilot that hides 4,476 real hits,
+    one Analysis by 27%.
+    """
+    shared = read_analyses(hybrid_store / "analyses.tsv").rows
+    dense_only = read_analyses(hybrid_store / "dense" / "analyses.tsv").rows
+    shared_by_id = {r["analysis_id"]: r for r in shared}
+    dense_by_id = {r["analysis_id"]: r for r in dense_only}
+
+    # trait_a's middle variant is off-panel (routed to the Overflow) with
+    # z = -5.0 -> p ~ 5.7e-7, so it clears 5e-6/5e-4 but not 5e-8. That makes
+    # the shared and dense-only counts genuinely differ for this fixture --
+    # without which this test could pass on a store where the bug is invisible.
+    assert shared_by_id["trait_a"]["n_hits_5e6"] != dense_by_id["trait_a"]["n_hits_5e6"]
+
+    q = query_store(hybrid_store)
+    try:
+        table = q.analyses_table()
+    finally:
+        q.close()
+
+    by_id = {row["analysis_id"]: row for row in table.values()}
+    for analysis_id, shared_row in shared_by_id.items():
+        for column in ("n_hits_5e8", "n_hits_5e6", "n_hits_5e4"):
+            assert by_id[analysis_id][column] == shared_row[column], (
+                f"{analysis_id}.{column}: analyses_table() returned "
+                f"{by_id[analysis_id][column]!r} (the Dense Component's "
+                f"panel-local count) rather than the shared table's "
+                f"{shared_row[column]!r}"
+            )
