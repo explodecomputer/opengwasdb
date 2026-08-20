@@ -56,8 +56,12 @@ def stream_associations(
         if row.beta is None or row.se is None:
             continue
         z = row.beta / row.se
+        eaf = row.af_alt
         if row.flipped:
             z = -z
+            # `af_alt` is the frequency of the source's alt allele; flipping
+            # swapped which allele is stored as the effect one (ADR 0036).
+            eaf = None if eaf is None else 1.0 - eaf
         yield ReaderAssociation(
             chromosome=row.chromosome,
             position=row.position,
@@ -66,6 +70,7 @@ def stream_associations(
             z=z,
             se=row.se,
             stored_effect_scale=stored_effect_scale,
+            eaf=eaf,
         )
 
 

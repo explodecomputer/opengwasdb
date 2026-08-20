@@ -17,9 +17,11 @@ of the Store Variant Table, one sequential scan instead (see that method's
 docstring) -- and only when `include_variant_info=True`, since that's the
 one part of this join that can cost anywhere from milliseconds to tens of
 seconds on a large dense query. Named for what it gates rather than for
-rsid specifically: eaf is expected to join this same flag once #106 lands
-(store-level effect allele frequency), since it will need the same
-variants.tsv.gz-backed (or similarly non-free) lookup rsid does today. The
+rsid specifically: `eaf` joins it too (ADR 0036), though for a different
+reason -- eaf rides along in the query result the facade already returned,
+so it costs nothing to resolve. It is gated because it *describes the
+variant*, which is what the flag means, and because #104 had just made the
+default column set a promise worth keeping stable. The
 analysis side comes from `analyses.all()`, already fully loaded at
 store-open (ADR 0030, no extra I/O). Rows are yielded lazily, so the CLI's
 CSV writer streams rather than materialising the whole resolved table.
@@ -46,13 +48,14 @@ def resolve_rows(
     """Yield one human-readable row per association in `result`.
 
     Each row carries analysis_id/analysis_label, variant identity
-    (chromosome/position/alid/alleles, plus rsid when
-    `include_variant_info=True` -- "." when the store has none for that
-    variant, matching the Store Variant Table's own missing marker), z, se,
-    log10_p, and association_status. `rsid` is omitted from the row
-    entirely when `include_variant_info=False` (the default) rather than
-    filled with a placeholder, since resolving it is the expensive part of
-    this join at scale and skipping it is the point of the flag.
+    (chromosome/position/alid/alleles, plus rsid and eaf when
+    `include_variant_info=True` -- "." when the store has neither for that
+    association, matching the Store Variant Table's own missing marker), z,
+    se, log10_p, and association_status. `rsid`/`eaf` are omitted from the
+    row entirely when `include_variant_info=False` (the default) rather than
+    filled with a placeholder: for rsid because resolving it is the expensive
+    part of this join at scale, and for eaf because a store that carries none
+    would otherwise add a column of "." to every default query (ADR 0036).
     """
     analysis_rows = analyses.all()
     variant_index = result["variant_index"]
@@ -100,4 +103,20 @@ def resolve_rows(
             assert variant_rows is not None
             rsid_record = variant_rows.get(vi)
             row["rsid"] = (rsid_record.rsid or ".") if rsid_record is not None else "."
+            row["eaf"] = _eaf_or_missing(result, i)
         yield row
+
+
+def _eaf_or_missing(result: dict[str, np.ndarray], i: int) -> object:
+    """This association's stored EAF, or "." (ADR 0036).
+
+    NaN is the store's per-cell "no EAF here" marker, and `eaf` is absent
+    from results produced before ADR 0036 landed; both resolve to the same
+    "." the rest of this row uses for an unknown value, so a reader never has
+    to tell "the store has no EAF array" apart from "this cell has none".
+    """
+    eaf = result.get("eaf")
+    if eaf is None or i >= len(eaf):
+        return "."
+    value = float(eaf[i])
+    return "." if not np.isfinite(value) else value

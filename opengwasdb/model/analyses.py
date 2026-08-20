@@ -33,6 +33,7 @@ from typing import Any
 
 from opengwasdb.model.enums import (
     AncestryAssignmentMethod,
+    EafScope,
     OriginalSdMethod,
     SampleSizeKind,
     SampleSizeScope,
@@ -136,6 +137,7 @@ _VOCABULARIES: dict[str, type[StrEnum]] = {
     "sample_size_scope": SampleSizeScope,
     "original_sd_method": OriginalSdMethod,
     "ancestry_assignment_method": AncestryAssignmentMethod,
+    "eaf_scope": EafScope,
 }
 
 _CASE_CONTROL_SCALE_VALUES = {StoredEffectScale.LOG_OR.value, StoredEffectScale.LOG_HAZARD.value}
@@ -323,6 +325,7 @@ ANALYSIS_COLUMNS: tuple[str, ...] = (
     "sample_size",
     "n_cases",
     "n_controls",
+    "eaf_scope",
     "original_effect_scale",
     "original_sd",
     "original_sd_method",
@@ -399,6 +402,12 @@ class Analysis:
     sample_size: str = ""
     n_cases: str = ""
     n_controls: str = ""
+    # How to read this Analysis's `eaf` cells (ADR 0036, spec §9): "absent" or
+    # "" when the build stored none, "association" when it stored a per-cell
+    # value. Derived by the builder from what it actually wrote -- never copied
+    # from a manifest, which cannot know what the source file turned out to
+    # contain.
+    eaf_scope: str = ""
     original_effect_scale: str = ""
     original_sd: str = ""
     original_sd_method: str = ""
@@ -521,6 +530,7 @@ def _analysis_row(index: int, a: Analysis, fieldnames: tuple[str, ...]) -> dict[
         "sample_size": a.sample_size,
         "n_cases": a.n_cases,
         "n_controls": a.n_controls,
+        "eaf_scope": a.eaf_scope,
         "original_effect_scale": a.original_effect_scale,
         "original_sd": a.original_sd,
         "original_sd_method": a.original_sd_method,
@@ -568,6 +578,7 @@ def _analysis_from_row(row: dict[str, str], fieldnames: tuple[str, ...]) -> Anal
         sample_size=row.get("sample_size", ""),
         n_cases=row.get("n_cases", ""),
         n_controls=row.get("n_controls", ""),
+        eaf_scope=row.get("eaf_scope", ""),
         original_effect_scale=row.get("original_effect_scale", ""),
         original_sd=row.get("original_sd", ""),
         original_sd_method=row.get("original_sd_method", ""),

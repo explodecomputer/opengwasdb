@@ -330,6 +330,14 @@ For imputed associations, EAF comes from the LD Reference Panel when stored. In 
 - observed association: source EAF;
 - imputed association: reference-panel EAF.
 
+Each Analysis declares its EAF Scope in `analyses.tsv`'s `eaf_scope` column
+(ADR 0036), derived by the builder from what it actually stored rather than
+copied from a build manifest. Builders emit `absent` or `association`;
+`variant` remains specified but unimplemented, since no ingestion path can
+establish that one value is genuinely shared. Reference Completion carries
+observed EAF across unchanged; supplying reference-panel EAF for imputed
+cells is not yet implemented, and those cells read as NaN.
+
 ## 10. Dense Observed-Only layout
 
 Dense Observed-Only is the first implementation target.
@@ -346,6 +354,18 @@ Required statistic arrays:
 data.zarr/z
 data.zarr/se
 ```
+
+Optional (ADR 0036), same shape and chunking as the required arrays:
+
+```text
+data.zarr/eaf
+```
+
+`eaf` is `float32` where `z`/`se` are `float16`: the canonical A1 is the
+lexicographically smaller allele rather than the minor one, so EAF near 1 is
+ordinary, and `float16` spacing near 1.0 (0.00049) would round a MAF of 1e-4
+to zero. The array is absent entirely when no Analysis in the release carries
+a frequency; per-cell NaN carries per-Analysis and per-cell absence alike.
 
 In Observed-Only Dense stores:
 
@@ -368,6 +388,10 @@ variant_idx
 z
 se
 ```
+
+`eaf` (ADR 0036) is an optional fourth parallel array (`data.zarr/ragged/eaf`,
+`float32`), aligned with the CSR `z`/`se` and absent when no Analysis in the
+release carries a frequency.
 
 Ragged layout is used when Analyses do not share one dense source variant axis or when Association Coverage is Cis-and-Signals.
 

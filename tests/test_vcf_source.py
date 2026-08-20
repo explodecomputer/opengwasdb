@@ -87,7 +87,7 @@ def test_stream_vcf_associations_uses_ez_when_present(tmp_path):
     assocs = list(stream_vcf_associations(vcf))
 
     assert len(assocs) == 1
-    chrom, pos, ref, alt, z, se = assocs[0]
+    chrom, pos, ref, alt, z, se, eaf = assocs[0]
     assert z == pytest.approx(-5.0, rel=1e-4)
 
 
@@ -146,16 +146,18 @@ def test_stream_vcf_associations_skips_zero_se(tmp_path):
     assert assocs[0][1] == 200
 
 
-def test_stream_vcf_associations_yields_six_element_tuples(tmp_path):
+def test_stream_vcf_associations_yields_seven_element_tuples(tmp_path):
     """No effect-scale element (issue #17): the tuple is exactly
-    (chrom, pos, ref, alt, z, se), regardless of the header's StudyType."""
+    (chrom, pos, ref, alt, z, se, eaf), regardless of the header's StudyType.
+    `eaf` joined it in ADR 0036 and is None for a file declaring no AF tag."""
     vcf = tmp_path / "test.vcf"
     _write_vcf(vcf, "1\t100\t.\tA\tG\t.\tPASS\t.\tES:SE\t1.0:0.5\n", study_type="Unknown")
 
     assocs = list(stream_vcf_associations(vcf))
 
     assert len(assocs) == 1
-    assert len(assocs[0]) == 6
+    assert len(assocs[0]) == 7
+    assert assocs[0][6] is None
 
 
 def test_all_functions_raise_when_bcftools_not_on_path(tmp_path):

@@ -321,6 +321,19 @@ def _validate_ragged_store(store: OpenGWASDBStore, errors: list[str]) -> Validat
         se_vals = root["se"][:].astype("float32")
         if np.any(np.isfinite(se_vals) & (se_vals < 0)):
             errors.append("se contains negative finite values")
+        # `eaf` is optional (ADR 0036); when present it is a fourth parallel
+        # CSR array and must line up with the other three.
+        if "eaf" in root:
+            if len(root["eaf"]) != n_assoc:
+                errors.append(
+                    f"data.zarr/ragged/eaf has {len(root['eaf'])} entries "
+                    f"but offsets imply {n_assoc}"
+                )
+            else:
+                eaf_vals = root["eaf"][:].astype("float32")
+                finite = np.isfinite(eaf_vals)
+                if np.any(finite & ((eaf_vals < 0.0) | (eaf_vals > 1.0))):
+                    errors.append("data.zarr/ragged/eaf contains finite values outside [0, 1]")
 
         n_analyses_csr = len(offsets) - 1
         n_analyses_tsv = _validate_analyses_tsv(analyses_path, errors)
@@ -935,6 +948,13 @@ def _validate_dense_arrays(
         errors.append(f"z shape {tuple(z_arr.shape)} does not match {expected_shape}")
     if tuple(se_arr.shape) != expected_shape:
         errors.append(f"se shape {tuple(se_arr.shape)} does not match {expected_shape}")
+    # `eaf` is optional (ADR 0036) -- absent on every store built before it, and
+    # on any build whose sources report no frequency -- but when present it is a
+    # third parallel plane and must have the same shape as z/se.
+    eaf_arr = root["eaf"] if "eaf" in root else None
+    if eaf_arr is not None and tuple(eaf_arr.shape) != expected_shape:
+        errors.append(f"eaf shape {tuple(eaf_arr.shape)} does not match {expected_shape}")
+        eaf_arr = None
     if errors:
         return
 
@@ -946,12 +966,18 @@ def _validate_dense_arrays(
     imp_nan_z = False
     imp_nan_se = False
     off_panel_imputed = False
+    eaf_out_of_range = False
     for r0 in range(0, n_variants, _VALIDATE_BAND_ROWS):
         r1 = min(r0 + _VALIDATE_BAND_ROWS, n_variants)
         z = z_arr[r0:r1]
         se = se_arr[r0:r1]
         if not neg_se and np.any(np.isfinite(se) & (se < 0)):
             neg_se = True
+        if eaf_arr is not None and not eaf_out_of_range:
+            eaf = eaf_arr[r0:r1]
+            finite = np.isfinite(eaf)
+            if np.any(finite & ((eaf < 0.0) | (eaf > 1.0))):
+                eaf_out_of_range = True
         if not missingness and np.any(np.isnan(z) != np.isnan(se)):
             missingness = True
         if imputed_arr is not None:
@@ -983,6 +1009,8 @@ def _validate_dense_arrays(
         errors.append(
             "off-panel (on_panel=0) rows have imputed=1 cells — off-panel is never imputable"
         )
+    if eaf_out_of_range:
+        errors.append("data.zarr/eaf contains finite values outside [0, 1]")
 
 
 def _validate_top_hits(root: Any, errors: list[str]) -> None:
@@ -1250,7 +1278,9 @@ def _stream_unit(
 
         if analysis_id is None:
             return  # a VCF carries no analysis_id; it needs a manifest trait_id
-        for chrom, pos, ref, alt, z, se in stream_vcf_associations(path):
+        # `_eaf` is unused here: this check compares stored z/se against the
+        # source, and EAF plays no part in that (ADR 0036).
+        for chrom, pos, ref, alt, z, se, _eaf in stream_vcf_associations(path):
             a1, a2 = sorted((ref, alt))
             yield (analysis_id, chrom, int(pos), a1, a2, float(z), float(se))
     else:

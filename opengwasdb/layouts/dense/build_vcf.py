@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,6 +41,7 @@ from opengwasdb.model.analyses import Analysis, PassthroughMetadata
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
+    EafScope,
     OriginalSdMethod,
     PrimaryStorageLayout,
     StoredEffectScale,
@@ -53,6 +54,10 @@ from opengwasdb.variants import CanonicalVariant, write_variant_axis
 from opengwasdb.variants.normalise import chromosome_sort_key
 
 log = logging.getLogger(__name__)
+
+# One compressor for every dense statistic array (z/se/eaf), so a new array
+# cannot quietly ship with different settings from the ones beside it.
+_DENSE_COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 
 __all__ = ["build_dense_from_vcf_manifest", "LiftoverFailureError"]
 
@@ -219,15 +224,17 @@ def _match_batch(
     alts: list[str],
     zs: list[float],
     ses: list[float],
+    eafs: list[float],
     keys_sorted: np.ndarray,
     rows_sorted: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Resolve one batch of associations to (rows, z, se) for cells whose variant
-    is present in the panel (exact key match). Order-preserving."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Resolve one batch of associations to (rows, z, se, eaf) for cells whose
+    variant is present in the panel (exact key match). Order-preserving.
+    `eaf` is NaN for associations whose source reported none (ADR 0036)."""
     if len(keys_sorted) == 0:
         empty_i = np.empty(0, dtype=np.int64)
         empty_f = np.empty(0, dtype=np.float32)
-        return empty_i, empty_f, empty_f
+        return empty_i, empty_f, empty_f, empty_f
     query = _encode_variant_keys(chroms, poss, refs, alts)
     idx = np.searchsorted(keys_sorted, query)
     idx_clip = np.minimum(idx, len(keys_sorted) - 1)
@@ -235,7 +242,8 @@ def _match_batch(
     rows = rows_sorted[idx_clip[matched]].astype(np.int64)
     z_arr = np.array(zs, dtype=np.float32)[matched]
     se_arr = np.array(ses, dtype=np.float32)[matched]
-    return rows, z_arr, se_arr
+    eaf_arr = np.array(eafs, dtype=np.float32)[matched]
+    return rows, z_arr, se_arr, eaf_arr
 
 
 def _apply_se_divisor(se: np.ndarray, se_divisor: float) -> np.ndarray:
@@ -256,10 +264,11 @@ def _resolve_column(
     *,
     capability: str = GWAS_VCF_CAPABILITY,
     stored_effect_scale: str = StoredEffectScale.SD.value,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Stream one source file, resolve each association's variant to a row via
-    the sorted key lookup, and return deduped ``(rows int64, z f32, se f32)``
-    for the column.
+    the sorted key lookup, and return deduped
+    ``(rows int64, z f32, se f32, eaf f32)`` for the column. ``eaf`` is NaN
+    where the source reports no frequency (ADR 0036).
 
     The stream is processed in ``_RESOLVE_BATCH``-sized batches (vectorised
     searchsorted per batch), so worker peak memory is bounded by one batch rather
@@ -283,26 +292,32 @@ def _resolve_column(
     rows_parts: list[np.ndarray] = []
     z_parts: list[np.ndarray] = []
     se_parts: list[np.ndarray] = []
+    eaf_parts: list[np.ndarray] = []
     chroms: list[str] = []
     poss: list[int] = []
     refs: list[str] = []
     alts: list[str] = []
     zs: list[float] = []
     ses: list[float] = []
+    eafs: list[float] = []
 
     def _flush() -> None:
         if not zs:
             return
-        r, z, se = _match_batch(chroms, poss, refs, alts, zs, ses, keys_sorted, rows_sorted)
+        r, z, se, eaf = _match_batch(
+            chroms, poss, refs, alts, zs, ses, eafs, keys_sorted, rows_sorted
+        )
         rows_parts.append(r)
         z_parts.append(z)
         se_parts.append(se)
+        eaf_parts.append(eaf)
         chroms.clear()
         poss.clear()
         refs.clear()
         alts.clear()
         zs.clear()
         ses.clear()
+        eafs.clear()
 
     for assoc in reader.stream_associations():
         chroms.append(assoc.chromosome)
@@ -311,6 +326,7 @@ def _resolve_column(
         alts.append(assoc.alt)
         zs.append(assoc.z)
         ses.append(assoc.se)
+        eafs.append(float("nan") if assoc.eaf is None else assoc.eaf)
         if len(zs) >= _RESOLVE_BATCH:
             _flush()
     _flush()
@@ -318,24 +334,30 @@ def _resolve_column(
     if not rows_parts:
         empty_i = np.empty(0, dtype=np.int64)
         empty_f = np.empty(0, dtype=np.float32)
-        return empty_i, empty_f, empty_f
+        return empty_i, empty_f, empty_f, empty_f
 
     rows = np.concatenate(rows_parts)
     z_arr = np.concatenate(z_parts)
     se_arr = np.concatenate(se_parts)
+    eaf_arr = np.concatenate(eaf_parts)
 
     if len(rows):
         # last-wins dedup by row: unique on the reversed rows returns the first
         # index in reversed order == the last occurrence in original order.
         _, first_in_rev = np.unique(rows[::-1], return_index=True)
         keep = np.sort(len(rows) - 1 - first_in_rev)
-        rows, z_arr, se_arr = rows[keep], z_arr[keep], se_arr[keep]
+        rows, z_arr, se_arr, eaf_arr = rows[keep], z_arr[keep], se_arr[keep], eaf_arr[keep]
     se_arr = _apply_se_divisor(se_arr, se_divisor)
-    return rows, z_arr, se_arr
+    return rows, z_arr, se_arr, eaf_arr
 
 
 def _spill_column(
-    spill_dir: Path, col_idx: int, rows: np.ndarray, z: np.ndarray, se: np.ndarray
+    spill_dir: Path,
+    col_idx: int,
+    rows: np.ndarray,
+    z: np.ndarray,
+    se: np.ndarray,
+    eaf: np.ndarray | None = None,
 ) -> None:
     """Atomically spill one resolved column to ``{spill_dir}/{col_idx}.npz``
     (temp-then-rename; both names end in .npz because np.savez appends that suffix
@@ -346,7 +368,9 @@ def _spill_column(
     query reads back from the ``z`` array (issue 046)."""
     final = spill_dir / f"{col_idx}.npz"
     tmp = spill_dir / f"{col_idx}.tmp.npz"
-    np.savez(tmp, rows=rows, z=z, se=se)
+    if eaf is None:
+        eaf = np.full(len(rows), np.nan, dtype=np.float32)
+    np.savez(tmp, rows=rows, z=z, se=se, eaf=eaf)
     tmp.replace(final)
 
 
@@ -357,7 +381,7 @@ def _pass2_worker(task: tuple[int, str, float, str, str]) -> int:
     assert _pass2_rows_sorted is not None
     assert _pass2_spill_dir is not None
     col_idx, file_path, se_divisor, capability, stored_effect_scale = task
-    rows, z, se = _resolve_column(
+    rows, z, se, eaf = _resolve_column(
         file_path,
         _pass2_keys_sorted,
         _pass2_rows_sorted,
@@ -365,7 +389,7 @@ def _pass2_worker(task: tuple[int, str, float, str, str]) -> int:
         capability=capability,
         stored_effect_scale=stored_effect_scale,
     )
-    _spill_column(_pass2_spill_dir, col_idx, rows, z, se)
+    _spill_column(_pass2_spill_dir, col_idx, rows, z, se, eaf)
     return col_idx
 
 
@@ -642,7 +666,7 @@ def build_dense_from_vcf_manifest(
             if n_workers <= 1:
                 for i, row in enumerate(manifest_rows):
                     col_idx = analysis_index[row.trait_id]
-                    rows, z, se = _resolve_column(
+                    rows, z, se, eaf = _resolve_column(
                         row.file_path,
                         keys_sorted,
                         rows_sorted,
@@ -650,7 +674,7 @@ def build_dense_from_vcf_manifest(
                         capability=row.source_reader_capability,
                         stored_effect_scale=row.stored_effect_scale,
                     )
-                    _spill_column(spill_dir, col_idx, rows, z, se)
+                    _spill_column(spill_dir, col_idx, rows, z, se, eaf)
                     _log_progress(
                         "Pass 2", i + 1, n_analyses, pass2_start, f"last: {row.trait_id}", every=25
                     )
@@ -689,7 +713,7 @@ def build_dense_from_vcf_manifest(
             # chunk-column bands, harvesting top-hit candidates as we go. Peak memory
             # is one band (n_variants × chunk-analysis-width), not the full matrix.
             # --------------------------------------------------------------
-            all_rows, all_cols, all_z, all_se = _write_dense_bands(
+            all_rows, all_cols, all_z, all_se, column_has_eaf = _write_dense_bands(
                 staged, spill_dir, n_variants, n_analyses, effective_chunks, dtype, pass2_start
             )
         finally:
@@ -700,6 +724,7 @@ def build_dense_from_vcf_manifest(
         )
         log.info("Writing top-hit index from %d harvested candidate cells", len(all_rows))
         write_top_hit_indexes(staged.path, all_rows, all_cols, all_z, all_se)
+        analyses = apply_eaf_scope(analyses, column_has_eaf)
         write_analyses_tsv(staged.path, add_hit_counts(staged.path, analyses))
         log.info("Build complete: %d variants × %d analyses", n_variants, n_analyses)
 
@@ -896,6 +921,54 @@ def _parse_alid(alid: str) -> tuple[str, int, str, str]:
     return parts[0], int(parts[1]), parts[2], parts[3]
 
 
+def apply_eaf_scope(analyses: list[Analysis], column_has_eaf: np.ndarray) -> list[Analysis]:
+    """Stamp each Analysis's `eaf_scope` from what the build actually stored.
+
+    Derived, never copied from the manifest (ADR 0036): only the build knows
+    whether the source file turned out to carry a usable frequency, so a
+    manifest claiming EAF for an Analysis whose file has none must not be able
+    to make the store declare it. `column_has_eaf` is positional, matching
+    `analysis_index`.
+    """
+    return [
+        replace(
+            analysis,
+            eaf_scope=(
+                EafScope.ASSOCIATION.value
+                if bool(column_has_eaf[index])
+                else EafScope.ABSENT.value
+            ),
+        )
+        for index, analysis in enumerate(analyses)
+    ]
+
+
+def create_eaf_array(
+    staged: StagedRelease, n_variants: int, n_analyses: int, effective_chunks: tuple[int, int]
+) -> None:
+    """Create the NaN-filled `eaf` array (ADR 0036).
+
+    Created after Pass 2, not alongside `z`/`se`, because whether *any*
+    Analysis has a usable frequency is only known once the sources have been
+    read. A build that found none writes no array at all, so its store is
+    byte-identical in shape to one built before EAF existed.
+
+    `float32`, unlike `z`/`se`: `float16` spacing near 1.0 is 0.00049, and the
+    canonical A1 is the lexicographically smaller allele rather than the minor
+    one, so EAF near 1 is ordinary here -- `float16` would silently round
+    "MAF 1e-4" to "MAF 0" for half the ALID space.
+    """
+    root = staged.arrays(mode="a")
+    root.create_dataset(
+        "eaf",
+        shape=(n_variants, n_analyses),
+        chunks=effective_chunks,
+        compressor=_DENSE_COMPRESSOR,
+        dtype="float32",
+        fill_value=float("nan"),
+    )
+
+
 def _create_dense_zarr(
     staged: StagedRelease,
     n_variants: int,
@@ -909,7 +982,7 @@ def _create_dense_zarr(
     chunks match what is physically stored. The arrays are created without data;
     ``_write_dense_bands`` fills them by chunk-column band afterwards.
     """
-    compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
+    compressor = _DENSE_COMPRESSOR
     effective_chunks = (min(chunk_shape[0], n_variants), min(chunk_shape[1], n_analyses))
     root = staged.arrays(mode="w")
     for name in ("z", "se"):
@@ -936,7 +1009,7 @@ def _write_dense_bands(
     effective_chunks: tuple[int, int],
     dtype: str,
     pass2_start: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Stream the retained per-column spills into the zarr in chunk-column bands.
 
     ``z`` and ``se`` are written in two separate passes over a **single reused**
@@ -957,6 +1030,7 @@ def _write_dense_bands(
     hit_cols_parts: list[np.ndarray] = []
     hit_z_parts: list[np.ndarray] = []
     hit_se_parts: list[np.ndarray] = []
+    column_has_eaf = np.zeros(n_analyses, dtype=bool)
 
     # Pass 1 — z. Fill, write z, and harvest top hits (se pulled from the spill,
     # rounded to the stored dtype so the index matches what queries read from z).
@@ -969,6 +1043,7 @@ def _write_dense_bands(
             local = c - c0
             with np.load(spill_dir / f"{c}.npz") as data:
                 rows = data["rows"]
+                column_has_eaf[c] = bool(np.isfinite(data["eaf"]).any())
                 band[rows, local] = data["z"]
                 zc = band[rows, local]  # stored float16 z
                 hit = np.abs(zc.astype(np.float32)) >= _TOP_HIT_Z_CRIT
@@ -991,11 +1066,32 @@ def _write_dense_bands(
             local = c - c0
             with np.load(spill_dir / f"{c}.npz") as data:
                 band[data["rows"], local] = data["se"]
-            (spill_dir / f"{c}.npz").unlink()
         se_arr[:, c0:c1] = band[:, :w]
         _log_progress(
             "Band-write se", c1, n_analyses, pass2_start, f"cols {c0}:{c1}", every=band_cols
         )
+
+    # Pass 3 -- eaf (ADR 0036). Its own float32 buffer, since eaf cannot share
+    # z/se's float16 (see `create_eaf_array`). Skipped whole when no source
+    # reported a frequency.
+    if column_has_eaf.any():
+        create_eaf_array(staged, n_variants, n_analyses, effective_chunks)
+        eaf_zarr = staged.arrays(mode="a")["eaf"]
+        eaf_band = np.empty((n_variants, band_cols), dtype="float32")
+        for c0 in range(0, n_analyses, band_cols):
+            c1 = min(c0 + band_cols, n_analyses)
+            w = c1 - c0
+            eaf_band[:, :w] = np.nan
+            for c in range(c0, c1):
+                local = c - c0
+                with np.load(spill_dir / f"{c}.npz") as data:
+                    eaf_band[data["rows"], local] = data["eaf"]
+            eaf_zarr[:, c0:c1] = eaf_band[:, :w]
+            _log_progress(
+                "Band-write eaf", c1, n_analyses, pass2_start, f"cols {c0}:{c1}", every=band_cols
+            )
+    for c in range(n_analyses):
+        (spill_dir / f"{c}.npz").unlink(missing_ok=True)
 
     if hit_rows_parts:
         return (
@@ -1003,12 +1099,14 @@ def _write_dense_bands(
             np.concatenate(hit_cols_parts),
             np.concatenate(hit_z_parts),
             np.concatenate(hit_se_parts),
+            column_has_eaf,
         )
     return (
         np.empty(0, dtype=np.int64),
         np.empty(0, dtype=np.int64),
         np.empty(0, dtype=np.float32),
         np.empty(0, dtype=np.float32),
+        column_has_eaf,
     )
 
 

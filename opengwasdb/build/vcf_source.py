@@ -58,13 +58,35 @@ def stream_vcf_variants(path: str | Path) -> Iterator[tuple[str, int, str, str, 
         proc.wait()
 
 
+def has_format_tag(path: str | Path, tag: str) -> bool:
+    """Whether this VCF's header declares FORMAT/`tag`.
+
+    bcftools fails the whole query when asked to format a tag the header does
+    not declare, so a caller that wants an optional field must ask first
+    rather than tolerate a missing value per row (ADR 0036: AF is optional,
+    and a build must not lose every association in a file just because that
+    file reports no allele frequency).
+    """
+    bcftools = _require_bcftools()
+    header = subprocess.run(
+        [bcftools, "view", "-h", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    return f"##FORMAT=<ID={tag}," in header
+
+
 def stream_vcf_associations(
     path: str | Path,
-) -> Iterator[tuple[str, int, str, str, float, float]]:
-    """Yield (bare_chrom, pos, ref, alt, z, se) for each biallelic record.
+) -> Iterator[tuple[str, int, str, str, float, float, float | None]]:
+    """Yield (bare_chrom, pos, ref, alt, z, se, eaf) for each biallelic record.
 
     z is oriented to canonical ALID convention: A1 = min(ref, alt).  When the
     VCF effect allele (ALT) is not A1, z is negated.  SE is always positive.
+    `eaf` follows z: it is FORMAT/AF re-expressed for the *stored* effect
+    allele, so a negated z carries ``1 - AF`` (ADR 0036). None when the file
+    declares no AF tag, or reports none for this record.
 
     Records with SE ≤ 0, non-finite z, or all EZ/ES/SE missing are skipped.
 
@@ -77,14 +99,14 @@ def stream_vcf_associations(
     schema (issue #16).
     """
     bcftools = _require_bcftools()
+    with_af = has_format_tag(path, "AF")
+    fields = "%CHROM\t%POS\t%REF\t%ALT\t[%EZ]\t[%ES]\t[%SE]"
+    n_fields = 7
+    if with_af:
+        fields += "\t[%AF]"
+        n_fields = 8
     proc = subprocess.Popen(
-        [
-            bcftools,
-            "query",
-            "-f",
-            "%CHROM\t%POS\t%REF\t%ALT\t[%EZ]\t[%ES]\t[%SE]\n",
-            str(path),
-        ],
+        [bcftools, "query", "-f", fields + "\n", str(path)],
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -94,9 +116,10 @@ def stream_vcf_associations(
             if not line:
                 continue
             parts = line.split("\t")
-            if len(parts) != 7:
+            if len(parts) != n_fields:
                 continue
-            chrom_raw, pos_str, ref, alt, ez_str, es_str, se_str = parts
+            chrom_raw, pos_str, ref, alt, ez_str, es_str, se_str = parts[:7]
+            af = _parse_af(parts[7]) if with_af else None
             if "," in alt:
                 continue
 
@@ -108,13 +131,22 @@ def stream_vcf_associations(
             if z is None or not math.isfinite(z):
                 continue
 
+            eaf = af
             if alt > ref:
                 z = -z
+                # ALT is the VCF's effect allele; A1 = min(ref, alt), so the
+                # stored effect allele is REF here and AF must follow (ADR 0036).
+                eaf = None if af is None else 1.0 - af
 
-            yield normalise_chromosome(chrom_raw), int(pos_str), ref, alt, z, se
+            yield normalise_chromosome(chrom_raw), int(pos_str), ref, alt, z, se, eaf
     finally:
         proc.stdout.close()  # type: ignore[union-attr]
         proc.wait()
+
+
+def _parse_af(s: str) -> float | None:
+    af = _parse_float(s)
+    return af if af is not None and 0.0 <= af <= 1.0 else None
 
 
 def _parse_float(s: str) -> float | None:

@@ -146,7 +146,7 @@ class GwasVcfReader:
     region: str | None = None
 
     def stream_associations(self) -> Iterator[ReaderAssociation]:
-        for chrom, pos, ref, alt, z, se in stream_vcf_associations(self.path):
+        for chrom, pos, ref, alt, z, se, eaf in stream_vcf_associations(self.path):
             yield ReaderAssociation(
                 chromosome=chrom,
                 position=pos,
@@ -155,6 +155,7 @@ class GwasVcfReader:
                 z=z,
                 se=se,
                 stored_effect_scale=self.stored_effect_scale,
+                eaf=eaf,
             )
 
     def stream_variants(self) -> Iterator[SourceVariant]:

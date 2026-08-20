@@ -34,6 +34,7 @@ def molecular_analysis(
     stored_effect_scale: str = "",
     assigned_ancestry: str = "",
     metadata: PassthroughMetadata | None = None,
+    eaf_scope: str = "",
 ) -> Analysis:
     analysis = Analysis(
         analysis_id=analysis_id,
@@ -47,5 +48,6 @@ def molecular_analysis(
         sample_size=str(n) if n is not None else "",
         stored_effect_scale=stored_effect_scale,
         assigned_ancestry=assigned_ancestry,
+        eaf_scope=eaf_scope,
     )
     return metadata.applied_to(analysis) if metadata is not None else analysis

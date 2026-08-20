@@ -40,6 +40,7 @@ from opengwasdb.layouts.dense.build_vcf import (
     _read_manifest,
     _write_dense_bands,
     _write_index,
+    apply_eaf_scope,
 )
 from opengwasdb.layouts.dense.constants import (
     DEFAULT_CHUNK_SHAPE,
@@ -177,14 +178,14 @@ def _build_routing_index(
 
 
 def _dedup_last_wins(
-    target: np.ndarray, z: np.ndarray, se: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    target: np.ndarray, z: np.ndarray, se: np.ndarray, eaf: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Keep the last stream occurrence per target index (matches dense semantics)."""
     if len(target) == 0:
-        return target, z, se
+        return target, z, se, eaf
     _, first_in_rev = np.unique(target[::-1], return_index=True)
     keep = np.sort(len(target) - 1 - first_in_rev)
-    return target[keep], z[keep], se[keep]
+    return target[keep], z[keep], se[keep], eaf[keep]
 
 
 def _resolve_column_hybrid(
@@ -197,12 +198,13 @@ def _resolve_column_hybrid(
     capability: str = GWAS_VCF_CAPABILITY,
     stored_effect_scale: str = StoredEffectScale.SD.value,
 ) -> tuple[
-    tuple[np.ndarray, np.ndarray, np.ndarray],
-    tuple[np.ndarray, np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
     """Stream one study once, routing each association to the dense fill (on-panel)
     or the ragged overflow (off-panel). Returns ``(dense, overflow)`` where each is
-    ``(index int64, z f32, se f32)`` deduped last-wins by index.
+    ``(index int64, z f32, se f32, eaf f32)`` deduped last-wins by index; `eaf` is
+    NaN where the source reports no frequency (ADR 0036).
 
     ``capability`` resolves a ``SourceReader`` (issue #20) rather than this
     module streaming a VCF itself; ``stored_effect_scale`` is required to
@@ -217,9 +219,11 @@ def _resolve_column_hybrid(
     d_idx: list[np.ndarray] = []
     d_z: list[np.ndarray] = []
     d_se: list[np.ndarray] = []
+    d_eaf: list[np.ndarray] = []
     o_idx: list[np.ndarray] = []
     o_z: list[np.ndarray] = []
     o_se: list[np.ndarray] = []
+    o_eaf: list[np.ndarray] = []
 
     chroms: list[str] = []
     poss: list[int] = []
@@ -227,12 +231,13 @@ def _resolve_column_hybrid(
     alts: list[str] = []
     zs: list[float] = []
     ses: list[float] = []
+    eafs: list[float] = []
 
     def _flush() -> None:
         if not zs:
             return
         if len(keys_sorted) == 0:
-            for lst in (chroms, poss, refs, alts, zs, ses):
+            for lst in (chroms, poss, refs, alts, zs, ses, eafs):
                 lst.clear()
             return
         query = _encode_variant_keys(chroms, poss, refs, alts)
@@ -243,16 +248,19 @@ def _resolve_column_hybrid(
         panel = ispanel_sorted[idx_clip[matched]]
         z_arr = np.array(zs, dtype=np.float32)[matched]
         se_arr = np.array(ses, dtype=np.float32)[matched]
+        eaf_arr = np.array(eafs, dtype=np.float32)[matched]
         if panel.any():
             d_idx.append(tgt[panel])
             d_z.append(z_arr[panel])
             d_se.append(se_arr[panel])
+            d_eaf.append(eaf_arr[panel])
         off = ~panel
         if off.any():
             o_idx.append(tgt[off])
             o_z.append(z_arr[off])
             o_se.append(se_arr[off])
-        for lst in (chroms, poss, refs, alts, zs, ses):
+            o_eaf.append(eaf_arr[off])
+        for lst in (chroms, poss, refs, alts, zs, ses, eafs):
             lst.clear()
 
     for assoc in reader.stream_associations():
@@ -262,40 +270,51 @@ def _resolve_column_hybrid(
         alts.append(assoc.alt)
         zs.append(assoc.z)
         ses.append(assoc.se)
+        eafs.append(float("nan") if assoc.eaf is None else assoc.eaf)
         if len(zs) >= _RESOLVE_BATCH:
             _flush()
     _flush()
 
     def _assemble(
-        parts_i: list[np.ndarray], parts_z: list[np.ndarray], parts_se: list[np.ndarray]
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        parts_i: list[np.ndarray],
+        parts_z: list[np.ndarray],
+        parts_se: list[np.ndarray],
+        parts_eaf: list[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if not parts_i:
             return (
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.float32),
                 np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.float32),
             )
-        idx, z, se = _dedup_last_wins(
-            np.concatenate(parts_i), np.concatenate(parts_z), np.concatenate(parts_se)
+        idx, z, se, eaf = _dedup_last_wins(
+            np.concatenate(parts_i),
+            np.concatenate(parts_z),
+            np.concatenate(parts_se),
+            np.concatenate(parts_eaf),
         )
-        return idx, z, _apply_se_divisor(se, se_divisor)
+        return idx, z, _apply_se_divisor(se, se_divisor), eaf
 
-    return _assemble(d_idx, d_z, d_se), _assemble(o_idx, o_z, o_se)
+    return (
+        _assemble(d_idx, d_z, d_se, d_eaf),
+        _assemble(o_idx, o_z, o_se, o_eaf),
+    )
 
 
 def _spill_hybrid_column(
     spill_dir: Path,
     col_idx: int,
-    dense: tuple[np.ndarray, np.ndarray, np.ndarray],
-    overflow: tuple[np.ndarray, np.ndarray, np.ndarray],
+    dense: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    overflow: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ) -> None:
     """Spill one resolved study column: dense rows to ``{col}.npz`` (the layout the
     dense band-writer consumes) and overflow to ``{col}.ovf.npz``."""
-    d_rows, d_z, d_se = dense
-    o_idx, o_z, o_se = overflow
+    d_rows, d_z, d_se, d_eaf = dense
+    o_idx, o_z, o_se, o_eaf = overflow
     for suffix, arrs in (
-        ("", {"rows": d_rows, "z": d_z, "se": d_se}),
-        (".ovf", {"variant_index": o_idx, "z": o_z, "se": o_se}),
+        ("", {"rows": d_rows, "z": d_z, "se": d_se, "eaf": d_eaf}),
+        (".ovf", {"variant_index": o_idx, "z": o_z, "se": o_se, "eaf": o_eaf}),
     ):
         final = spill_dir / f"{col_idx}{suffix}.npz"
         tmp = spill_dir / f"{col_idx}{suffix}.tmp.npz"
@@ -324,10 +343,17 @@ def _pass2_worker(task: tuple[int, str, float, str, str]) -> int:
 
 def _assemble_overflow_csr(
     spill_dir: Path, n_analyses: int
-) -> RaggedCSRWriter:
+) -> tuple[RaggedCSRWriter, np.ndarray]:
     """Assemble the overflow CSR from per-column ``.ovf.npz`` spills, in analysis
-    order (so CSR offsets align with analysis_index)."""
+    order (so CSR offsets align with analysis_index).
+
+    Also returns a per-column bool array saying which Analyses carried an EAF
+    into the *overflow* component. An Analysis can have EAF off-panel and none
+    on it, so `eaf_scope` is the union of this and the Dense Component's own
+    answer, never either alone (ADR 0036).
+    """
     csr = RaggedCSRWriter()
+    column_has_eaf = np.zeros(n_analyses, dtype=bool)
     for col in range(n_analyses):
         path = spill_dir / f"{col}.ovf.npz"
         if not path.exists():
@@ -341,12 +367,17 @@ def _assemble_overflow_csr(
             vi = data["variant_index"].astype(np.int32)
             z = data["z"].astype(np.float16)
             se = data["se"].astype(np.float16)
+            eaf = data["eaf"].astype(np.float32)
         # Sort by variant_index for consistent within-analysis ordering (matches
         # the ragged BESD builder and lets top-hit CSR cross-validation searchsort).
         order = np.argsort(vi, kind="stable")
-        csr.add_analysis(vi[order], z[order], se[order])
+        has_eaf = bool(np.isfinite(eaf).any())
+        column_has_eaf[col] = has_eaf
+        csr.add_analysis(
+            vi[order], z[order], se[order], eaf=eaf[order] if has_eaf else None
+        )
         path.unlink()
-    return csr
+    return csr, column_has_eaf
 
 
 # ── Public build entry point ─────────────────────────────────────────────────
@@ -500,19 +531,24 @@ def build_hybrid_from_vcf_manifest(
                     _pass2_spill_dir = None
 
             # Dense band-write (reuses the dense builder's band-streamer + top-hit harvest).
-            all_rows, all_cols, all_z, all_se = _write_dense_bands(
+            all_rows, all_cols, all_z, all_se, column_has_eaf = _write_dense_bands(
                 dense_staged, spill_dir, n_panel, n_analyses, effective_chunks, dtype, t2
             )
             log.info("Writing Dense Component top-hit index (%d candidates)", len(all_rows))
             write_top_hit_indexes(dense_dir, all_rows, all_cols, all_z, all_se)
+
+            # Overflow CSR assembly (reuses RaggedCSRWriter). Assembled before
+            # either analyses.tsv is written: `eaf_scope` is the union of what
+            # the two components stored, so neither can be stamped until both
+            # have been read (ADR 0036).
+            log.info("Assembling Ragged Overflow CSR from %d columns", n_analyses)
+            csr, overflow_has_eaf = _assemble_overflow_csr(spill_dir, n_analyses)
+            analyses = apply_eaf_scope(analyses, column_has_eaf | overflow_has_eaf)
+
             # manifest.json before analyses.tsv/overview.html: overview.html
             # reads manifest.json fresh from output_path for its header (ADR 0032).
             _write_dense_manifest(dense_staged, store_id, release_id, n_panel, n_analyses, chain_file, dtype)
             write_analyses_tsv(dense_dir, add_hit_counts(dense_dir, analyses))
-
-            # Overflow CSR assembly (reuses RaggedCSRWriter).
-            log.info("Assembling Ragged Overflow CSR from %d columns", n_analyses)
-            csr = _assemble_overflow_csr(spill_dir, n_analyses)
         finally:
             shutil.rmtree(spill_dir, ignore_errors=True)
 

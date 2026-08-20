@@ -46,6 +46,7 @@ _FULL_ANALYSIS = Analysis(
     sample_size="184305",
     n_cases="60801",
     n_controls="123504",
+    eaf_scope="association",
     license="CC0",
     publication_doi="10.1000/example",
     publication_pmid="12345678",
@@ -69,6 +70,8 @@ def test_analysis_model_has_no_retired_identifier_fields():
 
 
 def test_analysis_columns_match_the_adr_0035_order():
+    # `eaf_scope` joined the list in ADR 0036, between the sample-size
+    # interpretation columns and the effect-scale ones it sits alongside.
     assert ANALYSIS_COLUMNS == (
         "analysis_index",
         "analysis_id",
@@ -87,6 +90,7 @@ def test_analysis_columns_match_the_adr_0035_order():
         "sample_size",
         "n_cases",
         "n_controls",
+        "eaf_scope",
         "original_effect_scale",
         "original_sd",
         "original_sd_method",

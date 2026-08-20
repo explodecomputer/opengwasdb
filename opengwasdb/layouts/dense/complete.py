@@ -449,8 +449,10 @@ def _run_completion(
         union_alids_s = union_alids[o]
         union_rows_s = union_rows[o]
 
+        src_has_eaf = "eaf" in src_root
         effective_chunks = _create_completed_zarr(
-            staged, n_variants, n_analyses, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE
+            staged, n_variants, n_analyses, on_panel, DEFAULT_CHUNK_SHAPE, DEFAULT_DTYPE,
+            src_has_eaf=src_has_eaf,
         )
         band_rows = _completion_band_rows(effective_chunks)
         fill_shard_dir, quality_count = _shard_checkpoint_fills_by_band(
@@ -685,10 +687,12 @@ def _create_completed_zarr(
     on_panel: np.ndarray,
     chunk_shape: tuple[int, int],
     dtype: str,
+    src_has_eaf: bool = False,
 ) -> tuple[int, int]:
-    """Create empty z/se (NaN), imputed (0), and the 1-D on_panel datasets. The
-    matrices are filled by ``_write_completed_bands``; on_panel is small enough to
-    write in one shot."""
+    """Create empty z/se (NaN), imputed (0), and the 1-D on_panel datasets, plus
+    `eaf` when the observed store carried one (ADR 0036). The matrices are
+    filled by ``_write_completed_bands``; on_panel is small enough to write in
+    one shot."""
     effective_chunks = (min(chunk_shape[0], n_variants), min(chunk_shape[1], n_analyses))
     root = staged.arrays(mode="w")
     for name in ("z", "se"):
@@ -704,6 +708,15 @@ def _create_completed_zarr(
         "on_panel", data=on_panel.astype(np.uint8),
         chunks=(effective_chunks[0],), compressor=_COMPRESSOR, dtype="uint8",
     )
+    if src_has_eaf:
+        # float32, unlike z/se -- see `build_vcf.create_eaf_array` for why
+        # float16 cannot hold an EAF near 1 (ADR 0036). Created only when the
+        # observed store had one: completion adds panel rows, it does not
+        # invent frequencies the source never reported.
+        root.create_dataset(
+            "eaf", shape=(n_variants, n_analyses), chunks=effective_chunks,
+            compressor=_COMPRESSOR, dtype="float32", fill_value=float("nan"),
+        )
     root.attrs["layout"] = "dense"
     root.attrs["completion_state"] = "reference_completed"
     root.attrs["compressor"] = DEFAULT_COMPRESSOR
@@ -807,5 +820,21 @@ def _write_completed_bands(
                 sb[lr[fillable], ai[fillable]] = records["se"][fillable]
 
         se_arr[r0:r1] = sb
+
+    # Pass 3 -- eaf (ADR 0036). Observed frequencies carried across the row
+    # remap; imputed cells stay NaN, since the panel EAF is not yet carried
+    # through the completion checkpoint. Its own float32 buffer, because eaf
+    # cannot share z/se's float16 (see `build_vcf.create_eaf_array`).
+    if "eaf" in root and "eaf" in src_root:
+        eaf_arr, src_eaf = root["eaf"], src_root["eaf"]
+        eaf_band = np.empty((band_rows, n_analyses), dtype=np.float32)
+        for r0 in range(0, n_variants, band_rows):
+            r1 = min(r0 + band_rows, n_variants)
+            eb = eaf_band[: r1 - r0]
+            eb[:] = np.nan
+            valid = np.where(out_to_src[r0:r1] >= 0)[0]
+            if len(valid):
+                eb[valid, :] = src_eaf.oindex[out_to_src[r0:r1][valid], :].astype(np.float32)
+            eaf_arr[r0:r1] = eb
 
     return n_missing_off_panel, n_missing_imputation_failed, total_imputed

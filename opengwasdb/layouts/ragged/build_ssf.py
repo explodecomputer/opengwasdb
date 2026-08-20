@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -32,6 +33,7 @@ from opengwasdb.model.analyses import PassthroughMetadata, write_analysis_record
 from opengwasdb.model.enums import (
     AssociationCoverage,
     CompletionState,
+    EafScope,
     PrimaryStorageLayout,
     StoredEffectScale,
 )
@@ -136,8 +138,20 @@ def _read_manifest(manifest_path: str | Path, filtered_dir: str | Path) -> list[
     return rows
 
 
-def _read_filtered(path: Path) -> Iterator[tuple[CanonicalVariant, float, float, str | None]]:
-    """Yield (CanonicalVariant, z, se, rsid) for each usable row of a filtered file."""
+class _Assoc(NamedTuple):
+    """One usable source row, canonicalized: `z`/`eaf` are oriented to the
+    stored effect allele, so both follow the same flip (ADR 0036)."""
+
+    alid: str
+    z: float
+    se: float
+    eaf: float | None
+
+
+def _read_filtered(
+    path: Path,
+) -> Iterator[tuple[CanonicalVariant, float, float, str | None, float | None]]:
+    """Yield (CanonicalVariant, z, se, rsid, eaf) for each usable row of a filtered file."""
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -164,12 +178,30 @@ def _read_filtered(path: Path) -> Iterator[tuple[CanonicalVariant, float, float,
             # when `rsid` is absent (opengwasdb-stores' download-filter step selects
             # both columns when present).
             rsid = _opt(row.get("rsid")) or _opt(row.get("variant_id"))
-            yield ori.variant, z, se, rsid
+            eaf = _parse_eaf(row.get("effect_allele_frequency"))
+            if eaf is not None and ori.flipped:
+                # The column is the frequency of the source's effect allele;
+                # the flip made the *other* allele the stored one (ADR 0036).
+                eaf = 1.0 - eaf
+            yield ori.variant, z, se, rsid, eaf
+
+
+def _parse_eaf(value: str | None) -> float | None:
+    """A usable effect allele frequency, or None. Out-of-range and unparseable
+    values are None rather than clamped: a frequency outside [0, 1] is a
+    broken row, not a nearly-right one (ADR 0036)."""
+    if value is None or value.strip() in _MISSING:
+        return None
+    try:
+        eaf = float(value)
+    except ValueError:
+        return None
+    return eaf if np.isfinite(eaf) and 0.0 <= eaf <= 1.0 else None
 
 
 def _dedupe_per_analysis(
-    recs: list[tuple[str, float, float]],
-) -> tuple[list[tuple[str, float, float]], int, int]:
+    recs: list[_Assoc],
+) -> tuple[list[_Assoc], int, int]:
     """Resolve multiple source rows canonicalizing to the same variant within
     one analysis (issue #101): rows with identical (z, se) are a harmless
     duplicate submission and collapse to one; rows that disagree are dropped
@@ -179,27 +211,31 @@ def _dedupe_per_analysis(
     and when their canonicalized z-scores conflict there is no principled way
     to pick a winner from the data alone.
 
+    Agreement is judged on `(z, se)` alone. A duplicate pair that agrees on
+    the statistics but not on `eaf` is still one association -- the frequency
+    is annotation, not the finding -- so the first row's `eaf` is kept rather
+    than the cell being dropped over it (ADR 0036).
+
     Returns ``(deduped_recs, n_consistent_collapsed, n_conflicting_dropped)``.
     """
-    by_alid: dict[str, list[tuple[float, float]]] = {}
+    by_alid: dict[str, list[_Assoc]] = {}
     order: list[str] = []
-    for alid, z, se in recs:
-        if alid not in by_alid:
-            order.append(alid)
-        by_alid.setdefault(alid, []).append((z, se))
+    for rec in recs:
+        if rec.alid not in by_alid:
+            order.append(rec.alid)
+        by_alid.setdefault(rec.alid, []).append(rec)
 
-    out: list[tuple[str, float, float]] = []
+    out: list[_Assoc] = []
     n_consistent = 0
     n_conflicting = 0
     for alid in order:
         values = by_alid[alid]
         if len(values) == 1:
-            z, se = values[0]
-            out.append((alid, z, se))
+            out.append(values[0])
             continue
         first = values[0]
-        if all(v == first for v in values[1:]):
-            out.append((alid, first[0], first[1]))
+        if all((v.z, v.se) == (first.z, first.se) for v in values[1:]):
+            out.append(first)
             n_consistent += 1
         else:
             n_conflicting += 1
@@ -230,16 +266,16 @@ def build_ragged_from_ssf(
         analytes = _read_manifest(manifest_path, filtered_dir)
         print(f"Manifest: {len(analytes)} analyses")
 
-        # ── Pass 1: read every filtered file; collect per-analysis (alid,z,se) and
-        #            the global set of canonical variants ─────────────────────────
-        per_analysis: list[list[tuple[str, float, float]]] = []
+        # ── Pass 1: read every filtered file; collect per-analysis associations
+        #            and the global set of canonical variants ────────────────────
+        per_analysis: list[list[_Assoc]] = []
         alid_variant: dict[str, CanonicalVariant] = {}
         rsid_by_alid: dict[str, str] = {}
         for a in analytes:
-            recs: list[tuple[str, float, float]] = []
-            for variant, z, se, rsid in _read_filtered(a.filtered_path):
+            recs: list[_Assoc] = []
+            for variant, z, se, rsid, eaf in _read_filtered(a.filtered_path):
                 alid = variant.alid
-                recs.append((alid, z, se))
+                recs.append(_Assoc(alid, z, se, eaf))
                 if alid not in alid_variant:
                     alid_variant[alid] = variant
                     if rsid and rsid.startswith("rs"):
@@ -270,19 +306,35 @@ def build_ragged_from_ssf(
 
         # ── Stream per-analysis associations into the CSR store ──────────────────
         csr = RaggedCSRWriter()
+        eaf_scopes: list[str] = []
         for recs in per_analysis:
             if not recs:
                 csr.add_analysis(
                     np.empty(0, np.int32), np.empty(0, np.float16), np.empty(0, np.float16)
                 )
+                eaf_scopes.append(EafScope.ABSENT.value)
                 continue
             vi = np.fromiter(
-                (alid_to_idx[alid] for alid, _, _ in recs), dtype=np.int32, count=len(recs)
+                (alid_to_idx[r.alid] for r in recs), dtype=np.int32, count=len(recs)
             )
-            z_arr = np.fromiter((zz for _, zz, _ in recs), dtype=np.float16, count=len(recs))
-            se_arr = np.fromiter((ss for _, _, ss in recs), dtype=np.float16, count=len(recs))
+            z_arr = np.fromiter((r.z for r in recs), dtype=np.float16, count=len(recs))
+            se_arr = np.fromiter((r.se for r in recs), dtype=np.float16, count=len(recs))
+            eaf_arr = np.fromiter(
+                (np.nan if r.eaf is None else r.eaf for r in recs),
+                dtype=np.float32,
+                count=len(recs),
+            )
             order = np.argsort(vi, kind="stable")
-            csr.add_analysis(vi[order], z_arr[order], se_arr[order])
+            has_eaf = bool(np.isfinite(eaf_arr).any())
+            eaf_scopes.append(
+                EafScope.ASSOCIATION.value if has_eaf else EafScope.ABSENT.value
+            )
+            csr.add_analysis(
+                vi[order],
+                z_arr[order],
+                se_arr[order],
+                eaf=eaf_arr[order] if has_eaf else None,
+            )
         csr.flush(staged.path)
 
         build_ragged_top_hit_indexes(staged.path)
@@ -299,8 +351,9 @@ def build_ragged_from_ssf(
                 stored_effect_scale=stored_effect_scale,
                 assigned_ancestry=a.assigned_ancestry,
                 metadata=a.metadata,
+                eaf_scope=eaf_scope,
             )
-            for a in analytes
+            for a, eaf_scope in zip(analytes, eaf_scopes, strict=True)
         ]
         write_analysis_records(
             staged.path / "analyses.tsv", add_hit_counts(staged.path, analyses)

@@ -121,12 +121,21 @@ def _make_reader(task: _BlockTask):
             obs = src_csr.get_analysis(ai)
             obs_alid_to_z: dict[str, float] = {}
             obs_alid_to_se: dict[str, float] = {}
-            for vi_old, z_val, se_val in zip(
-                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
+            # Observed EAF carried across the rebuild (ADR 0036). Reference
+            # Completion adds panel rows to an Analysis; it does not change
+            # what the source reported for the rows it already had.
+            obs_alid_to_eaf: dict[str, float] = {}
+            for vi_old, z_val, se_val, eaf_val in zip(
+                obs.variant_index.tolist(),
+                obs.z.tolist(),
+                obs.se.tolist(),
+                obs.eaf.tolist(),
+                strict=True,
             ):
                 alid = src_alids[vi_old]
                 obs_alid_to_z[alid] = float(z_val)
                 obs_alid_to_se[alid] = float(se_val)
+                obs_alid_to_eaf[alid] = float(eaf_val)
 
             z_dense = np.array(
                 [obs_alid_to_z.get(a, float("nan")) if a is not None else float("nan")
@@ -497,6 +506,7 @@ def _run_completion(
         all_vi: list[np.ndarray] = []
         all_z: list[np.ndarray] = []
         all_se: list[np.ndarray] = []
+        all_eaf: list[np.ndarray] = []
         all_imp: list[np.ndarray] = []
         offsets: list[int] = [0]
         total_imputed = 0
@@ -515,18 +525,28 @@ def _run_completion(
                 all_vi.append(obs_vi_new)
                 all_z.append(obs_z)
                 all_se.append(obs_se)
+                all_eaf.append(np.asarray(obs.eaf, dtype=np.float32))
                 all_imp.append(np.zeros(len(obs_vi_new), dtype=np.uint8))
                 offsets.append(offsets[-1] + len(obs_vi_new))
                 continue
 
             obs_alid_to_z: dict[str, float] = {}
             obs_alid_to_se: dict[str, float] = {}
-            for vi_old, z_val, se_val in zip(
-                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
+            # Observed EAF carried across the rebuild (ADR 0036). Reference
+            # Completion adds panel rows to an Analysis; it does not change
+            # what the source reported for the rows it already had.
+            obs_alid_to_eaf: dict[str, float] = {}
+            for vi_old, z_val, se_val, eaf_val in zip(
+                obs.variant_index.tolist(),
+                obs.z.tolist(),
+                obs.se.tolist(),
+                obs.eaf.tolist(),
+                strict=True,
             ):
                 alid = src_alids[vi_old]
                 obs_alid_to_z[alid] = float(z_val)
                 obs_alid_to_se[alid] = float(se_val)
+                obs_alid_to_eaf[alid] = float(eaf_val)
 
             unique_ref_alids: list[str] = []
             seen_block_alids: set[str] = set()
@@ -541,6 +561,7 @@ def _run_completion(
             ref_vi: list[int] = []
             ref_z: list[float] = []
             ref_se: list[float] = []
+            ref_eaf: list[float] = []
             ref_imp: list[int] = []
             seen_alids: set[str] = set()
             for alid in unique_ref_alids:
@@ -552,40 +573,53 @@ def _run_completion(
                     ref_vi.append(vi)
                     ref_z.append(obs_alid_to_z[alid])
                     ref_se.append(obs_alid_to_se[alid])
+                    ref_eaf.append(obs_alid_to_eaf[alid])
                     ref_imp.append(0)
                 elif alid in fills_here:
                     z_v, se_v = fills_here[alid]
                     ref_vi.append(vi)
                     ref_z.append(z_v)
                     ref_se.append(se_v)
+                    # Imputed cells carry no EAF yet -- the panel's own EAF is
+                    # available here but is not written until the completion
+                    # checkpoint format carries it (ADR 0036, deferred half).
+                    ref_eaf.append(float("nan"))
                     ref_imp.append(1)
                     total_imputed += 1
                 else:
                     ref_vi.append(vi)
                     ref_z.append(float("nan"))
                     ref_se.append(float("nan"))
+                    ref_eaf.append(float("nan"))
                     ref_imp.append(0)
                     total_missing += 1
 
-            for vi_old, z_val, se_val in zip(
-                obs.variant_index.tolist(), obs.z.tolist(), obs.se.tolist(), strict=True
+            for vi_old, z_val, se_val, eaf_val in zip(
+                obs.variant_index.tolist(),
+                obs.z.tolist(),
+                obs.se.tolist(),
+                obs.eaf.tolist(),
+                strict=True,
             ):
                 alid = src_alids[vi_old]
                 if alid not in seen_alids:
                     ref_vi.append(new_alid_to_idx[alid])
                     ref_z.append(float(z_val))
                     ref_se.append(float(se_val))
+                    ref_eaf.append(float(eaf_val))
                     ref_imp.append(0)
 
             order = np.argsort(ref_vi)
             vi_arr = np.array(ref_vi, dtype=np.int32)[order]
             z_arr = np.array(ref_z, dtype=np.float16)[order]
             se_arr = np.array(ref_se, dtype=np.float16)[order]
+            eaf_arr = np.array(ref_eaf, dtype=np.float32)[order]
             imp_arr = np.array(ref_imp, dtype=np.uint8)[order]
 
             all_vi.append(vi_arr)
             all_z.append(z_arr)
             all_se.append(se_arr)
+            all_eaf.append(eaf_arr)
             all_imp.append(imp_arr)
             offsets.append(offsets[-1] + len(vi_arr))
 
@@ -605,6 +639,7 @@ def _run_completion(
         vi_all = np.concatenate(all_vi) if all_vi else np.empty(0, dtype=np.int32)
         z_all = np.concatenate(all_z) if all_z else np.empty(0, dtype=np.float16)
         se_all = np.concatenate(all_se) if all_se else np.empty(0, dtype=np.float16)
+        eaf_all = np.concatenate(all_eaf) if all_eaf else np.empty(0, dtype=np.float32)
         imp_all = np.concatenate(all_imp) if all_imp else np.empty(0, dtype=np.uint8)
 
         ragged_path = staged.path / RAGGED_ZARR_PATH
@@ -628,6 +663,13 @@ def _run_completion(
             "imputed", data=imp_all, chunks=(_ASSOC_CHUNK,),
             compressor=_COMPRESSOR, dtype=np.uint8,
         )
+        # Only when the observed store had EAF: a completed store must not
+        # gain an all-NaN array its source never had (ADR 0036).
+        if np.isfinite(eaf_all).any():
+            root.create_dataset(
+                "eaf", data=eaf_all, chunks=(_ASSOC_CHUNK,),
+                compressor=_COMPRESSOR, dtype=np.float32,
+            )
         root.attrs["layout"] = "ragged"
         root.attrs["completion_state"] = "reference_completed"
         root.attrs["n_analyses"] = n_analyses

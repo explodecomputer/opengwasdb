@@ -112,7 +112,7 @@ def test_cli_query_defaults_to_resolved_tsv(tmp_path, source_path):
     assert all(len(line.split("\t")) == 11 for line in range_lines)
 
 
-def test_cli_query_variant_info_flag_adds_rsid_column(tmp_path, source_path):
+def test_cli_query_variant_info_flag_adds_rsid_and_eaf_columns(tmp_path, source_path):
     runner = CliRunner()
     store_path = tmp_path / "cli-store.opengwasdb"
     build = runner.invoke(
@@ -133,9 +133,12 @@ def test_cli_query_variant_info_flag_adds_rsid_column(tmp_path, source_path):
     header, *rows = [line.split("\t") for line in with_it.output.strip("\n").split("\n")]
     assert header == [
         "analysis_id", "analysis_label", "rsid", "chromosome", "position", "alid",
-        "effect_allele", "other_allele", "z", "se", "p", "association_status",
+        "effect_allele", "other_allele", "z", "se", "p", "eaf", "association_status",
     ]
     assert all(row[2] == "rs1" for row in rows)
+    # This fixture's source has no allele frequency, so eaf is the store's own
+    # missing marker rather than a fabricated value (ADR 0036).
+    assert all(row[11] == "." for row in rows)
 
 
 def test_cli_regenerate_overview_rewrites_from_persisted_data_only(tmp_path, source_path):

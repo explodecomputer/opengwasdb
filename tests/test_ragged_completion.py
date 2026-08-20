@@ -312,6 +312,70 @@ class TestCompletionFiles:
             obs_ax.close()
             comp_ax.close()
 
+    def test_completion_does_not_lose_observed_eaf(self, tmp_path, ld_panel):
+        """Completion rewrites the CSR, so observed EAF has to be carried across
+        it explicitly (ADR 0036) -- the same way rsids do (issue #109). The BESD
+        fixture has no frequencies at all, so this builds an SSF store that
+        does, rather than asserting a vacuous equality on empty arrays."""
+        import gzip
+
+        from opengwasdb.layouts.ragged.build_ssf import build_ragged_from_ssf
+        from opengwasdb.layouts.ragged.zarr_csr import RaggedCSRReader
+
+        filtered_dir = tmp_path / "filtered"
+        filtered_dir.mkdir()
+        with gzip.open(filtered_dir / "a.tsv.gz", "wt", encoding="utf-8") as fh:
+            fh.write(
+                "chromosome\tbase_pair_location\teffect_allele\tother_allele"
+                "\tbeta\tstandard_error\teffect_allele_frequency\n"
+            )
+            fh.write("1\t1000000\tA\tG\t0.1\t0.02\t0.3\n")
+            fh.write("1\t1100000\tC\tT\t-0.2\t0.03\t0.45\n")
+        manifest = tmp_path / "ssf_manifest.tsv"
+        manifest.write_text(
+            "analysis_index\tanalysis_id\tfiltered_file\tn\tassigned_ancestry\n"
+            "0\tanalysis_a\ta.tsv.gz\t1000\tEUR\n",
+            encoding="utf-8",
+        )
+        observed = tmp_path / "ssf_obs.opengwasdb"
+        build_ragged_from_ssf(manifest, filtered_dir, observed, store_id="t", release_id="obs")
+
+        obs_reader = RaggedCSRReader(observed)
+        observed_eaf = {
+            int(vi): float(e)
+            for vi, e in zip(
+                obs_reader.get_analysis(0).variant_index,
+                obs_reader.get_analysis(0).eaf,
+                strict=True,
+            )
+            if np.isfinite(e)
+        }
+        assert observed_eaf, "fixture must carry EAF for this to mean anything"
+
+        completed = tmp_path / "ssf_comp.opengwasdb"
+        complete_ragged_store(
+            observed, completed, ld_panel,
+            ancestry="EUR", cis_window_bp=500_000, min_cor=0.0, release_id="comp",
+        )
+
+        from opengwasdb.variants.axis import VariantAxis
+
+        obs_axis, comp_axis = VariantAxis(observed), VariantAxis(completed)
+        try:
+            obs_alid = {r.variant_index: r.alid for r in obs_axis.all()}
+            comp_alid = {r.variant_index: r.alid for r in comp_axis.all()}
+        finally:
+            obs_axis.close()
+            comp_axis.close()
+
+        comp = RaggedCSRReader(completed).get_analysis(0)
+        completed_eaf = {
+            comp_alid[int(vi)]: float(e)
+            for vi, e in zip(comp.variant_index, comp.eaf, strict=True)
+            if np.isfinite(e)
+        }
+        assert completed_eaf == {obs_alid[vi]: e for vi, e in observed_eaf.items()}
+
     def test_completion_quality_table_exists(self, completed_store):
         import sqlite3
         conn = sqlite3.connect(str(completed_store / "index.sqlite"))

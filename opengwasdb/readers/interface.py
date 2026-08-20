@@ -37,7 +37,10 @@ class ReaderAssociation:
 
     `ref`/`alt` are the source's own allele labelling, not reordered to
     canonical A1/A2 -- `z` is already sign-corrected to the A1 = min(ref, alt)
-    convention every reader in this package follows. There is no
+    convention every reader in this package follows. `eaf` follows `z`: it is
+    the frequency of the *stored* effect allele, so a reader that negated `z`
+    also stores `1 - af` (ADR 0036). None where the source reports no usable
+    frequency -- never fabricated, and never a substitute 0.5. There is no
     `analysis_id`: a source file may cover one Analysis (GWAS-VCF) or many (a
     multi-analysis tabular file), so identity assignment stays the caller's
     responsibility. `stored_effect_scale` is likewise never derived from the
@@ -53,10 +56,13 @@ class ReaderAssociation:
     z: float
     se: float
     stored_effect_scale: StoredEffectScale
+    eaf: float | None = None
 
     def __post_init__(self) -> None:
         if self.se < 0:
             raise ValueError(f"se must be non-negative, got {self.se!r}")
+        if self.eaf is not None and not 0.0 <= self.eaf <= 1.0:
+            raise ValueError(f"eaf must be in [0, 1], got {self.eaf!r}")
 
 
 @dataclass(frozen=True)

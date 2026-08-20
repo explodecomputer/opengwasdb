@@ -735,10 +735,11 @@ _VARIANT_INFO_OPTION = typer.Option(
     False,
     "--variant-info",
     help=(
-        "Include extra per-variant columns (currently: rsid) in tsv output. Off by "
+        "Include extra per-variant columns (rsid, eaf) in tsv output. Off by "
         "default: unlike chromosome/position/alleles (derived for free from the "
-        "alid), these fields aren't derivable in-store and cost an extra "
-        "variants.tsv.gz lookup that can dominate query time on a large result."
+        "alid), rsid isn't derivable in-store and costs an extra variants.tsv.gz "
+        "lookup that can dominate query time on a large result; eaf is free to "
+        "resolve but is '.' throughout for a store that carries none."
     ),
 )
 
@@ -876,6 +877,7 @@ _TSV_COLUMNS_WITH_VARIANT_INFO = (
     "z",
     "se",
     "p",
+    "eaf",
     "association_status",
 )
 
@@ -900,7 +902,9 @@ def _emit_tsv(
     # up front. rsid is the one identity field not derivable from the alid
     # (VariantAxis.identity_by_indices()), so it's the only part of this
     # join that still needs a variants.tsv.gz lookup -- resolve() only pays
-    # for it when include_variant_info is set (issue #104 follow-up).
+    # for it when include_variant_info is set (issue #104 follow-up). eaf
+    # rides the same flag (ADR 0036) but costs nothing: it came back in the
+    # query result itself.
     writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
     writer.writerow(_TSV_COLUMNS_WITH_VARIANT_INFO if include_variant_info else _TSV_COLUMNS)
     for row in query.resolve(result, include_variant_info=include_variant_info):
@@ -919,4 +923,7 @@ def _emit_tsv(
         ]
         if include_variant_info:
             fields.insert(2, row["rsid"])
+            eaf = row["eaf"]
+            # Before association_status, which stays the last column.
+            fields.insert(-1, eaf if isinstance(eaf, str) else f"{eaf:.6g}")
         writer.writerow(fields)

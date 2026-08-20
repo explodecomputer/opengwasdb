@@ -608,14 +608,15 @@ def test_match_batch_handles_an_empty_lookup_without_crashing():
     on a zero-length array raised IndexError before this guard)."""
     from opengwasdb.layouts.dense.build_vcf import _match_batch
 
-    rows, z, se = _match_batch(
-        ["1"], [100], ["A"], ["G"], [1.0], [0.5],
+    rows, z, se, eaf = _match_batch(
+        ["1"], [100], ["A"], ["G"], [1.0], [0.5], [float("nan")],
         keys_sorted=np.empty(0, dtype="S1"), rows_sorted=np.empty(0, dtype=np.int32),
     )
 
     assert len(rows) == 0
     assert len(z) == 0
     assert len(se) == 0
+    assert len(eaf) == 0
 
 
 def test_liftover_failure_threshold_scoped_to_hg19_group_not_diluted_by_hg38_rows(tmp_path):
@@ -859,7 +860,7 @@ class TestForkSafeLookup:
                 "1\t200\t.\tA\tG\t.\tPASS\t.\tES:SE\t3.0:0.5\n",  # z=6.0, flip → -6.0 (later)
             ],
         )
-        r, z, _se = _resolve_column(str(vcf), keys, rows)
+        r, z, _se, _eaf = _resolve_column(str(vcf), keys, rows)
         assert r.tolist() == [0]
         assert z[0] == pytest.approx(-6.0, rel=5e-3)  # last occurrence wins
 
@@ -882,7 +883,7 @@ class TestForkSafeLookup:
                 "1\t200\t.\tA\tG\t.\tPASS\t.\tES:SE\t2.0:0.5\n",  # ABSENT → dropped
             ],
         )
-        r, _z, _se = _resolve_column(str(vcf), keys, rows)
+        r, _z, _se, _eaf = _resolve_column(str(vcf), keys, rows)
         assert r.tolist() == [0]  # only the in-panel variant, no mis-map to row 1
 
     def test_batched_matches_whole_file(self, tmp_path, monkeypatch):
@@ -914,7 +915,7 @@ class TestForkSafeLookup:
 
         for a, b in zip(whole, batched, strict=True):
             np.testing.assert_array_equal(a, b)
-        r, z, _se = batched
+        r, z, _se, _eaf = batched
         assert sorted(r.tolist()) == [0, 1]
         # row 0 kept the later (pos 200) occurrence: z=6.0 flipped to -6.0
         assert z[r.tolist().index(0)] == pytest.approx(-6.0, rel=5e-3)
