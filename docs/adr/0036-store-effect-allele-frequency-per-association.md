@@ -1,5 +1,13 @@
 # Store effect allele frequency as a per-association array, per-Analysis opt-in
 
+> **Partly superseded by [ADR 0037](0037-statistic-array-encodings.md).** The
+> semantics below stand — EAF is per (variant, Analysis), oriented to the
+> stored effect allele, declared per Analysis by `eaf_scope`. Decision 3
+> (`float32`) is replaced by a per-variant baseline plus an `int8` log-residual
+> (#116), and Decision 5's deferral of imputed-cell EAF no longer applies:
+> panel EAF is a per-variant constant, so it never needs to travel through the
+> completion checkpoint (#113, #116).
+
 Implements store-format spec §9 ("EAF and INFO metadata"), which has declared
 an EAF contract since v0.1 without any layout ever storing one. Additive: a
 Store Release that stores no EAF is unchanged by this decision.
