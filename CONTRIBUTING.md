@@ -257,6 +257,33 @@ If a change touches the CLI surface or a manifest column, either update the
 sibling repository in the same piece of work or open an issue there before
 merging. Do not merge and intend to come back.
 
+### Enforced by CI
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `dev`
+or `main`:
+
+| check | script | fails when |
+|---|---|---|
+| tooling baselines | `scripts/check_baselines.py` | ruff or mypy findings exceed `.baselines.json` |
+| tests | `pixi run -e dev test` | any test fails |
+| changelog | `scripts/check_changelog.py` | a PR changes `opengwasdb/` without touching the `Unreleased` section |
+
+The changelog check compares the *extracted* `Unreleased` section before and
+after, so editing an older entry does not satisfy it. Apply the
+**`no-changelog`** label to a pull request whose change genuinely has no
+user-visible effect.
+
+Both scripts run locally:
+
+```bash
+pixi run -e dev python scripts/check_baselines.py
+pixi run -e dev python scripts/check_changelog.py --base-ref origin/dev
+```
+
+CI checks counts, not diffs — it catches a regression but not a change that
+fixes one finding while adding another. The diff recipe above remains the
+right local check.
+
 ### Before merging `dev` to `main`
 
 - [ ] `CHANGELOG.md` `Unreleased` covers every user-visible change, with a row

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: tests, lint, typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          environments: dev
+          cache: true
+
+      # Baselines before tests: a lint or type regression is cheaper to read
+      # than a test failure caused by one.
+      - name: Tooling baselines
+        run: pixi run -e dev python scripts/check_baselines.py
+
+      - name: Tests
+        run: pixi run -e dev test
+
+  changelog:
+    name: changelog entry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'no-changelog')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The gate diffs against the merge base, which needs real history.
+          fetch-depth: 0
+
+      - name: Unreleased section updated alongside source changes
+        run: |
+          git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+          python scripts/check_changelog.py \
+            --base-ref "origin/${{ github.event.pull_request.base.ref }}"

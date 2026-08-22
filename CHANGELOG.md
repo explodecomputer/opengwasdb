@@ -13,6 +13,14 @@ the end of this file.
 Work lands on `dev` and appears here under *Unreleased* until `dev` merges to
 `main`, at which point it is cut into a version.
 
+### Added
+
+- CI (`.github/workflows/ci.yml`): tests, tooling baselines, and a changelog
+  gate on every pull request and push to `dev`/`main`. The repository had no CI
+  at all before this.
+- A pull-request template carrying the correctness, test and documentation
+  checklists from `CONTRIBUTING.md`.
+
 ### Changed
 
 - `CONTRIBUTING.md` gains a Documentation section: what goes stale, what
