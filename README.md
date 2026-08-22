@@ -17,11 +17,21 @@ For the broader OpenGWAS platform direction, see [docs/opengwas-roadmap.md](./do
 
 ## Repository status
 
-This repository is newly scaffolded. The design baseline lives in:
+Pre-release, working toward a release candidate (see
+[Roadmap 1](https://github.com/opengwas/opengwasdb/issues/88)). Dense, Ragged
+and Hybrid layouts build, query, validate and reference-complete; the store
+format is not yet stable and existing Store Releases will need rebuilding
+before the candidate — see [CHANGELOG.md](./CHANGELOG.md) for what changed and
+what is known to be missing.
 
-- [CONTEXT.md](./CONTEXT.md)
-- [docs/spec/store-format.md](./docs/spec/store-format.md)
-- [docs/adr/](./docs/adr/)
+The design baseline lives in:
+
+- [CONTEXT.md](./CONTEXT.md) — domain glossary; the authority on vocabulary
+- [docs/spec/store-format.md](./docs/spec/store-format.md) — the store contract
+- [docs/adr/](./docs/adr/) — decisions and their consequences
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — how work moves through the repository
+
+Work lands on `dev`; every merge to `main` cuts a tagged version.
 
 ## Development
 

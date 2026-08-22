@@ -13,6 +13,19 @@ the end of this file.
 Work lands on `dev` and appears here under *Unreleased* until `dev` merges to
 `main`, at which point it is cut into a version.
 
+### Changed
+
+- `CONTRIBUTING.md` gains a Documentation section: what goes stale, what
+  regenerates it, that benchmark numbers are re-run rather than edited, that
+  `opengwasdb-stores` holds docs depending on this package's CLI surface, and
+  a pre-merge checklist.
+
+### Fixed
+
+- `benchmarks/README.md` documented seven commands as `uv run`, which stopped
+  working when the project moved to Pixi.
+- `README.md` described a two-month-old codebase as "newly scaffolded".
+
 ## [0.2.0] — 2026-08-22
 
 The first tagged version. `0.1.0` was the placeholder the project carried from

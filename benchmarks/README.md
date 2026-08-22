@@ -24,15 +24,15 @@ besdq repo at `/home/gh13047/repo/besdq/`.
 | `besdq_ukb_chr1_benchmark.json` | besdq baseline (copied from besdq repo) |
 | `opengwasdb_vcf_ukb_chr1_benchmark.qmd` | Per-run standalone QMD |
 
-**Usage** (run from the repo root — uses this repo's own `uv`-managed environment,
-no separate conda env required):
+**Usage** (run from the repo root — uses this repo's Pixi-managed `dev`
+environment, no separate conda env required):
 
 ```bash
 # First run — build the store and benchmark (takes ~10 min)
-uv run python benchmarks/benchmark_vcf_ukb_chr1_dense.py --rebuild --reps 10
+pixi run -e dev python benchmarks/benchmark_vcf_ukb_chr1_dense.py --rebuild --reps 10
 
 # Subsequent runs — reuse existing store, re-benchmark only
-uv run python benchmarks/benchmark_vcf_ukb_chr1_dense.py --reps 10
+pixi run -e dev python benchmarks/benchmark_vcf_ukb_chr1_dense.py --reps 10
 ```
 
 The `--row-baseline` flag accepts a path to an earlier JSON to show speedup ratios:
@@ -63,10 +63,10 @@ the source manifest, so the same script can produce the 128-analysis and
 **Usage**:
 
 ```bash
-uv run python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py \
+pixi run -e dev python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py \
   --analysis-count 128 --rebuild --reps 10
 
-uv run python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py \
+pixi run -e dev python benchmarks/benchmark_vcf_ukb_chr1_1000_dense.py \
   --analysis-count 1000 --rebuild --reps 10
 ```
 
@@ -89,13 +89,13 @@ Defaults to the pre-built eqtlgen-cis store.
 
 ```bash
 # Benchmark existing store (no rebuild)
-uv run python benchmarks/benchmark_ragged_besd.py --reps 5
+pixi run -e dev python benchmarks/benchmark_ragged_besd.py --reps 5
 
 # Force a full rebuild then benchmark
-uv run python benchmarks/benchmark_ragged_besd.py --rebuild --reps 5
+pixi run -e dev python benchmarks/benchmark_ragged_besd.py --rebuild --reps 5
 
 # Use a different BESD source (e.g. hg19 with liftover)
-uv run python benchmarks/benchmark_ragged_besd.py \
+pixi run -e dev python benchmarks/benchmark_ragged_besd.py \
     --besd /path/to/prefix \
     --store /path/to/out.opengwasdb \
     --source-build hg19 \
