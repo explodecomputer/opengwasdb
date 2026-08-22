@@ -15,7 +15,6 @@ Work lands on `dev` and appears here under *Unreleased* until `dev` merges to
 
 ### Added
 
-- temporary entry proving the changelog gate accepts an Unreleased edit
 - CI (`.github/workflows/ci.yml`): tests, tooling baselines, and a changelog
   gate on every pull request and push to `dev`/`main`. The repository had no CI
   at all before this.
