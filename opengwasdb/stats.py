@@ -69,3 +69,5 @@ def finite_pair(z: float, se: float) -> bool:
     """True when both canonical statistics are finite and therefore queryable."""
 
     return math.isfinite(z) and math.isfinite(se)
+
+# temporary: verifying the CHANGELOG CI gate; this branch is not for merge
