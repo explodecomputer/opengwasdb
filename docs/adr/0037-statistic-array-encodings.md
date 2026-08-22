@@ -22,25 +22,56 @@ raw size is not what a Store Release occupies.
 because p-value error scales with `z · Δz`. `float16` gives the opposite:
 precision degrades exactly where p-values are steepest.
 
-| z | float16 step | stored p uncertain by |
-|---|---|---|
-| 5.0 | 0.0039 | 1.02× |
-| 30.0 | 0.0156 | 1.60× |
-| 47.8 | 0.0312 | **4.45×** |
+Three different quantities get confused here, so they are named separately
+throughout (a first draft of this ADR conflated them — see the correction note
+at the end):
 
-The largest |z| observed across the FinnGen, metabolome and pQTL pilots is
-48.4, and the codebase already documents a FADS1/FADS2 hit at 47.8 — so this
-is not a theoretical tail, it is the top of the existing data.
+- **worst-case error** — the largest p error any value can suffer under
+  round-to-nearest, i.e. from half a quantisation step;
+- **actual error** — what a specific value suffers;
+- **bin width** — the p ratio between the two ends of one quantisation
+  interval, which is *not* an error bound.
 
-| encoding | B/cell | max \|Δz\| | worst p error |
+For `float16`, whose step doubles with magnitude:
+
+| z | float16 step | worst-case p error | actual for this z |
 |---|---|---|---|
-| float16 | 1.85 | 0.0125 | 1.8× |
-| **int16, scale 1/512** | **1.47** | 0.0010 | **1.02×** |
-| int8 | 0.47 | 0.25 | 14,500× |
+| 5.0 | 0.0039 | 1.010× | 1.000× |
+| 30.0 | 0.0156 | 1.264× | 1.000× |
+| 47.8 | 0.0312 | 2.110× | 1.818× |
+| 137.5 | 0.1250 | 5,400× | 1.000× |
 
-Fixed-point int16 is smaller *and* 16× more accurate. Smaller because
-bitshuffle groups the near-constant high bytes of a bounded quantity, where
-float16's exponent bits churn for the small values that dominate.
+The tail is not theoretical. A survey of the `ukb-b` store's top-hit index
+(9.85M variants × 2,514 analyses; the index holds every |z| ≥ 3.48, so these
+counts are exact for the whole store) gives:
+
+| | |
+|---|---|
+| max \|z\| | **137.5** |
+| p99 / p99.9 / p99.99 | 10.8 / 20.1 / 37.3 |
+| \|z\| > 32 / 48 / 64 / 100 | 6,346 / 1,760 / 568 / 136 |
+| non-finite | 0 |
+
+The extremes are genuine, not malformed: the largest are HERC2/OCA2
+(`15:28120472`, ukb-b-19560) and the MC1R region (`16:89.7–89.9Mb`,
+ukb-b-533) — the classic pigmentation loci, with plausible SEs around 0.0015
+and betas of 0.2–0.43.
+
+So `z` is **not** bounded at 64, and a build limit there would reject 568 real
+associations in a store this project already holds.
+
+| encoding | B/cell | worst-case p error at z=30 |
+|---|---|---|
+| float16 | 1.85 | 26.4% |
+| **int16 fixed 1/1024 + overflow table** | **~1.47** | **1.5%** |
+| int8 | 0.47 | unusable |
+
+Fixed-point int16 is smaller *and* substantially more accurate — smaller
+because bitshuffle groups the near-constant high bytes of a bounded quantity,
+where float16's exponent bits churn for the small values that dominate.
+Accuracy no longer degrades with magnitude, and values outside the
+representable range are held exactly in a sparse table rather than clipped or
+rejected.
 
 ### `float16` is the *right* encoding for `se`
 
@@ -86,12 +117,40 @@ have caught it, because until ADR 0036 no store retained EAF at all. See #115.
 
 ## Decision
 
-### 1. `z` is `int16` fixed-point at scale 1/512
+### 1. `z` is `int16` fixed-point plus a sparse exact overflow table
 
-Range |z| ≤ 64, uniform step 0.00195, p accurate to 1.02% throughout. A build
-encountering |z| > 64 fails loudly rather than clipping: silently flattening
-the most significant association in a store is precisely the failure mode this
-project has spent a release stage eliminating.
+Default scale 1/1024 — recorded in the plan, not hard-coded, so it can be
+chosen per store from measured data like every other parameter here.
+
+Two codes are reserved, because **an integer array cannot hold NaN and the
+missing-cell contract currently depends on it** (store-format §15; ADR 0013
+derives Association Status from paired Z/SE NaNs):
+
+| code | meaning |
+|---|---|
+| `-32768` | missing — decodes to NaN, and the paired `se` must also be NaN |
+| `-32767` | out of range — exact `float32` in the overflow table |
+| `-32766 … 32767` | z × 1024, i.e. −31.998 … +31.999 |
+
+The representable interval is deliberately stated as exact endpoints rather
+than "±32": signed fixed point is asymmetric, and reserving codes makes it
+more so.
+
+Measured overflow cost on `ukb-b`, the largest store available:
+
+| scale | range | overflow cells (of 24.8e9) | table | worst-case p error at range edge |
+|---|---|---|---|---|
+| 1/512 | ±64 | 572 | 7 KB | 6.4% |
+| **1/1024** | **±32** | **6,346** | **74 KB** | **1.6%** |
+| 1/2048 | ±16 | 95,558 | 1.1 MB | 0.8% |
+
+1/1024 is the default: a 74 KB side table against a multi-gigabyte store, with
+worst-case p error of 1.6% at the range edge and 0.24% at z = 5, against
+`float16`'s 26.4% at z = 30.
+
+**A build fails only on non-finite or malformed statistics, never on a
+legitimate strong association.** The earlier draft of this ADR proposed failing
+at |z| > 64; the `ukb-b` survey shows that would reject real pigmentation hits.
 
 `se` stays `float16`. Both choices follow from the shape of the quantity, not
 from a general preference for integers.
@@ -112,10 +171,15 @@ than inferring it from the layout. Nothing stops a Dense manifest spanning
 several cohorts, and a store that did would silently clip against a range
 chosen on the assumption it did not.
 
-| case | range | B/cell | clipped | p99 error |
+| range | step (log) | **worst-case** error | B/cell | measured clipping |
 |---|---|---|---|---|
-| one cohort (Dense/Ragged) | ±0.5 | 0.14 | 1 in 2M | 0.18% |
-| many studies (Hybrid) | ±1.0 | 0.52 | 0.11% | 0.39% |
+| ±0.5 | 0.00395 | 0.20% | 0.14 (one cohort) | 1 in 2M |
+| ±1.0 | 0.00791 | 0.40% | 0.52 (mixed studies) | 0.11% |
+| ±2.0 | 0.01581 | **0.79%** | 0.39 | 0.07% |
+
+253 levels across a width of 2·range, so accuracy is a function of the range
+chosen — a fixed "within 0.5%" acceptance criterion is unsatisfiable at ±2.0
+and must be stated per range.
 
 ### 3. `se` may be coded as an `int8` residual, but only where every Analysis has EAF
 
@@ -192,3 +256,30 @@ to 3000× in magnitude but not in direction.
 - **`EafScope.VARIANT` stays reserved and unimplemented.** The measurements
   rule out collapsing per-Analysis EAF to one value per variant: no variant in
   either single-cohort pilot has identical EAF across analyses.
+- **The missing-cell contract changes.** Store-format §15 currently *requires*
+  paired Z/SE NaNs, which an integer Z array cannot express. §15 needs revising
+  to define missingness in terms of each plane's declared codec, with
+  validation checking that the Z sentinel and the SE NaN agree — the same
+  invariant, expressed through the plan rather than through a dtype.
+- **Derived indexes stay decoded.** Top-hit indexes and the Rho matrix hold
+  their own small copies of Z/SE. They remain `float32` artifacts, explicitly
+  rebuildable from the encoded planes, rather than being re-encoded too — the
+  duplication is small and the alternative multiplies the number of decode
+  sites for no saving.
+
+## Correction note
+
+A first draft of this ADR, and issues #114/#116 as originally filed, carried
+three errors caught in review of #119:
+
+1. **The `z` precision claim was wrong.** "p accurate to 1.02%" conflated an
+   empirical figure on sampled data with a worst-case bound. At scale 1/512 the
+   worst case is 4.8% at z = 47.8 and 6.4% at z = 64. The "4.45×" attributed to
+   `float16` was the width of a quantisation bin, not a rounding error; the
+   actual error for 47.8 is 1.82× and the worst case is 2.11×. The conclusion —
+   fixed point is substantially better — survives; the numbers did not.
+2. **The |z| ≤ 64 bound was unjustified**, and the survey above shows it is
+   wrong: 568 genuine associations in `ukb-b` exceed it. Replaced by an
+   overflow table.
+3. **The decision tree was not executable**, and integer planes had no
+   missing-value contract at all. Both are addressed above.
