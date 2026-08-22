@@ -20,6 +20,8 @@ Work lands on `dev` and appears here under *Unreleased* until `dev` merges to
   at all before this.
 - A pull-request template carrying the correctness, test and documentation
   checklists from `CONTRIBUTING.md`.
+- `CLAUDE.md` — a short orientation file for AI coding sessions, pointing at the
+  same standards rather than restating them.
 
 ### Changed
 
